@@ -1,0 +1,298 @@
+SUPABASE SETUP ON THE LINUX LAPTOP
+Road Quality Mapper - EE475 Team 5
+==================================================================
+
+These steps assume Ubuntu/Debian. Other distros work too; only the package commands change.
+Supabase runs in Docker containers, managed by the Supabase CLI.
+
+Anything in <angle brackets> is a placeholder you fill in.
+
+
+------------------------------------------------------------------
+STEP 1 - Prepare the laptop
+------------------------------------------------------------------
+
+    sudo apt update && sudo apt upgrade -y
+    sudo apt install -y git curl ca-certificates postgresql-client
+
+(postgresql-client gives you `psql`, which is handy for loading SQL files.)
+
+The laptop is acting as a server, so stop it from sleeping when the lid closes:
+
+    sudo nano /etc/systemd/logind.conf
+        # set these lines (remove the leading #):
+        HandleLidSwitch=ignore
+        HandleLidSwitchExternalPower=ignore
+    sudo systemctl restart systemd-logind
+
+Also turn off automatic suspend in Settings > Power.
+
+
+------------------------------------------------------------------
+STEP 2 - Install Docker
+------------------------------------------------------------------
+
+    curl -fsSL https://get.docker.com | sudo sh
+    sudo usermod -aG docker $USER
+
+Log out and back in (or reboot) so the group change applies, then check it:
+
+    docker run hello-world
+
+You should see "Hello from Docker!". If you get "permission denied", you haven't
+logged out and back in yet.
+
+Make Docker start on boot:
+
+    sudo systemctl enable docker
+
+
+------------------------------------------------------------------
+STEP 3 - Install the Supabase CLI
+------------------------------------------------------------------
+
+Download the latest Linux release and put it on your PATH:
+
+    cd /tmp
+    curl -LO https://github.com/supabase/cli/releases/latest/download/supabase_linux_amd64.tar.gz
+    tar -xzf supabase_linux_amd64.tar.gz
+    sudo mv supabase /usr/local/bin/
+    supabase --version
+
+(If the laptop is ARM, use supabase_linux_arm64.tar.gz instead. You can also install the
+.deb from https://github.com/supabase/cli/releases if you prefer.)
+
+
+------------------------------------------------------------------
+STEP 4 - Set up Git and clone the repo
+------------------------------------------------------------------
+
+    git config --global user.name  "<Your Name>"
+    git config --global user.email "<your-github-email>"
+
+Sign in to GitHub. The easiest way is the GitHub CLI:
+
+    sudo apt install -y gh
+    gh auth login          # choose GitHub.com > HTTPS > log in with a web browser
+
+Clone the repo and make a branch for this work:
+
+    cd ~
+    git clone https://github.com/henryqla/ee475aut26team5.git
+    cd ee475aut26team5
+    git checkout -b supabase-init
+
+
+------------------------------------------------------------------
+STEP 5 - Initialize Supabase inside Backend/
+------------------------------------------------------------------
+
+    cd ~/ee475aut26team5/Backend
+    supabase init
+
+When it asks about VS Code / IntelliJ Deno settings, answering "N" is fine.
+
+This creates:
+
+    Backend/supabase/
+        config.toml      <- project settings (ports, auth, etc.). COMMIT THIS.
+        .gitignore       <- already ignores the generated temp files and .env
+        seed.sql         <- may or may not be created; create it if missing (see Step 8)
+
+The CLI expects migrations and functions INSIDE that supabase/ folder, so move the
+placeholder folders we already have in there:
+
+    git mv migrations supabase/migrations
+    git mv functions  supabase/functions
+
+(If git complains that a target already exists, move the .gitignore files over by hand
+and delete the empty old folders.)
+
+The final layout should be:
+
+    Backend/
+        sample_data.sql
+        SUPABASE_SETUP.txt
+        supabase/
+            config.toml
+            .gitignore
+            migrations/
+            functions/
+
+Note: the add-supabase-folders branch on GitHub named this folder "SupaBase". Agree with
+the team on one name so the branches don't conflict.
+
+
+------------------------------------------------------------------
+STEP 6 - Start Supabase
+------------------------------------------------------------------
+
+    cd ~/ee475aut26team5/Backend
+    supabase start
+
+The first run downloads several Docker images and takes a few minutes. When it's done
+it prints something like:
+
+    API URL:         http://127.0.0.1:54321
+    DB URL:          postgresql://postgres:postgres@127.0.0.1:54322/postgres
+    Studio URL:      http://127.0.0.1:54323
+    anon key / Publishable key:     eyJ...  (or sb_publishable_...)
+    service_role key / Secret key:  eyJ...  (or sb_secret_...)
+
+Save that output somewhere private (NOT in the repo). You can print it again any time:
+
+    supabase status
+
+Open Studio in the laptop's browser at http://127.0.0.1:54323 - this is the dashboard
+for browsing tables, running SQL, and viewing logs.
+
+KEY RULES:
+  - The anon / publishable key is what the Android app uses. It's fine for it to be on
+    the phone, but still keep it out of Git (put it in android_app/local.properties).
+  - The service_role / secret key bypasses all security. Never put it in the app or Git.
+
+
+------------------------------------------------------------------
+STEP 7 - Load the sample (trash) data to look around
+------------------------------------------------------------------
+
+Option A - Studio:
+    Open Studio > SQL Editor > New query, paste in the contents of
+    Backend/sample_data.sql, and click Run. Then look in Table Editor.
+
+Option B - command line:
+
+    cd ~/ee475aut26team5/Backend
+    psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f sample_data.sql
+
+The script drops and recreates its tables every time, so it's safe to run again.
+All rows are tagged with source = FAKE_ASSET or FAKE_DEVICE.
+
+
+------------------------------------------------------------------
+STEP 8 - Turn the schema into a real migration (when you're ready)
+------------------------------------------------------------------
+
+sample_data.sql is only for exploring. Once the team agrees on the tables:
+
+    cd ~/ee475aut26team5/Backend
+    supabase migration new init_schema
+
+That creates supabase/migrations/<timestamp>_init_schema.sql. Copy the CREATE TYPE /
+CREATE TABLE / INDEX / POLICY parts of sample_data.sql into it (not the DROP lines).
+Copy the INSERT parts into supabase/seed.sql.
+
+Then rebuild the database from scratch:
+
+    supabase db reset
+
+This re-runs every migration and then seed.sql. Do this whenever you pull new migrations
+from teammates. From now on, every schema change gets a new migration file; don't just
+click changes in Studio, or the rest of the team won't get them.
+
+Check the seed file is actually used in config.toml (it is by default):
+
+    [db.seed]
+    enabled = true
+    sql_paths = ["./seed.sql"]
+
+
+------------------------------------------------------------------
+STEP 9 - Let the phone reach the laptop
+------------------------------------------------------------------
+
+Same Wi-Fi network (simplest for testing):
+
+    hostname -I                       # first address, e.g. 192.168.1.42
+    sudo ufw allow 54321/tcp          # only if ufw firewall is enabled
+
+From another device on the same Wi-Fi, check that the API answers (use your anon key):
+
+    curl http://<laptop-ip>:54321/rest/v1/vehicles \
+         -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>"
+
+You should get JSON back. In the app, the Supabase URL is http://<laptop-ip>:54321.
+
+Away from home Wi-Fi (e.g. driving around, or on UW Wi-Fi which blocks device-to-device
+traffic): install Tailscale (https://tailscale.com) on both the laptop and the phone,
+log both into the same account, and use the laptop's 100.x.y.z Tailscale IP instead.
+
+ANDROID GOTCHA: this is plain http://, which Android blocks by default. The app needs
+res/xml/network_security_config.xml allowing cleartext to the laptop's IP, referenced
+from AndroidManifest.xml with android:networkSecurityConfig="@xml/network_security_config".
+
+Do NOT expose ports 54322 (database) or 54323 (Studio) to the internet.
+
+
+------------------------------------------------------------------
+STEP 10 - Commit the Supabase files to GitHub
+------------------------------------------------------------------
+
+First check what's about to be committed:
+
+    cd ~/ee475aut26team5
+    git status
+
+You SHOULD see:
+    Backend/supabase/config.toml
+    Backend/supabase/.gitignore
+    Backend/supabase/migrations/...
+    Backend/supabase/functions/...
+    Backend/supabase/seed.sql (if created)
+
+You should NOT see any of these (if you do, stop and add them to .gitignore):
+    .env  /  .env.local  /  anything containing keys or passwords
+    Backend/supabase/.temp/  /  Backend/supabase/.branches/
+
+Commit and push:
+
+    git add Backend
+    git commit -m "Initialize Supabase project in Backend/"
+    git push -u origin supabase-init
+
+Open a pull request so the team can review it:
+
+    gh pr create --base main --title "Initialize Supabase project" \
+                 --body "Runs supabase init in Backend/ and moves migrations/functions into it."
+
+(or open the repo on github.com and click "Compare & pull request").
+
+After it's merged, teammates who want their own local copy can pull, install Docker +
+the CLI (Steps 2-3), and run `supabase start` then `supabase db reset` in Backend/.
+
+
+------------------------------------------------------------------
+EVERYDAY COMMANDS (run inside Backend/)
+------------------------------------------------------------------
+
+    supabase start            start everything (data is kept between restarts)
+    supabase stop             stop everything, keep data
+    supabase status           show URLs and keys again
+    supabase db reset         wipe DB, re-run migrations + seed.sql
+    supabase migration new X  create a new empty migration file
+    supabase stop --no-backup stop AND delete all data (careful)
+
+Supabase does not restart on its own after a reboot. After the laptop restarts, run
+`supabase start` in Backend/ again.
+
+
+------------------------------------------------------------------
+TROUBLESHOOTING
+------------------------------------------------------------------
+
+"Cannot connect to the Docker daemon"
+    sudo systemctl start docker   (and make sure you're in the docker group, Step 2)
+
+"port is already allocated"
+    Something else is using 5432x. `supabase stop`, or change the ports in config.toml.
+
+Phone gets "connection refused" / timeout
+    - Check the curl test from Step 9 works from another computer first.
+    - Laptop and phone on the same network? Firewall open on 54321?
+    - Using the laptop's LAN/Tailscale IP, not 127.0.0.1 / localhost?
+
+Phone gets "CLEARTEXT communication not permitted"
+    Add the network security config (Step 9, Android gotcha).
+
+Queries from the app return [] but Studio shows rows
+    Row Level Security is blocking the anon role. Check the policies on that table.
