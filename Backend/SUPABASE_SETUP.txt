@@ -121,6 +121,9 @@ The final layout should be:
 
 Note: the add-supabase-folders branch on GitHub named this folder "SupaBase". We're using
 Backend/supabase/ (lowercase, the CLI default) going forward, so don't follow that name.
+The CLI only finds a folder named exactly "supabase" containing config.toml, and Linux
+file names are case-sensitive, so "SupaBase" would not be found. Keeping it inside
+Backend/ keeps all backend files in one place, next to android_app/ for the app.
 
 
 ------------------------------------------------------------------
