@@ -4,7 +4,7 @@ import android.content.Context
 import org.json.JSONObject
 import java.io.FileNotFoundException
 
-/** A whole drive read from a hand-made JSON file, for seeing the map before real data exists. */
+/** One trip read from a hand-made JSON file, for seeing the map before real data exists. */
 data class FakeDrive(
     val trip: Trip,
     val segments: List<Segment>,
@@ -15,21 +15,19 @@ object FakeDriveLoader {
     /** Lives in src/debug/assets, so release builds don't contain it. */
     private const val ASSET_NAME = "fake_drive.json"
 
-    /** Returns null when the asset isn't there (release builds). */
-    fun load(context: Context): FakeDrive? {
+    /** Returns an empty list when the asset isn't there (release builds). */
+    fun load(context: Context): List<FakeDrive> {
         val text = try {
             context.assets.open(ASSET_NAME).bufferedReader().use { it.readText() }
         } catch (e: FileNotFoundException) {
-            return null
+            return emptyList()
         }
-        return parse(text)
+        val tripsJson = JSONObject(text).getJSONArray("trips")
+        return List(tripsJson.length()) { i -> parseTrip(tripsJson.getJSONObject(i)) }
     }
 
     /** JSON keys are snake_case to match the planned Supabase columns. */
-    private fun parse(text: String): FakeDrive {
-        val root = JSONObject(text)
-
-        val tripJson = root.getJSONObject("trip")
+    private fun parseTrip(tripJson: JSONObject): FakeDrive {
         val trip = Trip(
             id = tripJson.getString("id"),
             vehicleId = tripJson.getString("vehicle_id"),
@@ -38,19 +36,25 @@ object FakeDriveLoader {
             source = DataSource.FAKE_ASSET,
         )
 
-        val segmentsJson = root.getJSONArray("segments")
+        val segmentsJson = tripJson.getJSONArray("segments")
         val segments = List(segmentsJson.length()) { i ->
             val s = segmentsJson.getJSONObject(i)
             Segment(
-                t = s.getLong("t"),
-                lat = s.getDouble("lat"),
-                lon = s.getDouble("lon"),
-                speedMps = s.getDouble("speed_mps"),
-                roughness = s.getDouble("roughness"),
+                tStart = s.getLong("t_start"),
+                tEnd = s.getLong("t_end"),
+                lat = s.doubleOrNull("lat"),
+                lon = s.doubleOrNull("lon"),
+                speedMps = s.doubleOrNull("speed_mps"),
+                gpsAccuracyM = s.doubleOrNull("gps_accuracy_m"),
+                headingDeg = s.doubleOrNull("heading_deg"),
+                rmsZ = s.getDouble("rms_z"),
+                peakZ = s.getDouble("peak_z"),
+                rollRms = s.getDouble("roll_rms"),
+                pitchRms = s.getDouble("pitch_rms"),
             )
         }
 
-        val eventsJson = root.getJSONArray("events")
+        val eventsJson = tripJson.getJSONArray("events")
         val events = List(eventsJson.length()) { i ->
             val e = eventsJson.getJSONObject(i)
             RoadEvent(
@@ -58,21 +62,27 @@ object FakeDriveLoader {
                 tripId = trip.id,
                 vehicleId = trip.vehicleId,
                 t = e.getLong("t"),
-                lat = e.getDouble("lat"),
-                lon = e.getDouble("lon"),
-                speedMps = e.getDouble("speed_mps"),
+                lat = e.doubleOrNull("lat"),
+                lon = e.doubleOrNull("lon"),
+                speedMps = e.doubleOrNull("speed_mps"),
+                gpsAccuracyM = e.doubleOrNull("gps_accuracy_m"),
+                headingDeg = e.doubleOrNull("heading_deg"),
                 eventClass = when (e.getString("class")) {
                     "pothole" -> EventClass.POTHOLE
                     "speed_bump" -> EventClass.SPEED_BUMP
                     else -> EventClass.UNKNOWN
                 },
-                peakG = e.getDouble("peak_g"),
-                roll = e.getDouble("roll"),
-                confidence = e.getDouble("conf"),
+                peakZ = e.getDouble("peak_z"),
+                rollPeak = e.getDouble("roll_peak"),
+                pitchPeak = e.getDouble("pitch_peak"),
+                conf = e.getDouble("conf"),
                 source = DataSource.FAKE_ASSET,
             )
         }
 
         return FakeDrive(trip, segments, events)
     }
+
+    /** Location fields can be missing or null (no GPS fix close enough in time). */
+    private fun JSONObject.doubleOrNull(key: String): Double? = if (isNull(key)) null else getDouble(key)
 }
