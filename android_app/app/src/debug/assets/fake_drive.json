@@ -1,8 +1,9 @@
 {
-  "description": "Hand-made fake drives along 15th Ave NE and NE 45th St, one in each direction. Field names follow docs/data-contract.md v0.3 (Supabase columns). Coordinates follow OpenStreetMap road geometry (centerline). Measurements are invented; segment windows are 2 s (real data is 1 s) to keep the file short. Debug builds only.",
+  "description": "Hand-made fake drives along 15th Ave NE and NE 45th St, one in each direction. Field names follow docs/data-contract.md v0.3 (Supabase columns). Coordinates follow OpenStreetMap road geometry (centerline). Measurements are invented; segment windows are 2 s (real data is 1 s) to keep the file short. Trip and event IDs are fixed, easy-to-spot UUIDs (...f00N for trips, ...e00N for events). Debug builds only.",
   "trips": [
     {
-      "id": "fake-north-15th-west-45th",
+      "id": "00000000-0000-4000-8000-00000000f001",
+      "note": "North on 15th Ave NE, then west on NE 45th St",
       "vehicle_id": "escape",
       "start_time": 1792533599000,
       "end_time": 1792533731000,
@@ -75,16 +76,17 @@
         {"t_start": 1792533729000, "t_end": 1792533731000, "lat": 47.661303, "lon": -122.317700, "speed_mps": 6.0, "gps_accuracy_m": 5.2, "heading_deg": 270, "rms_z": 0.04, "peak_z": 0.16, "roll_rms": 1.8, "pitch_rms": 2.1}
       ],
       "events": [
-        {"id": "fake-evt-1", "t": 1792533634600, "lat": 47.656460, "lon": -122.312049, "speed_mps": 10.5, "gps_accuracy_m": 4.0, "heading_deg": 1,
+        {"id": "00000000-0000-4000-8000-00000000e001", "t": 1792533634600, "lat": 47.656460, "lon": -122.312049, "speed_mps": 10.5, "gps_accuracy_m": 4.0, "heading_deg": 1,
          "class": "pothole", "peak_z": 1.9, "roll_peak": 45.0, "pitch_peak": 12.0, "conf": 0.7},
-        {"id": "fake-evt-2", "t": 1792533653400, "lat": 47.658340, "lon": -122.312020, "speed_mps": 5.0, "gps_accuracy_m": 3.8, "heading_deg": 1,
+        {"id": "00000000-0000-4000-8000-00000000e002", "t": 1792533653400, "lat": 47.658340, "lon": -122.312020, "speed_mps": 5.0, "gps_accuracy_m": 3.8, "heading_deg": 1,
          "class": "speed_bump", "peak_z": 0.9, "roll_peak": 5.0, "pitch_peak": 30.0, "conf": 0.6},
-        {"id": "fake-evt-3", "t": 1792533709200, "lat": 47.661292, "lon": -122.315100, "speed_mps": 9.0, "gps_accuracy_m": 5.0, "heading_deg": 270,
+        {"id": "00000000-0000-4000-8000-00000000e003", "t": 1792533709200, "lat": 47.661292, "lon": -122.315100, "speed_mps": 9.0, "gps_accuracy_m": 5.0, "heading_deg": 270,
          "class": "pothole", "peak_z": 2.4, "roll_peak": 50.0, "pitch_peak": 14.0, "conf": 0.8}
       ]
     },
     {
-      "id": "fake-east-45th-south-15th",
+      "id": "00000000-0000-4000-8000-00000000f002",
+      "note": "East on NE 45th St, then south on 15th Ave NE",
       "vehicle_id": "camry",
       "start_time": 1792619999000,
       "end_time": 1792620131000,
@@ -157,11 +159,11 @@
         {"t_start": 1792620129000, "t_end": 1792620131000, "lat": 47.653118, "lon": -122.312325, "speed_mps": 5.0, "gps_accuracy_m": 4.5, "heading_deg": 211, "rms_z": 0.05, "peak_z": 0.20, "roll_rms": 2.0, "pitch_rms": 2.3}
       ],
       "events": [
-        {"id": "fake-evt-4", "t": 1792620033400, "lat": 47.661283, "lon": -122.313525, "speed_mps": 9.0, "gps_accuracy_m": 6.0, "heading_deg": 90,
+        {"id": "00000000-0000-4000-8000-00000000e004", "t": 1792620033400, "lat": 47.661283, "lon": -122.313525, "speed_mps": 9.0, "gps_accuracy_m": 6.0, "heading_deg": 90,
          "class": "pothole", "peak_z": 2.1, "roll_peak": 42.0, "pitch_peak": 11.0, "conf": 0.75},
-        {"id": "fake-evt-5", "t": 1792620077400, "lat": 47.658260, "lon": -122.312021, "speed_mps": 5.0, "gps_accuracy_m": 3.8, "heading_deg": 181,
+        {"id": "00000000-0000-4000-8000-00000000e005", "t": 1792620077400, "lat": 47.658260, "lon": -122.312021, "speed_mps": 5.0, "gps_accuracy_m": 3.8, "heading_deg": 181,
          "class": "speed_bump", "peak_z": 0.9, "roll_peak": 4.0, "pitch_peak": 28.0, "conf": 0.65},
-        {"id": "fake-evt-6", "t": 1792620096000, "lat": 47.656400, "lon": -122.312050, "speed_mps": 11.0, "gps_accuracy_m": 4.0, "heading_deg": 181,
+        {"id": "00000000-0000-4000-8000-00000000e006", "t": 1792620096000, "lat": 47.656400, "lon": -122.312050, "speed_mps": 11.0, "gps_accuracy_m": 4.0, "heading_deg": 181,
          "class": "pothole", "peak_z": 1.7, "roll_peak": 38.0, "pitch_peak": 10.0, "conf": 0.6}
       ]
     }
