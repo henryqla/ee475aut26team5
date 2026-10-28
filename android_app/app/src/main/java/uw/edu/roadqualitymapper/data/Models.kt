@@ -5,27 +5,43 @@ enum class DataSource { FAKE_ASSET, FAKE_DEVICE, REAL }
 
 enum class EventClass { POTHOLE, SPEED_BUMP, UNKNOWN }
 
-/** ~1 second of road. Location and speed come from the phone; roughness comes from the device. */
+/**
+ * ~1 second of road. Field names follow docs/data-contract.md.
+ * Location fields come from the phone and are null when no GPS fix was close enough in time;
+ * the measurement fields come from the device.
+ */
 data class Segment(
-    val t: Long = 0L,                 // phone time, epoch millis
-    val lat: Double = 0.0,
-    val lon: Double = 0.0,
-    val speedMps: Double = 0.0,
-    val roughness: Double = 0.0,
-)
+    val tStart: Long = 0L,            // phone time, epoch millis
+    val tEnd: Long = 0L,
+    val lat: Double? = null,
+    val lon: Double? = null,
+    val speedMps: Double? = null,
+    val gpsAccuracyM: Double? = null,
+    val headingDeg: Double? = null,   // direction of travel, clockwise from north; null when barely moving
+    val rmsZ: Double = 0.0,           // g, roughness: RMS vertical acceleration, gravity removed
+    val peakZ: Double = 0.0,          // g
+    val rollRms: Double = 0.0,        // deg/s
+    val pitchRms: Double = 0.0,       // deg/s
+) {
+    /** Middle of the window; the segment's location is interpolated at this time. */
+    val tMid: Long get() = (tStart + tEnd) / 2
+}
 
 data class RoadEvent(
     val id: String = "",
     val tripId: String = "",
     val vehicleId: String = "",
-    val t: Long = 0L,
-    val lat: Double = 0.0,
-    val lon: Double = 0.0,
-    val speedMps: Double = 0.0,
+    val t: Long = 0L,                 // phone time of the peak, epoch millis
+    val lat: Double? = null,
+    val lon: Double? = null,
+    val speedMps: Double? = null,
+    val gpsAccuracyM: Double? = null,
+    val headingDeg: Double? = null,
     val eventClass: EventClass = EventClass.UNKNOWN,
-    val peakG: Double = 0.0,
-    val roll: Double = 0.0,
-    val confidence: Double = 0.0,
+    val peakZ: Double = 0.0,          // g
+    val rollPeak: Double = 0.0,       // deg/s
+    val pitchPeak: Double = 0.0,      // deg/s
+    val conf: Double = 0.0,           // detector confidence, 0–1
     val userLabel: EventClass? = null,   // set when someone taps a label button on the Drive screen
     val source: DataSource = DataSource.REAL,
 )
