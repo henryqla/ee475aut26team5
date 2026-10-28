@@ -97,7 +97,7 @@ This creates:
     Backend/supabase/
         config.toml      <- project settings (ports, auth, etc.). COMMIT THIS.
         .gitignore       <- already ignores the generated temp files and .env
-        seed.sql         <- may or may not be created; create it if missing (see Step 8)
+        seed.sql         <- may or may not be created; not used (vehicles come from a migration)
 
 The CLI expects migrations and functions INSIDE that supabase/ folder, so move the
 placeholder folders we already have in there:
@@ -156,48 +156,71 @@ KEY RULES:
 
 
 ------------------------------------------------------------------
-STEP 7 - Load the sample (trash) data to look around
+STEP 7 - Load the database schema
 ------------------------------------------------------------------
 
-Option A - Studio:
-    Open Studio > SQL Editor > New query, paste in the contents of
-    Backend/sample_data.sql, and click Run. Then look in Table Editor.
+The tables, checks and access rules are already written as migrations in
+Backend/supabase/migrations/ (they follow docs/data-contract.md section 7):
 
-Option B - command line:
+    <timestamp>_init_schema.sql    PostGIS, the 4 tables, permissions, Row Level Security
+    <timestamp>_add_vehicles.sql   the starting vehicle list (truck, camry, escape)
 
-    cd ~/ee475aut26team5/Backend
-    psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f sample_data.sql
+Get the latest files, restart Supabase so it picks up config.toml (anonymous sign-in is
+turned on there), and build the database:
 
-The script drops and recreates its tables every time, so it's safe to run again.
-All rows are tagged with source = FAKE_ASSET or FAKE_DEVICE.
-
-
-------------------------------------------------------------------
-STEP 8 - Turn the schema into a real migration (when you're ready)
-------------------------------------------------------------------
-
-sample_data.sql is only for exploring. Once the team agrees on the tables:
-
-    cd ~/ee475aut26team5/Backend
-    supabase migration new init_schema
-
-That creates supabase/migrations/<timestamp>_init_schema.sql. Copy the CREATE TYPE /
-CREATE TABLE / INDEX / POLICY parts of sample_data.sql into it (not the DROP lines).
-Copy the INSERT parts into supabase/seed.sql.
-
-Then rebuild the database from scratch:
-
+    cd ~/ee475aut26team5
+    git pull
+    cd Backend
+    supabase stop && supabase start
     supabase db reset
 
-This re-runs every migration and then seed.sql. Do this whenever you pull new migrations
-from teammates. From now on, every schema change gets a new migration file; don't just
-click changes in Studio, or the rest of the team won't get them.
+`db reset` wipes the database and runs every migration in order. It's fine now because
+there's no real data yet. There is no seed.sql; if the CLI prints a warning that it can't
+find one, ignore it.
 
-Check the seed file is actually used in config.toml (it is by default):
+Ignore Backend/sample_data.sql. It was an early experiment and doesn't match the contract.
+If you loaded it before, `db reset` removes its tables.
 
-    [db.seed]
-    enabled = true
-    sql_paths = ["./seed.sql"]
+
+------------------------------------------------------------------
+STEP 8 - Check it worked, and how to apply changes later
+------------------------------------------------------------------
+
+Check:
+    - Studio > Table Editor shows vehicles, trips, segments, events.
+    - vehicles has 3 rows.
+    - The API answers with the anon key (use the key from `supabase status`):
+
+        curl http://127.0.0.1:54321/rest/v1/vehicles \
+             -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>"
+
+      This should print the 3 vehicles.
+    - The anon key alone can't write (only the signed-in app can). This should fail with
+      a permission / row-level security error:
+
+        curl -X POST http://127.0.0.1:54321/rest/v1/vehicles \
+             -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>" \
+             -H "Content-Type: application/json" \
+             -d '{"id":"test","name":"Test","type":"sedan"}'
+
+If `db reset` stops with an error, copy the whole output; the migration needs fixing,
+not the database.
+
+Changing the schema later:
+    - Every change gets a NEW migration file. Never edit a migration that has already run
+      on the laptop, and don't just click changes in Studio, or the rest of the team (and
+      the next `db reset`) won't get them.
+
+        supabase migration new <short_name>
+
+    - Change docs/data-contract.md first, so the app team knows.
+
+Applying new migrations once real drives are stored:
+
+    supabase migration up
+
+This runs only the migrations that haven't run yet and keeps the data.
+DON'T use `supabase db reset` after that point: it deletes every trip.
 
 
 ------------------------------------------------------------------
@@ -344,7 +367,8 @@ EVERYDAY COMMANDS (run inside Backend/)
     supabase start            start everything (data is kept between restarts)
     supabase stop             stop everything, keep data
     supabase status           show URLs and keys again
-    supabase db reset         wipe DB, re-run migrations + seed.sql
+    supabase migration up     run new migrations, keep data (use this once real drives exist)
+    supabase db reset         wipe DB, re-run all migrations (DELETES ALL DATA)
     supabase migration new X  create a new empty migration file
     supabase stop --no-backup stop AND delete all data (careful)
 
