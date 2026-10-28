@@ -289,10 +289,17 @@ app would need a network security config allowing cleartext to that IP. With Fun
    If you lose them, make new ones the same way; the app team then needs the new
    publishable key.
 
-2) Row Level Security on every table. The anon key ships inside the APK, so treat it as
-   public. RLS policies are the only thing deciding what it can do. Give the anon role
-   only what the app needs (e.g. insert readings, select map data). No update or delete.
-   Put the policies in a migration, not just Studio.
+2) Row Level Security on every table. The publishable key ships inside the APK, so treat
+   it as public. RLS policies are the only thing deciding what it can do. They're already
+   in the init_schema migration (loaded in Step 7) and follow docs/data-contract.md
+   section 7 "Who can do what". Check they work:
+
+       cd ~/ee475aut26team5/Backend
+       bash check_access.sh
+
+   Every line should say PASS. It adds a test trip and two test users and deletes them
+   again. Any change to the rules goes in a new migration, never just in Studio; run the
+   script again afterwards.
 
 --- 9C. Install Tailscale and turn on Funnel ---
 
