@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check_keys.sh - is it safe to turn on Tailscale Funnel?
-# Checks that the custom signing key is loaded and that the keys `supabase status` prints
-# can't be used for admin access. Prints PASS/FAIL only; never prints a key.
+# Checks that the custom signing key is loaded and that the CLI's built-in default keys (the
+# same on every install) have been replaced. Prints PASS/FAIL only; never prints a key.
 #
 # Run on the laptop, with Supabase started:
 #     cd ~/ee475aut26team5/Backend && bash check_keys.sh
@@ -59,33 +59,35 @@ if [[ -z $alg ]]; then fail "anonymous sign-in failed (is enable_anonymous_sign_
 elif [[ $alg == ES256 && " $file_kids " == *" $kid "* ]]; then pass "sign-in tokens are signed with your key ($alg)"
 else fail "sign-in tokens are signed with $alg, not your key"; fi
 
-echo "${BOLD}3. Can the printed keys get admin access?${RESET}"
+echo "${BOLD}3. Are the built-in default keys replaced?${RESET}"
+# Unset keys fall back to values built into the CLI, the same on every install. Each one must
+# come from Backend/.env instead (SUPABASE_SETUP.txt Step 9B).
+dotenv_value() { grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'; }
+if [[ -f .env ]]; then pass "Backend/.env exists"
+else fail "Backend/.env is missing (Step 9B)"; fi
+
+check_custom() {   # $1 = name in supabase status, $2 = name in .env
+    local live wanted; live=$(env_value "$1"); wanted=$(dotenv_value "$2")
+    if [[ -z $live ]]; then info "$1 not shown by supabase status; skipped"
+    elif [[ -n $wanted && $live == "$wanted" ]]; then pass "$1 is your own value from .env"
+    else fail "$1 is not the value in .env (still the built-in default?)"; fi
+}
+check_custom JWT_SECRET      SUPABASE_AUTH_JWT_SECRET
+check_custom PUBLISHABLE_KEY SUPABASE_AUTH_PUBLISHABLE_KEY
+check_custom SECRET_KEY      SUPABASE_AUTH_SECRET_KEY
+
+echo "${BOLD}4. Admin access${RESET}"
 code=$(admin_status sb_secret_notarealkey123)
-if [[ $code == 401 || $code == 403 ]]; then pass "a made-up key is rejected ($code), so this test works"
-else fail "a made-up key got $code (expected 401/403); results below can't be trusted"; fi
+if [[ $code == 401 || $code == 403 ]]; then pass "a made-up key is rejected ($code)"
+else fail "a made-up key got $code (expected 401/403)"; fi
 
-# The CLI's built-in default JWTs are issued by "supabase-demo"; every install has the same ones.
-service_key=$(env_value SERVICE_ROLE_KEY)
-issuer=$(printf '%s' "$service_key" | python3 -c '
-import base64, json, sys
-part = sys.stdin.read().split(".")[1]
-print(json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))).get("iss", ""))' 2>/dev/null)
-is_default=no; [[ $issuer == supabase-demo ]] && is_default=yes
-
-if [[ -n $service_key ]]; then
-    code=$(admin_status "$service_key")
-    if [[ $code != 200 ]]; then pass "SERVICE_ROLE_KEY has no admin access ($code)"
-    elif [[ $is_default == yes ]]; then fail "SERVICE_ROLE_KEY is the public CLI default and has admin access"
-    else pass "SERVICE_ROLE_KEY is your own key and has admin access (expected)"; fi
-fi
-
-secret_key=$(env_value SECRET_KEY)
-if [[ -n $secret_key ]]; then
-    code=$(admin_status "$secret_key")
-    if [[ $code != 200 ]]; then pass "SECRET_KEY has no admin access ($code)"
-    elif [[ $is_default == yes ]]; then fail "SECRET_KEY has admin access, and the keys are still the CLI defaults"
-    else info "SECRET_KEY has admin access; fine only if it differs from your first 'supabase start' output"; fi
-fi
+for name in SECRET_KEY SERVICE_ROLE_KEY; do
+    key=$(env_value "$name")
+    [[ -z $key ]] && continue
+    code=$(admin_status "$key")
+    if [[ $code == 200 ]]; then pass "your $name works for admin tasks ($code)"
+    else fail "your $name was refused ($code); you'd have no admin key"; fi
+done
 
 echo
 if (( failures == 0 )); then echo "${GREEN}${BOLD}All checks passed: safe to turn on Funnel.${RESET}"

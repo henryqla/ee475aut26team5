@@ -253,21 +253,41 @@ app would need a network security config allowing cleartext to that IP. With Fun
 --- 9B. Lock it down BEFORE going public ---
 
 1) Replace the default keys. Every Supabase CLI install ships with the SAME JWT secret,
-   and the default anon / service_role keys are published online. Anyone could use the
-   default service_role key to read or delete everything. Set your own secret / signing
-   key in supabase/config.toml (look in the [auth] section for jwt_secret or
-   signing_keys_path; the exact option depends on the CLI version, so check
-   `supabase --help` and the Supabase local-dev docs). Keep the secret itself in an
-   env var / .env file that is NOT committed. Then:
+   publishable key and secret key, built into the program and published online. Anyone
+   could use them to read or delete everything. config.toml ([auth] section) already
+   points at your own values; you create them on the laptop. Both files below are in
+   Backend/.gitignore, so they can't be committed by accident.
+
+   a) A signing key (signs the tokens the app gets when it signs in):
+
+       cd ~/ee475aut26team5/Backend
+       supabase gen signing-key --algorithm ES256 > supabase/signing_keys.json
+
+      Open the file and make sure it starts with [ and ends with ]. If it starts with {,
+      add [ at the very start and ] at the very end.
+
+   b) Random values for the other keys, in Backend/.env (copy exactly):
+
+       cat > .env <<EOF
+       SUPABASE_AUTH_JWT_SECRET=$(openssl rand -hex 32)
+       SUPABASE_AUTH_PUBLISHABLE_KEY=sb_publishable_$(openssl rand -hex 16)
+       SUPABASE_AUTH_SECRET_KEY=sb_secret_$(openssl rand -hex 16)
+       EOF
+       chmod 600 .env supabase/signing_keys.json
+
+   c) Restart and check:
 
        supabase stop && supabase start
-       supabase status                  # copy the NEW anon key for the app team
+       bash check_keys.sh
 
-   Check that the old default service_role key is now rejected (should NOT return data):
+      Every line should say PASS. If not, send the output (it contains no keys).
 
-       curl http://127.0.0.1:54321/rest/v1/vehicles \
-            -H "apikey: <old-default-service-role-key>" \
-            -H "Authorization: Bearer <old-default-service-role-key>"
+   d) `supabase status` now shows the new publishable key. Give that to the app team
+      (with the Funnel URL); the old one stops working.
+
+   Don't run `git status` and commit if .env or signing_keys.json show up; they shouldn't.
+   If you lose them, make new ones the same way; the app team then needs the new
+   publishable key.
 
 2) Row Level Security on every table. The anon key ships inside the APK, so treat it as
    public. RLS policies are the only thing deciding what it can do. Give the anon role

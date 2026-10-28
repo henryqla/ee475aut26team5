@@ -167,7 +167,13 @@ jwt_expiry = 3600
 # JWT issuer URL. If not set, defaults to auth.external_url.
 # jwt_issuer = ""
 # Path to JWT signing key. DO NOT commit your signing keys file to git.
-# signing_keys_path = "./signing_keys.json"
+# Each machine makes its own with `supabase gen signing-key` (SUPABASE_SETUP.txt Step 9B).
+signing_keys_path = "./signing_keys.json"
+# Replace the CLI's built-in default keys, which are the same on every install. Values come
+# from Backend/.env (never committed); see SUPABASE_SETUP.txt Step 9B.
+jwt_secret = "env(SUPABASE_AUTH_JWT_SECRET)"
+publishable_key = "env(SUPABASE_AUTH_PUBLISHABLE_KEY)"
+secret_key = "env(SUPABASE_AUTH_SECRET_KEY)"
 # If disabled, the refresh token will never expire.
 enable_refresh_token_rotation = true
 # Allows refresh tokens to be reused after expiry, up to the specified interval in seconds.
