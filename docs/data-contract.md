@@ -242,30 +242,56 @@ unreliable below ~1–2 m/s).
 
 ---
 
-## 7. Supabase (suggestions only) [Ben]
+## 7. Supabase [Ben]
 
-**Tables** (snake_case; names and types are Ben's call). Postgres types below.
+**Agreed by Ben (Oct 2026).** Changes to anything here go through this file, like the rest.
 
-General rules:
-- **Times** are epoch milliseconds as `bigint`, the same numbers the app and firmware use. (A
-  readable `timestamptz` column can be generated from them if wanted.)
+**Connecting**
+- The app reaches Supabase at the laptop's Tailscale Funnel URL (`https://<machine>.<tailnet>.ts.net`).
+  Ben gives the app team the URL and the anon key. Both go in `local.properties`
+  (`SUPABASE_URL`, `SUPABASE_ANON_KEY`), never in source code.
+- The laptop is sometimes unreachable (restart, Wi-Fi drop). Uploads that fail should be retried
+  later from Room; nothing is lost on the server side by sending late.
+
+**Sign-in**
+- On first launch the app calls Supabase **anonymous sign-in** (`signInAnonymously()`): no account,
+  no password, nothing for the user to do. Supabase keeps the session on the phone and reuses it.
+- Each app install gets its own user ID. The database uses it to know which trips belong to which
+  phone, so one phone can't edit another phone's trips.
+- The web map uses the anon key **without** signing in, which makes it read-only.
+
+**General rules**
+- **Times** are epoch milliseconds as `bigint`, the same numbers the app and firmware use. The
+  database also keeps a readable copy of each time (`<column>_ts`, e.g. `start_time_ts`) for
+  looking at data in Studio. The app doesn't send or need these.
 - **`lat`/`lon` are `double precision`**: a 4-byte `real` keeps only ~7 digits, which isn't enough
   for meter-level positions like `47.661303`. Sensor values are fine as `real`.
 - **IDs for trips and events are UUIDs made by the app**, so trips can be created offline and
-  uploaded later, and a re-sent batch updates rows instead of duplicating them (upsert).
-- `source` is `REAL`, `FAKE_ASSET`, or `FAKE_DEVICE`; `class` and `user_label` are `pothole`,
-  `speed_bump`, or `unknown`.
-- Size: ~1 row per second of driving ≈ 1 MB per hour of driving; the free tier's database limit
-  is far beyond what we'll use.
+  uploaded later.
+- **Uploads only add rows, they never overwrite.** Send segments and events with the
+  *ignore duplicates* option (REST header `Prefer: resolution=ignore-duplicates`, or
+  `ignoreDuplicates = true` on upsert in supabase-kt). A re-sent row that is already stored is
+  skipped quietly instead of causing an error, so retrying a whole batch is always safe.
+- **Upload order:** a trip must be uploaded before its segments and events. The database checks
+  that each segment/event belongs to a trip made by the same phone.
+- **Allowed values are UPPERCASE**, the same as the Kotlin enum names; anything else is rejected:
+  - `source`: `REAL`, `FAKE_ASSET`, `FAKE_DEVICE`
+  - `event_class`, `user_label`: `POTHOLE`, `SPEED_BUMP`, `UNKNOWN`
 
-`vehicles`
+  The BLE message keeps lowercase `"class":"pothole"` (§4.2); the app converts it.
+- **Filled in by the database, not sent by the app:** `created_by` (the phone's user ID),
+  `received_at` (when the row arrived), `geog`, and the readable `_ts` times.
+- **Range checks:** `lat` −90…90, `lon` −180…180, `heading_deg` 0 to <360, `conf` 0…1,
+  `speed_mps` and `gps_accuracy_m` ≥ 0, `t_end` ≥ `t_start`. Rows outside these are rejected.
+
+`vehicles` — added by Ben (vehicle list: §9 Team). The app only reads this table.
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | `text` **primary key** | Short readable IDs: `truck`, `camry`, `escape` |
 | `name` | `text` not null | |
-| `type` | `text` not null | `truck`, `sedan`, `suv` |
-| `scale_factor` | `double precision` not null, default `1.0` | From calibration drives |
+| `type` | `text` not null | `truck`, `sedan`, `suv` (plain text, lowercase) |
+| `scale_factor` | `double precision` not null, default `1.0` | From calibration drives; set by Ben |
 
 `trips`
 
@@ -274,12 +300,14 @@ General rules:
 | `id` | `uuid` **primary key** | Made by the app when the trip starts |
 | `vehicle_id` | `text` not null → `vehicles.id` | |
 | `start_time` | `bigint` not null | |
-| `end_time` | `bigint` | `null` while the trip is in progress |
+| `end_time` | `bigint` | `null` while the trip is in progress; the app sets it once when the trip ends |
 | `source` | `text` not null | |
 | `app_version` | `text` | |
+| `created_by` | `uuid` | Filled in by the database |
+| `received_at` | `timestamptz` | Filled in by the database |
 
 `segments` — **primary key is (`trip_id`, `t_start`)**: a trip can't have two segments starting at
-the same millisecond, so re-sent segments overwrite instead of duplicating.
+the same millisecond, so a re-sent segment is recognized and skipped.
 
 | Column | Type | Notes |
 |---|---|---|
@@ -288,8 +316,9 @@ the same millisecond, so re-sent segments overwrite instead of duplicating.
 | `lat`, `lon` | `double precision` | `null` when no GPS fix (§6) |
 | `speed_mps`, `gps_accuracy_m`, `heading_deg` | `real` | `null` when no GPS fix |
 | `rms_z`, `peak_z`, `roll_rms`, `pitch_rms` | `real` not null | |
-| `source` | `text` not null | |
-| `geog` | generated `geography(Point)` | Computed from `lon`/`lat`; `null` when they are |
+| `source` | `text` not null | Same as the trip's |
+| `geog` | generated `geography(Point, 4326)` | Computed from `lon`/`lat`; `null` when they are |
+| `received_at` | `timestamptz` | Filled in by the database |
 
 `events`
 
@@ -297,32 +326,51 @@ the same millisecond, so re-sent segments overwrite instead of duplicating.
 |---|---|---|
 | `id` | `uuid` **primary key** | Made by the app |
 | `trip_id` | `uuid` not null → `trips.id` | |
-| `vehicle_id` | `text` not null → `vehicles.id` | |
+| `vehicle_id` | `text` not null → `vehicles.id` | Must be the trip's vehicle |
 | `t` | `bigint` not null | |
 | `lat`, `lon` | `double precision` | `null` when no GPS fix |
 | `speed_mps`, `gps_accuracy_m`, `heading_deg` | `real` | `null` when no GPS fix |
-| `class` | `text` not null | |
+| `event_class` | `text` not null | Called `class` over BLE; renamed because `class` is a reserved word in Kotlin |
 | `peak_z`, `roll_peak`, `pitch_peak`, `conf` | `real` not null | |
-| `user_label` | `text` | Set from the Drive screen's label buttons |
-| `source` | `text` not null | |
-| `geog` | generated `geography(Point)` | Computed from `lon`/`lat` |
+| `user_label` | `text` | Set from the Drive screen's label buttons; the app may change it later |
+| `source` | `text` not null | Same as the trip's |
+| `geog` | generated `geography(Point, 4326)` | Computed from `lon`/`lat` |
+| `received_at` | `timestamptz` | Filled in by the database |
 
-**Suggestions**
-- App sends plain `lat` / `lon` numbers; the database computes a PostGIS geography column
-  from them (generated column). Neither the app nor the web map reads PostGIS types directly.
-- **Map logic lives in SQL functions**, so the app and the web map always show the same thing:
-  - `road_quality_in_area(south, west, north, east, …filters)`: segments combined per small
-    area **and per direction of travel** (`heading_deg`), with vehicle/speed normalization
-    applied. Median rather than average, so one odd drive doesn't skew a road.
-  - `events_in_area(south, west, north, east, …)`: events merged into one when they are within
-    **10 m** of each other, have the same `class`, and headings within ~45° (so potholes on
-    opposite sides of a road stay separate). Merged position = average of the hits. Returns the
-    number of drives that hit it and the number of drives that passed that spot in the same
-    direction; the map shows this as "hit by N of M drives".
-  - 10 m is a starting value: GPS is typically off by 3–5 m per fix. Measure the real spread by
-    driving over the same speed bump ~10 times, and adjust.
-- Row Level Security: the app can insert + read; the web map can **only read**.
-- Free-tier projects pause after ~1 week without activity (data is kept; resume from the dashboard).
+Deleting a trip deletes its segments and events too. Only Ben does this (e.g. to clear fake data);
+the app can't delete anything.
+
+**Who can do what** (Row Level Security is on for every table; anything not listed is blocked)
+
+| Table | App (signed in anonymously) | Web map (not signed in) |
+|---|---|---|
+| `vehicles` | read | read |
+| `trips` | read all; add its own; set `end_time` on its own | read |
+| `segments` | read all; add to its own trips | read |
+| `events` | read all; add to its own trips; set `user_label` on its own | read |
+
+**Map functions** (Ben writes them). Map logic lives in SQL functions, so the app and the web map
+always show the same thing. The app calls them through the API (supabase-kt `rpc(...)`).
+- `road_quality_in_area(south, west, north, east, include_fake default false)`: segments combined
+  per small area **and per direction of travel**, with vehicle/speed normalization applied.
+  Median rather than average, so one odd drive doesn't skew a road.
+  Proposed result, one row per area and direction: `lat`, `lon`, `heading_deg`, `roughness`,
+  `drives` (number of drives that contributed).
+- `events_in_area(south, west, north, east, include_fake default false)`: events merged into one
+  when they are within **10 m** of each other, have the same `event_class`, and headings within
+  ~45° (so potholes on opposite sides of a road stay separate). Merged position = average of the
+  hits. Proposed result, one row per merged event: `lat`, `lon`, `event_class`, `heading_deg`,
+  `hits` (drives that hit it), `passes` (drives that passed that spot in the same direction),
+  `last_t`. The map shows "hit by `hits` of `passes` drives". This is a different shape from
+  `RoadEvent`, so the app will need a small model for it.
+- Directions are compared around the circle: 350° and 10° count as the same direction.
+- Rows with no heading (car barely moving) are left out of `road_quality_in_area`; events with no
+  heading are merged by distance and class only. Rows with no location are stored but not shown.
+- 10 m is a starting value: GPS is typically off by 3–5 m per fix. Measure the real spread by
+  driving over the same speed bump ~10 times, and adjust.
+- **Timing:** a first version (raw `rms_z` × `scale_factor`, no speed normalization) right after the
+  tables exist; speed normalization after the calibration drives. The exact result columns are
+  confirmed with Scott before each function is written.
 
 ---
 
@@ -355,11 +403,19 @@ the same millisecond, so re-sent segments overwrite instead of duplicating.
 - [ ] How the IMU chip's axes sit relative to the arrow (from the PCB layout), for Henry
 
 **Ben (backend)**
-- [ ] Final table and column names, types, and primary keys (§7)
-- [ ] Anonymous sign-in for the app, or another auth approach?
-- [ ] RLS policies: app read/write, web read-only
-- [ ] Who writes the aggregation/normalization SQL functions, and when?
-- [ ] OK with grouping by direction (`heading_deg`) and the event-merge rules in §7?
+- [x] Final table and column names, types, and primary keys: see §7. Changed from v0.3:
+  `class` → `event_class` in the `events` table; allowed values are UPPERCASE; the database adds
+  `created_by`, `received_at`, and readable `_ts` times; uploads skip duplicates instead of
+  overwriting.
+- [x] Auth: Supabase anonymous sign-in for the app; the web map stays signed out (§7 Sign-in).
+- [x] RLS: app reads everything and adds rows to its own trips, and may only change `end_time`
+  and `user_label` on its own rows; web map read-only; no deletes (§7 Who can do what).
+- [x] SQL functions: Ben writes them. First version right after the tables exist; speed
+  normalization after the calibration drives (§7 Map functions).
+- [x] Grouping by direction and the event-merge rules: yes, with directions compared around the
+  circle and a rule for rows with no heading (§7 Map functions).
+- [ ] **Scott:** confirm the result columns proposed for `road_quality_in_area` and
+  `events_in_area` (§7) fit what the map screens need.
 
 **Team**
 - [ ] Confirm IMU rate 400 Hz and 1 s segment windows
