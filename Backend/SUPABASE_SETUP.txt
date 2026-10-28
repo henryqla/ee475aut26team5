@@ -335,12 +335,17 @@ or turn it off with:
     tailscale funnel status
     sudo tailscale funnel reset       # turn Funnel off
 
-Test from a phone with Wi-Fi OFF (on cellular), or any computer off your network:
+Test from a device that is NOT on Tailscale (a phone on cellular, a friend's computer).
+From the laptop itself the name skips Funnel, so that test proves nothing. Type it on ONE
+line, replacing the <...> parts (no angle brackets left) with the URL and the publishable
+key from `supabase status`:
 
-    curl https://<machine-name>.<tailnet-name>.ts.net/rest/v1/vehicles \
-         -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>"
+    curl "https://<machine-name>.<tailnet-name>.ts.net/rest/v1/vehicles" -H "apikey: <publishable-key>"
 
-Give the app team the https://...ts.net URL and the new anon key. They go in
+On Windows use curl.exe instead of curl (in PowerShell, curl is a different command).
+It should print the 3 vehicles.
+
+Give the app team the https://...ts.net URL and the new publishable key. They go in
 android_app/local.properties, never hard-coded, so the URL can change later (e.g. if we
 move to a Cloudflare Tunnel with our own domain) without code changes.
 
