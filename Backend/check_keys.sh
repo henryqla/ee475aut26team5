@@ -20,7 +20,7 @@ info() { echo "  ${YELLOW}INFO${RESET}  $1"; }
 
 status_env=$(supabase status -o env 2>/dev/null) || {
     echo "${RED}Supabase isn't running.${RESET} Run: supabase start"; exit 1; }
-env_value() { printf '%s\n' "$status_env" | grep -E "^$1=" | head -1 | cut -d= -f2- | tr -d '"'; }
+env_value() { printf '%s\n' "$status_env" | grep -E "^$1=" | head -1 | cut -d= -f2- | tr -d '"' | sed 's/[[:space:]]*$//'; }
 
 # HTTP status of an admin-only request (list auth users) made with the given key.
 admin_status() {
@@ -62,7 +62,7 @@ else fail "sign-in tokens are signed with $alg, not your key"; fi
 echo "${BOLD}3. Are the built-in default keys replaced?${RESET}"
 # Unset keys fall back to values built into the CLI, the same on every install. Each one must
 # come from Backend/.env instead (SUPABASE_SETUP.txt Step 9B).
-dotenv_value() { grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'; }
+dotenv_value() { grep -E "^$1=" .env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | sed 's/[[:space:]]*$//'; }
 if [[ -f .env ]]; then pass "Backend/.env exists"
 else fail "Backend/.env is missing (Step 9B)"; fi
 
