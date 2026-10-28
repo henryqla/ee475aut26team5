@@ -11,8 +11,8 @@ What changed since v0.2 is listed in §10.
 
 ```mermaid
 flowchart TD
-    IMU["6-axis IMU, 400 Hz"] --> FW["ESP32 firmware [Henry]"]
-    FW --> SD["microSD: raw 400 Hz log<br/>(backup, tuning, ML)"]
+    IMU["6-axis IMU, 416 Hz"] --> FW["ESP32 firmware [Henry]"]
+    FW --> SD["microSD: raw 416 Hz log<br/>(backup, tuning, ML)"]
     FW -->|"BLE: 1 segment/s + events"| APP["Android app [Scott]"]
     GPS["Phone GPS, 1 Hz"] --> APP
     APP -->|"adds where the car was,<br/>matched by time"| ROOM["Room (database on the phone)"]
@@ -25,7 +25,7 @@ IMU → firmware → SD card and BLE → app (+ GPS) → phone database → Supa
 
 | Data | Rate | Lives in | Owner |
 |---|---|---|---|
-| Raw IMU samples | 400 Hz | microSD only | Henry / Kyle |
+| Raw IMU samples | 416 Hz | microSD only | Henry / Kyle |
 | Segment summaries + events | 1/s + as detected | BLE → phone | Henry produces, app receives |
 | Phone GPS fixes (lat, lon, speed, heading, accuracy) | 1/s | phone | app |
 | Stamped segments + events | 1/s + as detected | Supabase | app uploads, Ben stores |
@@ -40,8 +40,11 @@ All timestamps in BLE messages and SD rows are **phone time: Unix epoch millisec
 **Sync procedure**
 1. On every BLE connect, and then **every 60 s**, the app writes the phone's current
    epoch ms to the TIME characteristic (§3).
-2. Firmware stores `offset = phone_ms − millis()` at the moment it receives the write.
-3. Firmware stamps everything with `millis() + offset`.
+2. Firmware computes `offset = phone_ms − millis()` at the moment it receives the write, but
+   **applies the new offset only at the next segment boundary**. Every segment's `t_start` and
+   `t_end` use the same offset.
+3. Firmware stamps everything with `millis() + offset`. An event's `t` uses **the same offset as
+   the segment that contains its peak**.
 4. Firmware **writes a sync row to the SD log** each time (`millis`, `phone_ms`), so SD data
    recorded *before* the first sync can still be corrected afterwards.
 5. Until the first sync, firmware sets `"synced": false` on BLE messages (app discards or
@@ -49,6 +52,10 @@ All timestamps in BLE messages and SD rows are **phone time: Unix epoch millisec
 
 Why re-sync every 60 s: the ESP32 clock drifts (~0.1–0.2 s per hour). BLE write latency adds
 ~10–50 ms of error to each sync, which is ~1 m at highway speed — acceptable.
+
+Why apply the offset only at segment boundaries: each re-sync shifts the offset by tens of ms. If
+it changed mid-window, a segment's `t_start` and `t_end` would come from two different clocks,
+making its duration and midpoint wrong, and an event could land slightly outside its own segment.
 
 Every SD row also keeps the raw `millis()`, so it can always be re-timed afterwards.
 
@@ -122,8 +129,15 @@ pairing. If reconnects turn out slow in testing, pairing + directed advertising 
 
 ## 4. Messages: device → app (DATA characteristic)
 
-All messages share: `type` (string), `seq` (integer, +1 per message, any type; lets the app
-detect drops), `synced` (bool, see §2).
+All messages share: `type` (string), `seq` (32-bit unsigned integer, +1 per message, any type;
+lets the app detect drops), `synced` (bool, see §2).
+
+`seq` **restarts at 0 on every boot**. A reboot always drops the BLE connection, so after a
+reconnect the app checks `seq`:
+- `seq` continues from where it was → no reboot; any gap means dropped messages.
+- `seq` is back at 0 → the firmware rebooted; the gap is expected, not data loss.
+
+At ~1 message/s a 32-bit `seq` takes over 100 years to wrap, so wrap-around needs no handling.
 
 ### 4.0 Car axes and mounting [Henry, Kyle]
 
@@ -172,17 +186,30 @@ each file, so the rotation can be redone afterwards if it turns out wrong.
 ### 4.1 Segment summary — `seg`, 1 per second
 ```json
 {"type":"seg","seq":1042,"synced":true,"t_start":1792500000000,"t_end":1792500001000,
- "n":400,"rms_z":0.041,"peak_z":0.22,"roll_rms":1.8,"pitch_rms":2.1}
+ "n":416,"rms_z":0.041,"peak_z":0.22,"roll_rms":1.8,"pitch_rms":2.1}
 ```
 
 | Field | Unit | Meaning |
 |---|---|---|
 | `t_start`, `t_end` | epoch ms | First and last sample time of the 1 s window |
-| `n` | count | Samples in the window (expect 400; fewer means dropped samples) |
+| `n` | count | Samples in the window (expect about `rate_hz`, §4.3; a large shortfall means dropped samples) |
 | `rms_z` | g | **Roughness.** RMS of vertical acceleration, **gravity removed**, in car axes (§4.0) |
 | `peak_z` | g | Largest absolute vertical acceleration in the window |
 | `roll_rms` | deg/s | RMS of roll rate (side-to-side rocking) |
 | `pitch_rms` | deg/s | RMS of pitch rate (nose up/down) |
+
+**IMU rate: 416 Hz.** The LSM6DSO32X has no 400 Hz rate; its rates step through fixed values
+(…, 208, 416, 833 Hz, …). Firmware uses 416 Hz and doesn't resample to 400, since nothing
+downstream needs exactly 400.
+
+**`n` is not a constant**, even with nothing dropped:
+- A 1000 ms window holds 416 or 417 samples depending on where its edges fall between samples.
+- The IMU's rate comes from its own oscillator, the window from the ESP32's clock; they don't run
+  at exactly the same rate, which adds more spread.
+
+So the app compares `n` to `rate_hz` from the `status` message (§4.3), not a hard-coded number.
+The drop threshold is set after measuring real `n` values on hardware. **Placeholder until then:
+flag a segment if `n` < 400.**
 
 ### 4.2 Event — `evt`, when detected
 ```json
@@ -192,16 +219,39 @@ each file, so the rotation can be redone afterwards if it turns out wrong.
 
 | Field | Unit | Meaning |
 |---|---|---|
-| `t` | epoch ms | Time of the **peak**, not the time the event was sent (detection can lag) |
+| `t` | epoch ms | Time of the **largest peak within the lockout window** (below), not the time the event was sent |
 | `class` | — | `"pothole"`, `"speed_bump"`, or `"unknown"` |
 | `peak_z` | g | Peak vertical acceleration (gravity removed) |
 | `roll_peak`, `pitch_peak` | deg/s | Peak roll / pitch rate during the event |
 | `conf` | 0–1 | Detector confidence (use `1.0` if the detector doesn't produce one) |
 
-### 4.3 Status — `status`, on connect (optional but very helpful for debugging)
+**Lockout, lag, and ordering.** After the first above-threshold sample, firmware counts no new
+events for a lockout window of 1.0–1.5 s (exact value not final), so the front and rear axles
+hitting one pothole count once. The event is sent when the lockout ends, so it can report the
+largest peak. This means:
+- An `evt` may be sent up to the lockout duration (max 1.5 s) after its peak.
+- An `evt` can arrive **after** the `seg` that contains its peak. The app must not assume events
+  arrive before their segment.
+
+§6 still works unchanged: the app interpolates location at `t`, not at arrival time.
+
+Known limitation (for the backend): the lockout is time-based, so it covers different distances at
+different speeds. At very low speed the rear-axle hit can land after the lockout and be counted
+twice; at high speed two potholes close together can merge into one event.
+
+### 4.3 Status — `status`, required, on every connect
 ```json
-{"type":"status","seq":0,"synced":false,"fw":"0.1.0","imu_ok":true,"sd_ok":true,"rate_hz":400}
+{"type":"status","seq":0,"synced":false,"fw":"0.1.0","imu_ok":true,"sd_ok":true,"rate_hz":416}
 ```
+
+Firmware sends this on every connect. The app:
+- copies `fw` into the trip's `fw_version` (§7), so each trip records which firmware logic
+  (thresholds, filters, event rules) produced its data;
+- uses `rate_hz` to check `n` (§4.1).
+
+`fw` changes with every firmware change, including ones that don't affect scoring (e.g. a BLE
+fix). Telling scoring changes apart needs a firmware changelog. A separate scoring version can be
+added later if this becomes a problem.
 
 ---
 
@@ -244,7 +294,8 @@ unreliable below ~1–2 m/s).
 
 ## 7. Supabase [Ben]
 
-**Agreed by Ben (Oct 2026).** Changes to anything here go through this file, like the rest.
+**Agreed by Ben (Oct 2026),** except `trips.fw_version` (added for CR-1, waiting for Ben's OK).
+Changes to anything here go through this file, like the rest.
 
 **Connecting**
 - The app reaches Supabase at the laptop's Tailscale Funnel URL (`https://<machine>.<tailnet>.ts.net`).
@@ -303,6 +354,7 @@ unreliable below ~1–2 m/s).
 | `end_time` | `bigint` | `null` while the trip is in progress; the app sets it once when the trip ends |
 | `source` | `text` not null | |
 | `app_version` | `text` | |
+| `fw_version` | `text` | `fw` from the `status` message (§4.3). **Pending Ben (CR-1)** |
 | `created_by` | `uuid` | Filled in by the database |
 | `received_at` | `timestamptz` | Filled in by the database |
 
@@ -391,12 +443,13 @@ always show the same thing. The app calls them through the API (supabase-kt `rpc
 ## 9. Decisions needed
 
 **Henry (firmware)**
-- [ ] OK with the fields and units in §4? Anything you'd add or drop?
-- [ ] OK with the car axes, mounting, gravity removal, and IMU ranges in §4.0?
-- [ ] OK with phone-time stamping + 60 s re-sync (§2), and sync rows in the SD log?
-- [ ] OK with the packet-size and advertising rules in §3 (restart advertising after disconnect)?
-- [ ] BLE library (NimBLE-Arduino?) and JSON (ArduinoJson?) OK?
-- [ ] Rough date for a firmware build that sends fake `seg`/`evt` messages over BLE?
+- [x] OK with the fields and units in §4? Anything you'd add or drop? Yes, with CR-1 to CR-6
+  applied (§10).
+- [x] OK with the car axes, mounting, gravity removal, and IMU ranges in §4.0?
+- [x] OK with phone-time stamping + 60 s re-sync (§2), and sync rows in the SD log?
+- [x] OK with the packet-size and advertising rules in §3 (restart advertising after disconnect)?
+- [x] BLE library (NimBLE-Arduino?) and JSON (ArduinoJson?) OK?
+- [x] Rough date for a firmware build that sends fake `seg`/`evt` messages over BLE?
 
 **Kyle (hardware)**
 - [ ] "FRONT →" arrow on the enclosure, and a rigid, roughly level mount (§4.0)
@@ -414,11 +467,12 @@ always show the same thing. The app calls them through the API (supabase-kt `rpc
   normalization after the calibration drives (§7 Map functions).
 - [x] Grouping by direction and the event-merge rules: yes, with directions compared around the
   circle and a rule for rows with no heading (§7 Map functions).
+- [ ] Add `fw_version text` to the `trips` table (§7, CR-1).
 - [ ] **Scott:** confirm the result columns proposed for `road_quality_in_area` and
   `events_in_area` (§7) fit what the map screens need.
 
 **Team**
-- [ ] Confirm IMU rate 400 Hz and 1 s segment windows
+- [ ] Confirm IMU rate 416 Hz (the IMU has no 400 Hz rate, §4.1) and 1 s segment windows
 - [ ] Vehicle list and IDs (truck, Camry, Escape)
 - [ ] Where speed normalization happens (proposal: in the SQL functions, after calibration drives)
 - [ ] Web map owner and timing (after the app → Supabase → map pipeline works)
@@ -428,6 +482,19 @@ always show the same thing. The app calls them through the API (supabase-kt `rpc
 
 ## 10. Changes since v0.2
 
+Firmware change requests from Henry, CR-1 to CR-6:
+- CR-1: `status` message is now required on every connect; the app stores `fw` in a new
+  `trips.fw_version` column (pending Ben) (§4.3, §7).
+- CR-2: IMU rate 400 Hz → 416 Hz, the nearest rate the LSM6DSO32X supports (§1, §4.1, §4.3, §9).
+- CR-3: `n` is compared to `rate_hz` with a tolerance; placeholder threshold `n` < 400 until
+  measured on hardware (§4.1).
+- CR-4: new time offsets are applied only at segment boundaries; events use their segment's
+  offset (§2).
+- CR-5: event lockout, `t` is the largest peak, events may arrive up to 1.5 s late and after their
+  segment (§4.2).
+- CR-6: `seq` is 32-bit unsigned and restarts at 0 on every boot (§4).
+
+Earlier v0.3 changes:
 - Scott owns this file.
 - App adds `heading_deg` (GPS direction of travel) to segments and events (§6, §7).
 - Events table now has `gps_accuracy_m`, matching segments (§7).
