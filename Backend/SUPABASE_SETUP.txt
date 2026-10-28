@@ -97,7 +97,7 @@ This creates:
     Backend/supabase/
         config.toml      <- project settings (ports, auth, etc.). COMMIT THIS.
         .gitignore       <- already ignores the generated temp files and .env
-        seed.sql         <- may or may not be created; create it if missing (see Step 8)
+        seed.sql         <- may or may not be created; not used (vehicles come from a migration)
 
 The CLI expects migrations and functions INSIDE that supabase/ folder, so move the
 placeholder folders we already have in there:
@@ -111,8 +111,9 @@ and delete the empty old folders.)
 The final layout should be:
 
     Backend/
-        sample_data.sql
         SUPABASE_SETUP.txt
+        SERVER_START_STOP.txt
+        checks/            <- check_keys.sh, check_access.sh (Step 9B)
         supabase/
             config.toml
             .gitignore
@@ -156,48 +157,70 @@ KEY RULES:
 
 
 ------------------------------------------------------------------
-STEP 7 - Load the sample (trash) data to look around
+STEP 7 - Load the database schema
 ------------------------------------------------------------------
 
-Option A - Studio:
-    Open Studio > SQL Editor > New query, paste in the contents of
-    Backend/sample_data.sql, and click Run. Then look in Table Editor.
+The tables, checks and access rules are already written as migrations in
+Backend/supabase/migrations/ (they follow docs/data-contract.md section 7):
 
-Option B - command line:
+    <timestamp>_init_schema.sql    PostGIS, the 4 tables, permissions, Row Level Security
+    <timestamp>_add_vehicles.sql   the starting vehicle list (truck, camry, escape)
 
-    cd ~/ee475aut26team5/Backend
-    psql "postgresql://postgres:postgres@127.0.0.1:54322/postgres" -f sample_data.sql
+Get the latest files, restart Supabase so it picks up config.toml (anonymous sign-in is
+turned on there), and build the database:
 
-The script drops and recreates its tables every time, so it's safe to run again.
-All rows are tagged with source = FAKE_ASSET or FAKE_DEVICE.
-
-
-------------------------------------------------------------------
-STEP 8 - Turn the schema into a real migration (when you're ready)
-------------------------------------------------------------------
-
-sample_data.sql is only for exploring. Once the team agrees on the tables:
-
-    cd ~/ee475aut26team5/Backend
-    supabase migration new init_schema
-
-That creates supabase/migrations/<timestamp>_init_schema.sql. Copy the CREATE TYPE /
-CREATE TABLE / INDEX / POLICY parts of sample_data.sql into it (not the DROP lines).
-Copy the INSERT parts into supabase/seed.sql.
-
-Then rebuild the database from scratch:
-
+    cd ~/ee475aut26team5
+    git pull
+    cd Backend
+    supabase stop && supabase start
     supabase db reset
 
-This re-runs every migration and then seed.sql. Do this whenever you pull new migrations
-from teammates. From now on, every schema change gets a new migration file; don't just
-click changes in Studio, or the rest of the team won't get them.
+`db reset` wipes the database and runs every migration in order. It's fine now because
+there's no real data yet. There is no seed.sql; if the CLI prints a warning that it can't
+find one, ignore it.
 
-Check the seed file is actually used in config.toml (it is by default):
+If you loaded the old sample_data.sql experiment earlier, `db reset` removes its tables.
 
-    [db.seed]
-    enabled = true
-    sql_paths = ["./seed.sql"]
+
+------------------------------------------------------------------
+STEP 8 - Check it worked, and how to apply changes later
+------------------------------------------------------------------
+
+Check:
+    - Studio > Table Editor shows vehicles, trips, segments, events.
+    - vehicles has 3 rows.
+    - The API answers with the anon key (use the key from `supabase status`):
+
+        curl http://127.0.0.1:54321/rest/v1/vehicles \
+             -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>"
+
+      This should print the 3 vehicles.
+    - The anon key alone can't write (only the signed-in app can). This should fail with
+      a permission / row-level security error:
+
+        curl -X POST http://127.0.0.1:54321/rest/v1/vehicles \
+             -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>" \
+             -H "Content-Type: application/json" \
+             -d '{"id":"test","name":"Test","type":"sedan"}'
+
+If `db reset` stops with an error, copy the whole output; the migration needs fixing,
+not the database.
+
+Changing the schema later:
+    - Every change gets a NEW migration file. Never edit a migration that has already run
+      on the laptop, and don't just click changes in Studio, or the rest of the team (and
+      the next `db reset`) won't get them.
+
+        supabase migration new <short_name>
+
+    - Change docs/data-contract.md first, so the app team knows.
+
+Applying new migrations once real drives are stored:
+
+    supabase migration up
+
+This runs only the migrations that haven't run yet and keeps the data.
+DON'T use `supabase db reset` after that point: it deletes every trip.
 
 
 ------------------------------------------------------------------
@@ -230,26 +253,53 @@ app would need a network security config allowing cleartext to that IP. With Fun
 --- 9B. Lock it down BEFORE going public ---
 
 1) Replace the default keys. Every Supabase CLI install ships with the SAME JWT secret,
-   and the default anon / service_role keys are published online. Anyone could use the
-   default service_role key to read or delete everything. Set your own secret / signing
-   key in supabase/config.toml (look in the [auth] section for jwt_secret or
-   signing_keys_path; the exact option depends on the CLI version, so check
-   `supabase --help` and the Supabase local-dev docs). Keep the secret itself in an
-   env var / .env file that is NOT committed. Then:
+   publishable key and secret key, built into the program and published online. Anyone
+   could use them to read or delete everything. config.toml ([auth] section) already
+   points at your own values; you create them on the laptop. Both files below are in
+   Backend/.gitignore, so they can't be committed by accident.
+
+   a) A signing key (signs the tokens the app gets when it signs in):
+
+       cd ~/ee475aut26team5/Backend
+       supabase gen signing-key --algorithm ES256 > supabase/signing_keys.json
+
+      Open the file and make sure it starts with [ and ends with ]. If it starts with {,
+      add [ at the very start and ] at the very end.
+
+   b) Random values for the other keys, in Backend/.env (copy exactly):
+
+       cat > .env <<EOF
+       SUPABASE_AUTH_JWT_SECRET=$(openssl rand -hex 32)
+       SUPABASE_AUTH_PUBLISHABLE_KEY=sb_publishable_$(openssl rand -hex 16)
+       SUPABASE_AUTH_SECRET_KEY=sb_secret_$(openssl rand -hex 16)
+       EOF
+       chmod 600 .env supabase/signing_keys.json
+
+   c) Restart and check:
 
        supabase stop && supabase start
-       supabase status                  # copy the NEW anon key for the app team
+       bash checks/check_keys.sh
 
-   Check that the old default service_role key is now rejected (should NOT return data):
+      Every line should say PASS. If not, send the output (it contains no keys).
 
-       curl http://127.0.0.1:54321/rest/v1/vehicles \
-            -H "apikey: <old-default-service-role-key>" \
-            -H "Authorization: Bearer <old-default-service-role-key>"
+   d) `supabase status` now shows the new publishable key. Give that to the app team
+      (with the Funnel URL); the old one stops working.
 
-2) Row Level Security on every table. The anon key ships inside the APK, so treat it as
-   public. RLS policies are the only thing deciding what it can do. Give the anon role
-   only what the app needs (e.g. insert readings, select map data). No update or delete.
-   Put the policies in a migration, not just Studio.
+   Don't run `git status` and commit if .env or signing_keys.json show up; they shouldn't.
+   If you lose them, make new ones the same way; the app team then needs the new
+   publishable key.
+
+2) Row Level Security on every table. The publishable key ships inside the APK, so treat
+   it as public. RLS policies are the only thing deciding what it can do. They're already
+   in the init_schema migration (loaded in Step 7) and follow docs/data-contract.md
+   section 7 "Who can do what". Check they work:
+
+       cd ~/ee475aut26team5/Backend
+       bash checks/check_access.sh
+
+   Every line should say PASS. It adds a test trip and two test users and deletes them
+   again. Any change to the rules goes in a new migration, never just in Studio; run the
+   script again afterwards.
 
 --- 9C. Install Tailscale and turn on Funnel ---
 
@@ -260,9 +310,13 @@ Install and log in (the login URL it prints can be opened on any device):
     sudo tailscale up
 
 In the admin console (https://login.tailscale.com/admin):
-    - Settings: turn on two-factor auth for the account you logged in with. Whoever has
-      this account controls the laptop's network access.
-    - DNS: turn on MagicDNS and HTTPS Certificates (Funnel needs both).
+    - Two-factor auth: Tailscale has no setting of its own; it uses the account you signed
+      in with (Google, GitHub, Microsoft...). Turn on two-factor THERE (e.g. Google
+      account > Security > 2-Step Verification). Whoever has this account controls the
+      laptop's network access.
+    - DNS: MagicDNS and HTTPS Certificates must be on (Funnel needs both). If the only
+      button says "Disable", it's already on. If you can't find HTTPS, skip it; the
+      funnel command below asks you to turn it on.
     - Machines > <laptop> > ... > Disable key expiry. Otherwise the laptop drops off
       after ~180 days and the URL stops working.
 
@@ -281,12 +335,17 @@ or turn it off with:
     tailscale funnel status
     sudo tailscale funnel reset       # turn Funnel off
 
-Test from a phone with Wi-Fi OFF (on cellular), or any computer off your network:
+Test from a device that is NOT on Tailscale (a phone on cellular, a friend's computer).
+From the laptop itself the name skips Funnel, so that test proves nothing. Type it on ONE
+line, replacing the <...> parts (no angle brackets left) with the URL and the publishable
+key from `supabase status`:
 
-    curl https://<machine-name>.<tailnet-name>.ts.net/rest/v1/vehicles \
-         -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>"
+    curl "https://<machine-name>.<tailnet-name>.ts.net/rest/v1/vehicles" -H "apikey: <publishable-key>"
 
-Give the app team the https://...ts.net URL and the new anon key. They go in
+On Windows use curl.exe instead of curl (in PowerShell, curl is a different command).
+It should print the 3 vehicles.
+
+Give the app team the https://...ts.net URL and the new publishable key. They go in
 android_app/local.properties, never hard-coded, so the URL can change later (e.g. if we
 move to a Cloudflare Tunnel with our own domain) without code changes.
 
@@ -317,7 +376,7 @@ You SHOULD see:
     Backend/supabase/seed.sql (if created)
 
 You should NOT see any of these (if you do, stop and add them to .gitignore):
-    .env  /  .env.local  /  anything containing keys or passwords
+    Backend/.env  /  Backend/supabase/signing_keys.json  /  anything with keys or passwords
     Backend/supabase/.temp/  /  Backend/supabase/.branches/
 
 Commit and push:
@@ -334,7 +393,8 @@ Open a pull request so the team can review it:
 (or open the repo on github.com and click "Compare & pull request").
 
 After it's merged, teammates who want their own local copy can pull, install Docker +
-the CLI (Steps 2-3), and run `supabase start` then `supabase db reset` in Backend/.
+the CLI (Steps 2-3), make their own Backend/.env and signing key (Step 9B 1a-1b; config.toml
+expects both), and run `supabase start` then `supabase db reset` in Backend/.
 
 
 ------------------------------------------------------------------
@@ -344,12 +404,13 @@ EVERYDAY COMMANDS (run inside Backend/)
     supabase start            start everything (data is kept between restarts)
     supabase stop             stop everything, keep data
     supabase status           show URLs and keys again
-    supabase db reset         wipe DB, re-run migrations + seed.sql
+    supabase migration up     run new migrations, keep data (use this once real drives exist)
+    supabase db reset         wipe DB, re-run all migrations (DELETES ALL DATA)
     supabase migration new X  create a new empty migration file
     supabase stop --no-backup stop AND delete all data (careful)
 
 Supabase does not restart on its own after a reboot. After the laptop restarts, run
-`supabase start` in Backend/ again.
+`supabase start` in Backend/ again. Full start-up / shut-down steps: SERVER_START_STOP.txt.
 
 
 ------------------------------------------------------------------
@@ -378,8 +439,14 @@ Phone gets "CLEARTEXT communication not permitted"
     (or, for LAN-only testing, add a network security config; see Step 9A).
 
 Old default keys still work after changing them
-    Supabase didn't pick up the new secret. Check config.toml, the env var it points to,
-    then `supabase stop && supabase start`.
+    Run `bash checks/check_keys.sh`; it says which key is wrong. Usually a typo or trailing
+    space in Backend/.env, or Supabase wasn't restarted (`supabase stop && supabase start`).
 
 Queries from the app return [] but Studio shows rows
-    Row Level Security is blocking the anon role. Check the policies on that table.
+    Row Level Security is filtering them out (Studio bypasses it). Run
+    `bash checks/check_access.sh`, then check the policies on that table.
+
+curl: "400 invalid header name" or "(3) URL rejected"
+    The command was mistyped: a space before a ':' in a header, leftover <angle brackets>,
+    a missing `curl`, or a multi-line command typed on Windows. Use the one-line version
+    in Step 9C.
