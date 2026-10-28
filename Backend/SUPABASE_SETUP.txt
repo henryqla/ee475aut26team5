@@ -310,9 +310,13 @@ Install and log in (the login URL it prints can be opened on any device):
     sudo tailscale up
 
 In the admin console (https://login.tailscale.com/admin):
-    - Settings: turn on two-factor auth for the account you logged in with. Whoever has
-      this account controls the laptop's network access.
-    - DNS: turn on MagicDNS and HTTPS Certificates (Funnel needs both).
+    - Two-factor auth: Tailscale has no setting of its own; it uses the account you signed
+      in with (Google, GitHub, Microsoft...). Turn on two-factor THERE (e.g. Google
+      account > Security > 2-Step Verification). Whoever has this account controls the
+      laptop's network access.
+    - DNS: MagicDNS and HTTPS Certificates must be on (Funnel needs both). If the only
+      button says "Disable", it's already on. If you can't find HTTPS, skip it; the
+      funnel command below asks you to turn it on.
     - Machines > <laptop> > ... > Disable key expiry. Otherwise the laptop drops off
       after ~180 days and the URL stops working.
 
@@ -331,12 +335,17 @@ or turn it off with:
     tailscale funnel status
     sudo tailscale funnel reset       # turn Funnel off
 
-Test from a phone with Wi-Fi OFF (on cellular), or any computer off your network:
+Test from a device that is NOT on Tailscale (a phone on cellular, a friend's computer).
+From the laptop itself the name skips Funnel, so that test proves nothing. Type it on ONE
+line, replacing the <...> parts (no angle brackets left) with the URL and the publishable
+key from `supabase status`:
 
-    curl https://<machine-name>.<tailnet-name>.ts.net/rest/v1/vehicles \
-         -H "apikey: <anon-key>" -H "Authorization: Bearer <anon-key>"
+    curl "https://<machine-name>.<tailnet-name>.ts.net/rest/v1/vehicles" -H "apikey: <publishable-key>"
 
-Give the app team the https://...ts.net URL and the new anon key. They go in
+On Windows use curl.exe instead of curl (in PowerShell, curl is a different command).
+It should print the 3 vehicles.
+
+Give the app team the https://...ts.net URL and the new publishable key. They go in
 android_app/local.properties, never hard-coded, so the URL can change later (e.g. if we
 move to a Cloudflare Tunnel with our own domain) without code changes.
 
