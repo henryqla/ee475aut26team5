@@ -4,10 +4,10 @@
 # same on every install) have been replaced. Prints PASS/FAIL only; never prints a key.
 #
 # Run on the laptop, with Supabase started:
-#     cd ~/ee475aut26team5/Backend && bash check_keys.sh
+#     cd ~/ee475aut26team5/Backend && bash checks/check_keys.sh
 
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # run from Backend/
 
 API=http://127.0.0.1:54321
 KEYS_FILE=supabase/signing_keys.json

@@ -1,0 +1,65 @@
+SUPABASE SERVER: START-UP AND SHUT-DOWN
+Road Quality Mapper - EE475 Team 5
+==================================================================
+
+For the Linux laptop that runs Supabase. First-time setup is in SUPABASE_SETUP.txt.
+
+What starts by itself after a reboot:   Docker, Tailscale, Funnel
+What does NOT:                          Supabase (you run `supabase start`)
+
+
+------------------------------------------------------------------
+START-UP (after turning the laptop on or rebooting)
+------------------------------------------------------------------
+
+1. Keep the laptop plugged in. The lid can be closed once it's running.
+
+2. Start Supabase:
+
+       cd ~/ee475aut26team5/Backend
+       supabase start
+
+   If it says "Cannot connect to the Docker daemon": sudo systemctl start docker
+
+3. Check Funnel is on:
+
+       tailscale funnel status
+
+   It should show https://benjamin-xps139350.tailf1a20b.ts.net -> 127.0.0.1:54321.
+   If it shows nothing:   sudo tailscale funnel --bg 54321
+
+4. (Optional) Quick check that the keys are still right:
+
+       bash checks/check_keys.sh
+
+
+------------------------------------------------------------------
+SHUT-DOWN
+------------------------------------------------------------------
+
+1. Stop Supabase (keeps all data):
+
+       cd ~/ee475aut26team5/Backend
+       supabase stop
+
+   NEVER add --no-backup; that deletes the database.
+
+2. Funnel can stay on. While Supabase is stopped, the app just gets an error and should
+   retry later. To turn Funnel off completely:   sudo tailscale funnel reset
+   (Then turn it back on with `sudo tailscale funnel --bg 54321` next time.)
+
+3. Turn off the laptop:   sudo shutdown now
+
+
+------------------------------------------------------------------
+AFTER PULLING NEW CODE
+------------------------------------------------------------------
+
+       cd ~/ee475aut26team5 && git pull
+       cd Backend
+       supabase migration up            # new migrations only, keeps data
+
+   If config.toml changed, restart:   supabase stop && supabase start
+   If the access rules changed:       bash checks/check_access.sh
+
+   Don't use `supabase db reset` once real drives are stored: it wipes everything.

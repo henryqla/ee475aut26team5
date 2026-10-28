@@ -5,10 +5,10 @@
 # users, then deletes them with the secret key. Prints PASS/FAIL only; never prints a key.
 #
 # Run on the laptop, with Supabase started and the migrations loaded:
-#     cd ~/ee475aut26team5/Backend && bash check_access.sh
+#     cd ~/ee475aut26team5/Backend && bash checks/check_access.sh
 
 set -u
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."   # run from Backend/
 
 API=http://127.0.0.1:54321
 GREEN=$'\e[32m'; RED=$'\e[31m'; BOLD=$'\e[1m'; RESET=$'\e[0m'

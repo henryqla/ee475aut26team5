@@ -111,8 +111,9 @@ and delete the empty old folders.)
 The final layout should be:
 
     Backend/
-        sample_data.sql
         SUPABASE_SETUP.txt
+        SERVER_START_STOP.txt
+        checks/            <- check_keys.sh, check_access.sh (Step 9B)
         supabase/
             config.toml
             .gitignore
@@ -178,8 +179,7 @@ turned on there), and build the database:
 there's no real data yet. There is no seed.sql; if the CLI prints a warning that it can't
 find one, ignore it.
 
-Ignore Backend/sample_data.sql. It was an early experiment and doesn't match the contract.
-If you loaded it before, `db reset` removes its tables.
+If you loaded the old sample_data.sql experiment earlier, `db reset` removes its tables.
 
 
 ------------------------------------------------------------------
@@ -278,7 +278,7 @@ app would need a network security config allowing cleartext to that IP. With Fun
    c) Restart and check:
 
        supabase stop && supabase start
-       bash check_keys.sh
+       bash checks/check_keys.sh
 
       Every line should say PASS. If not, send the output (it contains no keys).
 
@@ -295,7 +295,7 @@ app would need a network security config allowing cleartext to that IP. With Fun
    section 7 "Who can do what". Check they work:
 
        cd ~/ee475aut26team5/Backend
-       bash check_access.sh
+       bash checks/check_access.sh
 
    Every line should say PASS. It adds a test trip and two test users and deletes them
    again. Any change to the rules goes in a new migration, never just in Studio; run the
@@ -376,7 +376,7 @@ You SHOULD see:
     Backend/supabase/seed.sql (if created)
 
 You should NOT see any of these (if you do, stop and add them to .gitignore):
-    .env  /  .env.local  /  anything containing keys or passwords
+    Backend/.env  /  Backend/supabase/signing_keys.json  /  anything with keys or passwords
     Backend/supabase/.temp/  /  Backend/supabase/.branches/
 
 Commit and push:
@@ -393,7 +393,8 @@ Open a pull request so the team can review it:
 (or open the repo on github.com and click "Compare & pull request").
 
 After it's merged, teammates who want their own local copy can pull, install Docker +
-the CLI (Steps 2-3), and run `supabase start` then `supabase db reset` in Backend/.
+the CLI (Steps 2-3), make their own Backend/.env and signing key (Step 9B 1a-1b; config.toml
+expects both), and run `supabase start` then `supabase db reset` in Backend/.
 
 
 ------------------------------------------------------------------
@@ -409,7 +410,7 @@ EVERYDAY COMMANDS (run inside Backend/)
     supabase stop --no-backup stop AND delete all data (careful)
 
 Supabase does not restart on its own after a reboot. After the laptop restarts, run
-`supabase start` in Backend/ again.
+`supabase start` in Backend/ again. Full start-up / shut-down steps: SERVER_START_STOP.txt.
 
 
 ------------------------------------------------------------------
@@ -438,8 +439,14 @@ Phone gets "CLEARTEXT communication not permitted"
     (or, for LAN-only testing, add a network security config; see Step 9A).
 
 Old default keys still work after changing them
-    Supabase didn't pick up the new secret. Check config.toml, the env var it points to,
-    then `supabase stop && supabase start`.
+    Run `bash checks/check_keys.sh`; it says which key is wrong. Usually a typo or trailing
+    space in Backend/.env, or Supabase wasn't restarted (`supabase stop && supabase start`).
 
 Queries from the app return [] but Studio shows rows
-    Row Level Security is blocking the anon role. Check the policies on that table.
+    Row Level Security is filtering them out (Studio bypasses it). Run
+    `bash checks/check_access.sh`, then check the policies on that table.
+
+curl: "400 invalid header name" or "(3) URL rejected"
+    The command was mistyped: a space before a ':' in a header, leftover <angle brackets>,
+    a missing `curl`, or a multi-line command typed on Windows. Use the one-line version
+    in Step 9C.
