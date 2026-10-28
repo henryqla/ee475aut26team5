@@ -248,8 +248,12 @@ unreliable below ~1–2 m/s).
 
 **Connecting**
 - The app reaches Supabase at the laptop's Tailscale Funnel URL (`https://<machine>.<tailnet>.ts.net`).
-  Ben gives the app team the URL and the anon key. Both go in `local.properties`
-  (`SUPABASE_URL`, `SUPABASE_ANON_KEY`), never in source code.
+  Ben gives the app team the URL and the **publishable key** (`sb_publishable_...`; older
+  Supabase docs call this the "anon key"). Both go in `local.properties`
+  (`SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`), never in source code.
+- The publishable key is public (it ships in the APK) and goes **only** in the `apikey` header.
+  The `Authorization: Bearer` header carries the sign-in token from below, not the key.
+  supabase-kt sets both headers itself.
 - The laptop is sometimes unreachable (restart, Wi-Fi drop). Uploads that fail should be retried
   later from Room; nothing is lost on the server side by sending late.
 
@@ -258,7 +262,7 @@ unreliable below ~1–2 m/s).
   no password, nothing for the user to do. Supabase keeps the session on the phone and reuses it.
 - Each app install gets its own user ID. The database uses it to know which trips belong to which
   phone, so one phone can't edit another phone's trips.
-- The web map uses the anon key **without** signing in, which makes it read-only.
+- The web map uses the publishable key **without** signing in, which makes it read-only.
 
 **General rules**
 - **Times** are epoch milliseconds as `bigint`, the same numbers the app and firmware use. The
