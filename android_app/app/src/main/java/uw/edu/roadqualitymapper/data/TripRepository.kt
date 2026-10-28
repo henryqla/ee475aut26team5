@@ -4,7 +4,7 @@ import kotlinx.coroutines.flow.Flow
 
 /**
  * Everything the app needs from the backend. The service and screens only use this interface,
- * so switching away from Firebase means writing one new implementation, nothing else.
+ * so the Supabase backend (or any other) is one new implementation, nothing else.
  */
 interface TripRepository {
     suspend fun startTrip(vehicleId: String, source: DataSource): String   // returns the new tripId
