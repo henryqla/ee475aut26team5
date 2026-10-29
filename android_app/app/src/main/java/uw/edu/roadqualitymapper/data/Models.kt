@@ -54,6 +54,13 @@ data class Trip(
     val source: DataSource = DataSource.REAL,
 )
 
+/** One whole trip with its data, as drawn on the map. Comes from the fake file or from Supabase. */
+data class Drive(
+    val trip: Trip,
+    val segments: List<Segment>,
+    val events: List<RoadEvent>,
+)
+
 data class Vehicle(
     val id: String = "",
     val name: String = "",

@@ -1,16 +1,30 @@
 package uw.edu.roadqualitymapper.ui.screens
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Card
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
@@ -26,13 +40,20 @@ import com.google.maps.android.compose.Marker
 import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import uw.edu.roadqualitymapper.BuildConfig
+import uw.edu.roadqualitymapper.data.Drive
 import uw.edu.roadqualitymapper.data.EventClass
-import uw.edu.roadqualitymapper.data.FakeDrive
 import uw.edu.roadqualitymapper.data.FakeDriveLoader
 import uw.edu.roadqualitymapper.data.RoadEvent
 import uw.edu.roadqualitymapper.data.Segment
+import uw.edu.roadqualitymapper.data.downloadDrives
+import uw.edu.roadqualitymapper.data.supabase.SupabaseConnection
+import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
+import uw.edu.roadqualitymapper.data.uploadDrive
 import uw.edu.roadqualitymapper.ui.metersToPixels
 import uw.edu.roadqualitymapper.ui.roughnessColor
 import uw.edu.roadqualitymapper.ui.shiftPathRight
@@ -57,13 +78,49 @@ private const val MIN_ROAD_LINE_WIDTH_DP = 4f
  */
 private const val DIRECTION_OFFSET_M = 3.0
 
+/** Where the map's drives come from. Release builds always use Supabase. */
+private enum class MapSource(val label: String) {
+    FAKE_FILE("Fake file"),
+    SUPABASE("Supabase"),
+}
+
 @Composable
 fun MapScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    // Read off the main thread. Stays empty in release builds, which don't contain the fake asset.
-    val fakeDrives by produceState(initialValue = emptyList<FakeDrive>()) {
-        value = withContext(Dispatchers.IO) { FakeDriveLoader.load(context) }
+    val scope = rememberCoroutineScope()
+    val repository = remember { if (SupabaseConnection.isConfigured) SupabaseTripRepository() else null }
+
+    var source by rememberSaveable { mutableStateOf(if (BuildConfig.DEBUG) MapSource.FAKE_FILE else MapSource.SUPABASE) }
+    var reloadCount by remember { mutableIntStateOf(0) }   // bump to load again
+    var drives by remember { mutableStateOf(emptyList<Drive>()) }
+    var status by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+
+    // Load the drives whenever the source changes or a reload is asked for.
+    LaunchedEffect(source, reloadCount) {
+        drives = emptyList()
+        when (source) {
+            // Stays empty in release builds, which don't contain the fake asset.
+            MapSource.FAKE_FILE -> drives = withContext(Dispatchers.IO) { FakeDriveLoader.load(context) }
+            MapSource.SUPABASE -> {
+                if (repository == null) {
+                    status = NOT_CONFIGURED
+                    return@LaunchedEffect
+                }
+                status = "Loading from Supabase…"
+                status = try {
+                    // Debug builds show fake trips too; release builds only real ones.
+                    drives = repository.downloadDrives(includeFake = BuildConfig.DEBUG)
+                    "${drives.size} trip(s) from Supabase"
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    "Couldn't load: ${e.message}"
+                }
+            }
+        }
     }
+
     var mapLoaded by remember { mutableStateOf(false) }
     val cameraPositionState = rememberCameraPositionState {
         position = CameraPosition.fromLatLngZoom(UW_CAMPUS, DEFAULT_ZOOM)
@@ -71,8 +128,8 @@ fun MapScreen(modifier: Modifier = Modifier) {
 
     // Zoom to the drives once both the map and the data are ready
     // (bounds-based camera moves crash if the map hasn't been laid out yet).
-    LaunchedEffect(mapLoaded, fakeDrives) {
-        val points = fakeDrives.flatMap { drive -> drive.segments.mapNotNull { it.latLng() } }
+    LaunchedEffect(mapLoaded, drives) {
+        val points = drives.flatMap { drive -> drive.segments.mapNotNull { it.latLng() } }
         if (!mapLoaded || points.isEmpty()) return@LaunchedEffect
         val bounds = LatLngBounds.builder()
             .apply { points.forEach { include(it) } }
@@ -88,19 +145,89 @@ fun MapScreen(modifier: Modifier = Modifier) {
         MIN_ROAD_LINE_WIDTH_DP * density,
     )
 
-    GoogleMap(
-        modifier = modifier,
-        cameraPositionState = cameraPositionState,
-        onMapLoaded = { mapLoaded = true },
-    ) {
-        fakeDrives.forEach { drive -> DriveOnMap(drive, lineWidthPx) }
+    Box(modifier) {
+        GoogleMap(
+            modifier = Modifier.fillMaxSize(),
+            cameraPositionState = cameraPositionState,
+            onMapLoaded = { mapLoaded = true },
+        ) {
+            drives.forEach { drive -> DriveOnMap(drive, lineWidthPx) }
+        }
+
+        if (BuildConfig.DEBUG) {
+            DebugBar(
+                source = source,
+                onSourceChange = { source = it },
+                status = status,
+                busy = busy,
+                onUploadFakeDrives = {
+                    if (repository == null) {
+                        status = NOT_CONFIGURED
+                        return@DebugBar
+                    }
+                    scope.launch {
+                        busy = true
+                        status = "Uploading fake drives…"
+                        status = try {
+                            val fakeDrives = withContext(Dispatchers.IO) { FakeDriveLoader.load(context) }
+                            fakeDrives.forEach { repository.uploadDrive(it) }
+                            // Show the result: switch to Supabase, or reload if already there.
+                            if (source == MapSource.SUPABASE) reloadCount++ else source = MapSource.SUPABASE
+                            "Uploaded ${fakeDrives.size} fake trip(s)"
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            "Upload failed: ${e.message}"
+                        } finally {
+                            busy = false
+                        }
+                    }
+                },
+                modifier = Modifier.align(Alignment.TopCenter).padding(8.dp),
+            )
+        }
+    }
+}
+
+private const val NOT_CONFIGURED =
+    "Supabase isn't set up: add SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY to local.properties"
+
+/** Debug builds only: pick where the map's data comes from, and push the fake drives to Supabase. */
+@Composable
+private fun DebugBar(
+    source: MapSource,
+    onSourceChange: (MapSource) -> Unit,
+    status: String,
+    busy: Boolean,
+    onUploadFakeDrives: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(modifier) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                MapSource.entries.forEach { option ->
+                    FilterChip(
+                        selected = source == option,
+                        onClick = { onSourceChange(option) },
+                        label = { Text(option.label) },
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                }
+                TextButton(onClick = onUploadFakeDrives, enabled = !busy) {
+                    Text("Upload fake")
+                }
+            }
+            if (status.isNotEmpty()) {
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            }
+        }
     }
 }
 
 /** One trip: its road line and its event markers, shifted to the side of the road it drove on. */
 @Composable
 @GoogleMapComposable
-private fun DriveOnMap(drive: FakeDrive, lineWidthPx: Float) {
+private fun DriveOnMap(drive: Drive, lineWidthPx: Float) {
     // Segments without a GPS fix can't be drawn; skip them.
     val located = remember(drive) { drive.segments.filter { it.latLng() != null } }
     val path = remember(located) { located.mapNotNull { it.latLng() } }
