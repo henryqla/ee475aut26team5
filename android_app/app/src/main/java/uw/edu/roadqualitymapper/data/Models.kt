@@ -54,6 +54,16 @@ data class Trip(
     val source: DataSource = DataSource.REAL,
 )
 
+/** One phone GPS reading (contract §6). */
+data class GpsFix(
+    val t: Long,                      // the fix's own measurement time, epoch millis (not arrival time)
+    val lat: Double,
+    val lon: Double,
+    val speedMps: Double?,
+    val headingDeg: Double?,          // clockwise from north; null when barely moving
+    val accuracyM: Double?,
+)
+
 /** One whole trip with its data, as drawn on the map. Comes from the fake file or from Supabase. */
 data class Drive(
     val trip: Trip,
