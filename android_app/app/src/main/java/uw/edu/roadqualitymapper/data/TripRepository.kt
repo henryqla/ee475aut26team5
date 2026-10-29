@@ -24,6 +24,9 @@ interface TripRepository {
 /** Uploads a whole trip in the order the database requires: trip, then segments, then events. */
 suspend fun TripRepository.uploadDrive(drive: Drive) {
     uploadTrip(drive.trip)
+    // If the trip was already stored (e.g. uploaded when it started), uploadTrip skips it and
+    // leaves end_time as it was, so set it separately.
+    drive.trip.endTime?.let { endTrip(drive.trip.id, it) }
     uploadSegments(drive.trip, drive.segments)
     uploadEvents(drive.events)
 }
