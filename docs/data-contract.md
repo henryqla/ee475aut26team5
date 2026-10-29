@@ -283,6 +283,9 @@ unreliable below ~1–2 m/s).
   - `event_class`, `user_label`: `POTHOLE`, `SPEED_BUMP`, `UNKNOWN`
 
   The BLE message keeps lowercase `"class":"pothole"` (§4.2); the app converts it.
+  `user_label = UNKNOWN` means "not sure": it doesn't override `event_class`, the same as `null`.
+  The app sends only `POTHOLE` or `SPEED_BUMP` labels for now. A false-alarm label would be a new
+  value (`FALSE_ALARM`), added through this file first.
 - **Filled in by the database, not sent by the app:** `created_by` (the phone's user ID),
   `received_at` (when the row arrived), `geog`, and the readable `_ts` times.
 - **Range checks:** `lat` −90…90, `lon` −180…180, `heading_deg` 0 to <360, `conf` 0…1,
@@ -307,6 +310,7 @@ unreliable below ~1–2 m/s).
 | `end_time` | `bigint` | `null` while the trip is in progress; the app sets it once when the trip ends |
 | `source` | `text` not null | |
 | `app_version` | `text` | |
+| `fw_version` | `text` | `fw` from the `status` message (§4.3, CR-1). Set when the trip is first uploaded, never changed. `null` for trips uploaded before this column existed |
 | `created_by` | `uuid` | Filled in by the database |
 | `received_at` | `timestamptz` | Filled in by the database |
 
@@ -355,26 +359,48 @@ the app can't delete anything.
 
 **Map functions** (Ben writes them). Map logic lives in SQL functions, so the app and the web map
 always show the same thing. The app calls them through the API (supabase-kt `rpc(...)`).
-- `road_quality_in_area(south, west, north, east, include_fake default false)`: segments combined
-  per small area **and per direction of travel**, with vehicle/speed normalization applied.
-  Median rather than average, so one odd drive doesn't skew a road.
-  Proposed result, one row per area and direction: `lat`, `lon`, `heading_deg`, `roughness`,
-  `drives` (number of drives that contributed).
-- `events_in_area(south, west, north, east, include_fake default false)`: events merged into one
-  when they are within **10 m** of each other, have the same `event_class`, and headings within
-  ~45° (so potholes on opposite sides of a road stay separate). Merged position = average of the
-  hits. Proposed result, one row per merged event: `lat`, `lon`, `event_class`, `heading_deg`,
-  `hits` (drives that hit it), `passes` (drives that passed that spot in the same direction),
-  `last_t`. The map shows "hit by `hits` of `passes` drives". This is a different shape from
-  `RoadEvent`, so the app will need a small model for it.
+Both take the same parameters: `south`, `west`, `north`, `east` (the map's visible box, degrees),
+`include_fake` (default `false`: only `REAL` data), and `vehicle_id` (default `null`: all
+vehicles; e.g. `"camry"` for one vehicle only). Result columns are confirmed with Scott (Oct 2026).
+- `road_quality_in_area(...)`: segments combined per small area **and per direction of travel**,
+  with vehicle/speed normalization applied. Each drive counts once per area, then the median over
+  drives, so one odd drive doesn't skew a road. Areas are ~15 m grid cells fixed to the globe
+  (panning the map doesn't regroup them), and directions are 8 sectors of 45°.
+  Result, one row per area and direction:
+
+  | Column | Type | Meaning |
+  |---|---|---|
+  | `lat`, `lon` | `double precision` | Average position of the segments in the area |
+  | `heading_deg` | `real` | Average direction of travel |
+  | `roughness` | `real` | g; median over drives of the normalized `rms_z` |
+  | `drives` | `integer` | Drives that contributed |
+  | `length_m` | `real` | Length of road the row stands for, for drawing the line; `15` for now |
+
+- `events_in_area(...)`: events merged into one when they are within **10 m** of each other, have
+  the same class, and headings within ~45° (so potholes on opposite sides of a road stay
+  separate). The class is `user_label` if set (except `UNKNOWN`, see General rules), otherwise
+  `event_class`. Merged position = average of the hits. Result, one row per merged event:
+
+  | Column | Type | Meaning |
+  |---|---|---|
+  | `lat`, `lon` | `double precision` | Average position of the hits |
+  | `event_class` | `text` | Class after user labels |
+  | `heading_deg` | `real` | Average heading of the hits; `null` if none had one |
+  | `hits` | `integer` | Drives that hit it |
+  | `passes` | `integer` | Drives that passed that spot in the same direction (always ≥ `hits`) |
+  | `last_t` | `bigint` | Epoch ms of the latest hit |
+  | `max_peak_z` | `real` | g; largest `peak_z` among the hits |
+
+  The map shows "hit by `hits` of `passes` drives". This is a different shape from `RoadEvent`,
+  so the app will need a small model for it.
 - Directions are compared around the circle: 350° and 10° count as the same direction.
 - Rows with no heading (car barely moving) are left out of `road_quality_in_area`; events with no
   heading are merged by distance and class only. Rows with no location are stored but not shown.
 - 10 m is a starting value: GPS is typically off by 3–5 m per fix. Measure the real spread by
   driving over the same speed bump ~10 times, and adjust.
-- **Timing:** a first version (raw `rms_z` × `scale_factor`, no speed normalization) right after the
-  tables exist; speed normalization after the calibration drives. The exact result columns are
-  confirmed with Scott before each function is written.
+- **Timing:** the first version is written (raw `rms_z` × `scale_factor`, no speed
+  normalization); speed normalization after the calibration drives. Result columns only change
+  through this file.
 
 ---
 
@@ -418,8 +444,9 @@ always show the same thing. The app calls them through the API (supabase-kt `rpc
   normalization after the calibration drives (§7 Map functions).
 - [x] Grouping by direction and the event-merge rules: yes, with directions compared around the
   circle and a rule for rows with no heading (§7 Map functions).
-- [ ] **Scott:** confirm the result columns proposed for `road_quality_in_area` and
-  `events_in_area` (§7) fit what the map screens need.
+- [x] **Scott:** confirm the result columns proposed for `road_quality_in_area` and
+  `events_in_area` (§7) fit what the map screens need. Yes, plus `length_m`, `max_peak_z` and a
+  `vehicle_id` filter.
 
 **Team**
 - [ ] Confirm IMU rate 400 Hz and 1 s segment windows
