@@ -362,6 +362,8 @@ always show the same thing. The app calls them through the API (supabase-kt `rpc
 Both take the same parameters: `south`, `west`, `north`, `east` (the map's visible box, degrees),
 `include_fake` (default `false`: only `REAL` data), and `vehicle_id` (default `null`: all
 vehicles; e.g. `"camry"` for one vehicle only). Result columns are confirmed with Scott (Oct 2026).
+Like table reads, a call returns at most 1000 rows; results come in a fixed order, so the app can
+read further pages with `range(...)`, the same way it pages segments.
 - `road_quality_in_area(...)`: segments combined per small area **and per direction of travel**,
   with vehicle/speed normalization applied. Each drive counts once per area, then the median over
   drives, so one odd drive doesn't skew a road. Areas are ~15 m grid cells fixed to the globe

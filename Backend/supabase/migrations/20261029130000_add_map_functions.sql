@@ -8,6 +8,8 @@
 -- empty, so every table and PostGIS function is schema-qualified.
 -- Parameters are named so the app can pass them as JSON. `vehicle_id` is also a column name, so
 -- in the body it is written with the function name in front (road_quality_in_area.vehicle_id).
+-- The API returns at most max_rows (1000, config.toml) rows per request, so a big map view needs
+-- several pages (range / offset). Results are sorted so pages don't overlap or skip rows.
 
 -- ---------------------------------------------------------------- road_quality_in_area
 -- Segments are grouped into ~15 m grid cells and 8 direction sectors (45° each, centred on N, NE,
@@ -80,7 +82,8 @@ as $$
            count(*)::integer,
            (select g.cell_m from grid g)::real
     from per_drive d
-    group by d.cell_y, d.cell_x, d.sector;
+    group by d.cell_y, d.cell_x, d.sector
+    order by d.cell_y, d.cell_x, d.sector;
 $$;
 
 -- ---------------------------------------------------------------- events_in_area
@@ -190,7 +193,8 @@ as $$
            (select count(*) from passing p where p.g = sp.g)::integer,
            sp.last_t,
            sp.max_peak_z
-    from spot sp;
+    from spot sp
+    order by sp.g;
 $$;
 
 -- ---------------------------------------------------------------- privileges
