@@ -4,19 +4,13 @@ import android.content.Context
 import org.json.JSONObject
 import java.io.FileNotFoundException
 
-/** One trip read from a hand-made JSON file, for seeing the map before real data exists. */
-data class FakeDrive(
-    val trip: Trip,
-    val segments: List<Segment>,
-    val events: List<RoadEvent>,
-)
-
+/** Reads hand-made trips from a JSON file, for seeing the map before real data exists. */
 object FakeDriveLoader {
     /** Lives in src/debug/assets, so release builds don't contain it. */
     private const val ASSET_NAME = "fake_drive.json"
 
     /** Returns an empty list when the asset isn't there (release builds). */
-    fun load(context: Context): List<FakeDrive> {
+    fun load(context: Context): List<Drive> {
         val text = try {
             context.assets.open(ASSET_NAME).bufferedReader().use { it.readText() }
         } catch (e: FileNotFoundException) {
@@ -27,7 +21,7 @@ object FakeDriveLoader {
     }
 
     /** JSON keys are snake_case to match the planned Supabase columns. */
-    private fun parseTrip(tripJson: JSONObject): FakeDrive {
+    private fun parseTrip(tripJson: JSONObject): Drive {
         val trip = Trip(
             id = tripJson.getString("id"),
             vehicleId = tripJson.getString("vehicle_id"),
@@ -80,7 +74,7 @@ object FakeDriveLoader {
             )
         }
 
-        return FakeDrive(trip, segments, events)
+        return Drive(trip, segments, events)
     }
 
     /** Location fields can be missing or null (no GPS fix close enough in time). */
