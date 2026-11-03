@@ -3,6 +3,7 @@ package uw.edu.roadqualitymapper.ui
 import com.google.android.gms.maps.model.LatLng
 import kotlin.math.cos
 import kotlin.math.pow
+import kotlin.math.sin
 import kotlin.math.sqrt
 
 // Flat-earth approximations. Fine over the few meters to few kilometers we deal with.
@@ -38,16 +39,25 @@ fun travelDirectionAt(path: List<LatLng>, i: Int): TravelDirection {
     }
 }
 
-/** Moves [point] [meters] to the right of [direction] (US traffic drives on the right). */
-fun shiftRight(point: LatLng, direction: TravelDirection, meters: Double): LatLng {
-    // Rotating (east, north) a quarter turn clockwise gives (north, -east).
-    val eastMeters = direction.north * meters
-    val northMeters = -direction.east * meters
-    return LatLng(
-        point.latitude + northMeters / METERS_PER_DEGREE_LAT,
-        point.longitude + eastMeters / (METERS_PER_DEGREE_LAT * cos(Math.toRadians(point.latitude))),
-    )
+/** Direction of a compass heading (degrees clockwise from north). */
+fun headingDirection(headingDeg: Double): TravelDirection {
+    val radians = Math.toRadians(headingDeg)
+    return TravelDirection(east = sin(radians), north = cos(radians))
 }
+
+/** Moves [point] [meters] along [direction] (backwards if [meters] is negative). */
+fun moveAlong(point: LatLng, direction: TravelDirection, meters: Double): LatLng =
+    offset(point, eastMeters = direction.east * meters, northMeters = direction.north * meters)
+
+/** Moves [point] [meters] to the right of [direction] (US traffic drives on the right). */
+fun shiftRight(point: LatLng, direction: TravelDirection, meters: Double): LatLng =
+    // Rotating (east, north) a quarter turn clockwise gives (north, -east).
+    offset(point, eastMeters = direction.north * meters, northMeters = -direction.east * meters)
+
+private fun offset(point: LatLng, eastMeters: Double, northMeters: Double) = LatLng(
+    point.latitude + northMeters / METERS_PER_DEGREE_LAT,
+    point.longitude + eastMeters / (METERS_PER_DEGREE_LAT * cos(Math.toRadians(point.latitude))),
+)
 
 /** Shifts a whole path to the right of travel, so each direction of a road draws on its own side. */
 fun shiftPathRight(path: List<LatLng>, meters: Double): List<LatLng> =

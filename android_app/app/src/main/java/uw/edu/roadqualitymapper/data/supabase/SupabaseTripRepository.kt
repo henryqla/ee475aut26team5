@@ -6,14 +6,18 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.createSupabaseClient
 import io.github.jan.supabase.postgrest.Postgrest
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.query.Order
 import io.github.jan.supabase.postgrest.query.PostgrestRequestBuilder
+import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.serializer.KotlinXSerializer
 import kotlinx.serialization.json.Json
 import uw.edu.roadqualitymapper.BuildConfig
 import uw.edu.roadqualitymapper.data.BoundingBox
 import uw.edu.roadqualitymapper.data.DataSource
+import uw.edu.roadqualitymapper.data.EventSpot
 import uw.edu.roadqualitymapper.data.RoadEvent
+import uw.edu.roadqualitymapper.data.RoadPiece
 import uw.edu.roadqualitymapper.data.Segment
 import uw.edu.roadqualitymapper.data.Trip
 import uw.edu.roadqualitymapper.data.TripRepository
@@ -103,17 +107,13 @@ class SupabaseTripRepository(
             order(Columns.T, Order.ASCENDING)
         }.map { it.toEvent() }
 
-    // Plain filter for now; Ben's events_in_area function (merged events) replaces this later.
-    override suspend fun eventsInArea(area: BoundingBox): List<RoadEvent> =
-        selectAllPages<EventRow>(Tables.EVENTS) {
-            filter {
-                gte(Columns.LAT, area.south)
-                lte(Columns.LAT, area.north)
-                gte(Columns.LON, area.west)
-                lte(Columns.LON, area.east)
-            }
-            order(Columns.ID, Order.ASCENDING)
-        }.map { it.toEvent() }
+    override suspend fun roadQualityInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String?): List<RoadPiece> =
+        rpcAllPages<RoadPieceRow>(Functions.ROAD_QUALITY_IN_AREA, area.toParams(includeFake, vehicleId))
+            .map { it.toRoadPiece() }
+
+    override suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String?): List<EventSpot> =
+        rpcAllPages<EventSpotRow>(Functions.EVENTS_IN_AREA, area.toParams(includeFake, vehicleId))
+            .map { it.toEventSpot() }
 
     override suspend fun vehicles(): List<Vehicle> =
         client.from(Tables.VEHICLES).select().decodeList<VehicleRow>().map { it.toVehicle() }
@@ -135,14 +135,25 @@ class SupabaseTripRepository(
     private suspend inline fun <reified T : Any> selectAllPages(
         table: String,
         crossinline query: PostgrestRequestBuilder.() -> Unit,
-    ): List<T> {
+    ): List<T> = readAllPages { from, to ->
+        client.from(table).select {
+            query()
+            range(from, to)
+        }.decodeList<T>()
+    }
+
+    /** Calls a database function and reads every result row. Ben's functions sort their results. */
+    private suspend inline fun <reified T : Any> rpcAllPages(function: String, params: AreaParams): List<T> =
+        readAllPages { from, to ->
+            client.postgrest.rpc(function, params) { range(from, to) }.decodeList<T>()
+        }
+
+    /** Asks for rows [from]..[to] (inclusive) until a page comes back short. */
+    private inline fun <T> readAllPages(readPage: (from: Long, to: Long) -> List<T>): List<T> {
         val rows = mutableListOf<T>()
         var from = 0L
         while (true) {
-            val page = client.from(table).select {
-                query()
-                range(from, from + PAGE_SIZE - 1)
-            }.decodeList<T>()
+            val page = readPage(from, from + PAGE_SIZE - 1)
             rows += page
             if (page.size < PAGE_SIZE) return rows
             from += PAGE_SIZE

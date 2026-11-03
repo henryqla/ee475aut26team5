@@ -52,6 +52,7 @@ data class Trip(
     val startTime: Long = 0L,
     val endTime: Long? = null,
     val source: DataSource = DataSource.REAL,
+    val fwVersion: String? = null,    // device firmware version; null until the device sends it (Phase 4)
 )
 
 /** One whole trip with its data, as drawn on the map. Comes from the fake file or from Supabase. */
@@ -59,6 +60,31 @@ data class Drive(
     val trip: Trip,
     val segments: List<Segment>,
     val events: List<RoadEvent>,
+)
+
+/**
+ * One ~15 m piece of road in one direction of travel, combined over every drive that covered it
+ * (contract §7, road_quality_in_area). This is what the Road quality map draws.
+ */
+data class RoadPiece(
+    val lat: Double,
+    val lon: Double,
+    val headingDeg: Double,          // direction of travel, clockwise from north
+    val roughness: Double,           // g, median over drives, after the vehicle's scale factor
+    val drives: Int,                 // how many drives this is based on
+    val lengthM: Double,             // length of road it stands for
+)
+
+/** A pothole or speed bump, with nearby hits from all drives merged into one (events_in_area). */
+data class EventSpot(
+    val lat: Double,
+    val lon: Double,
+    val eventClass: EventClass,      // after user labels
+    val headingDeg: Double?,         // null if none of the hits had a heading
+    val hits: Int,                   // drives that hit it
+    val passes: Int,                 // drives that went past it in the same direction (hits <= passes)
+    val lastT: Long,                 // epoch millis of the latest hit
+    val maxPeakZ: Double,            // g, largest peak among the hits
 )
 
 data class Vehicle(

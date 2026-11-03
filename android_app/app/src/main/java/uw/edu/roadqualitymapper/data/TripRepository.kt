@@ -17,7 +17,12 @@ interface TripRepository {
     suspend fun trips(includeFake: Boolean): List<Trip>
     suspend fun segmentsForTrip(tripId: String): List<Segment>
     suspend fun eventsForTrip(tripId: String): List<RoadEvent>
-    suspend fun eventsInArea(area: BoundingBox): List<RoadEvent>
+
+    // The map: every drive in [area] combined. [includeFake] also counts FAKE_ASSET / FAKE_DEVICE
+    // data; [vehicleId] limits it to one vehicle (null = all of them).
+    suspend fun roadQualityInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String? = null): List<RoadPiece>
+    suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String? = null): List<EventSpot>
+
     suspend fun vehicles(): List<Vehicle>
 }
 

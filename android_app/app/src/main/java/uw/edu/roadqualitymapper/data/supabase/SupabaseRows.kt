@@ -2,15 +2,18 @@ package uw.edu.roadqualitymapper.data.supabase
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import uw.edu.roadqualitymapper.data.BoundingBox
 import uw.edu.roadqualitymapper.data.DataSource
 import uw.edu.roadqualitymapper.data.EventClass
+import uw.edu.roadqualitymapper.data.EventSpot
 import uw.edu.roadqualitymapper.data.RoadEvent
+import uw.edu.roadqualitymapper.data.RoadPiece
 import uw.edu.roadqualitymapper.data.Segment
 import uw.edu.roadqualitymapper.data.Trip
 import uw.edu.roadqualitymapper.data.Vehicle
 
-// The only file that knows Supabase table and column names (docs/data-contract.md §7).
-// If a table or column is renamed, change it here and nowhere else.
+// The only file that knows Supabase table, column and function names (docs/data-contract.md §7).
+// If one is renamed, change it here and nowhere else.
 //
 // Columns the database fills in itself (created_by, received_at, geog, the *_ts times) are left
 // out: the app never sends them, and extra columns in query results are ignored.
@@ -39,6 +42,12 @@ internal object Columns {
     const val EVENTS_KEY = ID
 }
 
+/** Ben's map functions, which combine all drives in an area (contract §7 "Map functions"). */
+internal object Functions {
+    const val ROAD_QUALITY_IN_AREA = "road_quality_in_area"
+    const val EVENTS_IN_AREA = "events_in_area"
+}
+
 @Serializable
 internal data class VehicleRow(
     @SerialName("id") val id: String,
@@ -55,6 +64,7 @@ internal data class TripRow(
     @SerialName("end_time") val endTime: Long? = null,
     @SerialName("source") val source: String,
     @SerialName("app_version") val appVersion: String? = null,
+    @SerialName("fw_version") val fwVersion: String? = null,
 )
 
 @Serializable
@@ -94,6 +104,42 @@ internal data class EventRow(
     @SerialName("source") val source: String,
 )
 
+/**
+ * Parameters of both map functions. No default values here on purpose: values equal to a default
+ * aren't sent, and every parameter should be sent as written.
+ */
+@Serializable
+internal data class AreaParams(
+    @SerialName("south") val south: Double,
+    @SerialName("west") val west: Double,
+    @SerialName("north") val north: Double,
+    @SerialName("east") val east: Double,
+    @SerialName("include_fake") val includeFake: Boolean,
+    @SerialName("vehicle_id") val vehicleId: String?,   // null = every vehicle
+)
+
+@Serializable
+internal data class RoadPieceRow(
+    @SerialName("lat") val lat: Double,
+    @SerialName("lon") val lon: Double,
+    @SerialName("heading_deg") val headingDeg: Double,
+    @SerialName("roughness") val roughness: Double,
+    @SerialName("drives") val drives: Int,
+    @SerialName("length_m") val lengthM: Double,
+)
+
+@Serializable
+internal data class EventSpotRow(
+    @SerialName("lat") val lat: Double,
+    @SerialName("lon") val lon: Double,
+    @SerialName("event_class") val eventClass: String,
+    @SerialName("heading_deg") val headingDeg: Double? = null,
+    @SerialName("hits") val hits: Int,
+    @SerialName("passes") val passes: Int,
+    @SerialName("last_t") val lastT: Long,
+    @SerialName("max_peak_z") val maxPeakZ: Double,
+)
+
 // ---------------------------------------------------------------- app models <-> rows
 // Stored values are the UPPERCASE enum names (REAL, POTHOLE, ...), the same as the Kotlin enums.
 
@@ -106,6 +152,7 @@ internal fun Trip.toRow(appVersion: String) = TripRow(
     endTime = endTime,
     source = source.name,
     appVersion = appVersion,
+    fwVersion = fwVersion,
 )
 
 internal fun TripRow.toTrip() = Trip(
@@ -114,6 +161,7 @@ internal fun TripRow.toTrip() = Trip(
     startTime = startTime,
     endTime = endTime,
     source = dataSourceOf(source),
+    fwVersion = fwVersion,
 )
 
 /** A segment's source must match its trip's, so it comes from the trip. */
@@ -183,6 +231,35 @@ internal fun EventRow.toEvent() = RoadEvent(
     conf = conf,
     userLabel = userLabel?.let { eventClassOf(it) },
     source = dataSourceOf(source),
+)
+
+internal fun BoundingBox.toParams(includeFake: Boolean, vehicleId: String?) = AreaParams(
+    south = south,
+    west = west,
+    north = north,
+    east = east,
+    includeFake = includeFake,
+    vehicleId = vehicleId,
+)
+
+internal fun RoadPieceRow.toRoadPiece() = RoadPiece(
+    lat = lat,
+    lon = lon,
+    headingDeg = headingDeg,
+    roughness = roughness,
+    drives = drives,
+    lengthM = lengthM,
+)
+
+internal fun EventSpotRow.toEventSpot() = EventSpot(
+    lat = lat,
+    lon = lon,
+    eventClass = eventClassOf(eventClass) ?: EventClass.UNKNOWN,
+    headingDeg = headingDeg,
+    hits = hits,
+    passes = passes,
+    lastT = lastT,
+    maxPeakZ = maxPeakZ,
 )
 
 // Unknown values (e.g. one added to the database later) fall back instead of crashing the app.
