@@ -202,6 +202,9 @@ each file, so the rotation can be redone afterwards if it turns out wrong.
 ```json
 {"type":"status","seq":0,"synced":false,"fw":"0.1.0","imu_ok":true,"sd_ok":true,"rate_hz":400}
 ```
+- A test device's `fw` starts with **`fake`** (e.g. `fake-0.1.0`, from `tools/fake_device`). The app
+  tags trips recorded with it `FAKE_DEVICE` instead of `REAL`, so they stay off the real map and
+  are easy to delete. Real firmware must not start its version with `fake`.
 
 ---
 
@@ -474,3 +477,4 @@ read further pages with `range(...)`, the same way it pages segments.
 - Finding our device in a crowded room: UUID scan filter, remembered device, advertising rules (§3).
 - Car axes, mounting arrow, gravity removal, and IMU ranges (§4.0).
 - Column types, primary keys, and app-made UUIDs for the tables (§7).
+- `fw` starting with `fake` marks a test device; its trips are `FAKE_DEVICE` (§4.3).

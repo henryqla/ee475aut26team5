@@ -12,6 +12,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import uw.edu.roadqualitymapper.ble.DeviceConnection
+import uw.edu.roadqualitymapper.data.SelectedVehicle
 import uw.edu.roadqualitymapper.ui.screens.ConnectScreen
 import uw.edu.roadqualitymapper.ui.screens.DriveScreen
 import uw.edu.roadqualitymapper.ui.screens.MapScreen
@@ -24,7 +26,11 @@ enum class Tab(val label: String, val emoji: String) {
 
 @Composable
 fun AppScaffold() {
-    var tab by rememberSaveable { mutableStateOf(Tab.DRIVE) }
+    // Start on Connect until a device is remembered and a vehicle is picked; after that, on Drive.
+    var tab by rememberSaveable {
+        val setUp = DeviceConnection.status.value.address != null && SelectedVehicle.id.value != null
+        mutableStateOf(if (setUp) Tab.DRIVE else Tab.CONNECT)
+    }
 
     Scaffold(
         bottomBar = {
