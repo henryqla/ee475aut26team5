@@ -67,10 +67,11 @@ import uw.edu.roadqualitymapper.data.downloadDrives
 import uw.edu.roadqualitymapper.data.shortMessage
 import uw.edu.roadqualitymapper.data.supabase.SupabaseConnection
 import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
+import uw.edu.roadqualitymapper.ui.DrawnPiece
 import uw.edu.roadqualitymapper.ui.boxAround
+import uw.edu.roadqualitymapper.ui.layOutPieces
 import uw.edu.roadqualitymapper.ui.headingDirection
 import uw.edu.roadqualitymapper.ui.metersToPixels
-import uw.edu.roadqualitymapper.ui.moveAlong
 import uw.edu.roadqualitymapper.ui.roughnessColor
 import uw.edu.roadqualitymapper.ui.shiftPathRight
 import uw.edu.roadqualitymapper.ui.shiftRight
@@ -225,6 +226,8 @@ fun MapScreen(modifier: Modifier = Modifier) {
         metersToPixels(ROAD_LINE_WIDTH_M, camera.zoom, camera.target.latitude, density),
         MIN_ROAD_LINE_WIDTH_DP * density,
     )
+    // Which pieces meet along a road, worked out once per load, so colors can fade between them.
+    val drawnPieces = remember(pieces) { layOutPieces(pieces, DIRECTION_OFFSET_M) }
     Box(modifier.onSizeChanged { mapSize = it }) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
@@ -234,9 +237,9 @@ fun MapScreen(modifier: Modifier = Modifier) {
             onMapLoaded = { mapLoaded = true },
         ) {
             if (view == MapView.ROAD_QUALITY && camera.zoom >= MIN_ROAD_QUALITY_ZOOM) {
-                pieces.forEach { piece ->
-                    RoadPieceOnMap(piece, lineWidthPx, onClick = {
-                        status = "%.3f g · %d drive(s)".format(piece.roughness, piece.drives)
+                drawnPieces.forEach { drawn ->
+                    RoadPieceOnMap(drawn, lineWidthPx, onClick = {
+                        status = "%.3f g · %d drive(s)".format(drawn.piece.roughness, drawn.piece.drives)
                     })
                 }
                 spots.forEach { EventSpotMarker(it) }
@@ -357,22 +360,25 @@ private fun DebugBar(
 
 /**
  * Road quality view: one piece of road as a short line along its direction of travel, on that
- * direction's side of the road. Solid colors, so it also works on the older map renderer.
+ * direction's side of the road. Its color fades from the in-between color where it meets the
+ * previous piece, to its own color in the middle, to the in-between color with the next piece,
+ * like the Trips lines. (Gradients need Google's newer map renderer, as Trips does.)
  */
 @Composable
 @GoogleMapComposable
-private fun RoadPieceOnMap(piece: RoadPiece, lineWidthPx: Float, onClick: () -> Unit) {
-    val points = remember(piece) {
-        val direction = headingDirection(piece.headingDeg)
-        val center = shiftRight(LatLng(piece.lat, piece.lon), direction, DIRECTION_OFFSET_M)
+private fun RoadPieceOnMap(drawn: DrawnPiece, lineWidthPx: Float, onClick: () -> Unit) {
+    val spans = remember(drawn) {
+        val startColor = roughnessColor(drawn.startRoughness).toArgb()
+        val middleColor = roughnessColor(drawn.piece.roughness).toArgb()
+        val endColor = roughnessColor(drawn.endRoughness).toArgb()
         listOf(
-            moveAlong(center, direction, -piece.lengthM / 2),
-            moveAlong(center, direction, piece.lengthM / 2),
+            StyleSpan(StrokeStyle.gradientBuilder(startColor, middleColor).build()),
+            StyleSpan(StrokeStyle.gradientBuilder(middleColor, endColor).build()),
         )
     }
     Polyline(
-        points = points,
-        color = roughnessColor(piece.roughness),
+        points = listOf(drawn.start, drawn.middle, drawn.end),
+        spans = spans,
         width = lineWidthPx,
         // Round ends overlap the next piece a little, so the road looks continuous.
         startCap = RoundCap(),

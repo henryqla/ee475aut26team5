@@ -26,12 +26,17 @@ import uw.edu.roadqualitymapper.ble.FoundDevice
 import uw.edu.roadqualitymapper.data.SelectedVehicle
 import uw.edu.roadqualitymapper.ui.ScreenTitle
 
-// Placeholder until vehicles come from the backend (Phase 2).
+// Shown as general vehicle types, but uploaded with the IDs of the team's own cars, which are the
+// only vehicles in the database (Ben's vehicles table) and carry each car's calibration.
 private val placeholderVehicles = listOf(
+    "camry" to "Sedan",
+    "escape" to "SUV",
     "truck" to "Truck",
-    "camry" to "Camry (sedan)",
-    "escape" to "Escape (SUV)",
 )
+
+/** The name shown for a vehicle ID, e.g. "Sedan" for camry. */
+internal fun vehicleLabel(vehicleId: String): String =
+    placeholderVehicles.firstOrNull { it.first == vehicleId }?.second ?: vehicleId
 
 @Composable
 fun ConnectScreen(modifier: Modifier = Modifier) {

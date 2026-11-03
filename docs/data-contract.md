@@ -484,3 +484,4 @@ read further pages with `range(...)`, the same way it pages segments.
 - Car axes, mounting arrow, gravity removal, and IMU ranges (§4.0).
 - Column types, primary keys, and app-made UUIDs for the tables (§7).
 - `fw` starting with `fake` marks a test device; its trips are `FAKE_DEVICE` (§4.3).
+- `road_quality_in_area`: each segment counts along the stretch of road it drove, so pieces meet even at highway speed; `length_m` is now the road driven inside the piece (no longer always 15); new optional `cell_m` piece size (default 15, between 5 and 1000) (§7).

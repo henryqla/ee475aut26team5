@@ -143,7 +143,7 @@ private fun TripStatus(status: RecordingStatus) {
     }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
-            if (status.recording) "Recording · ${trip.vehicleId}" else "Last trip · ${trip.vehicleId}",
+            (if (status.recording) "Recording · " else "Last trip · ") + vehicleLabel(trip.vehicleId),
             style = MaterialTheme.typography.titleMedium,
         )
         Text("Started ${timeOf(trip.startTime)}" + (trip.endTime?.let { ", ended ${timeOf(it)}" } ?: ""))
