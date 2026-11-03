@@ -52,6 +52,13 @@ interface RoadDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertEvent(event: EventEntity)
 
+    /**
+     * Sets a user label on an event that hasn't been uploaded yet. [label] is an EventClass name.
+     * Returns 0 if the event was already uploaded (the caller then saves a separate labeled event).
+     */
+    @Query("UPDATE events SET userLabel = :label WHERE id = :id AND uploaded = 0")
+    suspend fun labelEvent(id: String, label: String): Int
+
     @Query("SELECT * FROM events WHERE uploaded = 0 ORDER BY tripId, t LIMIT :limit")
     suspend fun eventsNotUploaded(limit: Int): List<EventEntity>
 

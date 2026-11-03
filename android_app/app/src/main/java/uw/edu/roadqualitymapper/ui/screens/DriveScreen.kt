@@ -22,6 +22,8 @@ import kotlinx.coroutines.launch
 import uw.edu.roadqualitymapper.ble.DeviceConnection
 import uw.edu.roadqualitymapper.ble.DeviceState
 import uw.edu.roadqualitymapper.data.DataSource
+import uw.edu.roadqualitymapper.data.EventClass
+import uw.edu.roadqualitymapper.ui.ScreenTitle
 import uw.edu.roadqualitymapper.data.GpsFix
 import uw.edu.roadqualitymapper.data.SelectedVehicle
 import uw.edu.roadqualitymapper.data.TripUploader
@@ -58,10 +60,8 @@ fun DriveScreen(modifier: Modifier = Modifier) {
         when {
             results[Manifest.permission.ACCESS_FINE_LOCATION] == true -> startTrip()
             results[Manifest.permission.ACCESS_COARSE_LOCATION] == true ->
-                permissionMessage = "Trips need your precise location. Allow location again and " +
-                    "turn on \"Use precise location\"."
-            else -> permissionMessage = "Trips need location access. Allow it in Settings → Apps → " +
-                "Road Quality Mapper → Permissions → Location."
+                permissionMessage = "Turn on \"Precise location\" to record"
+            else -> permissionMessage = "Allow location in Settings to record"
         }
     }
     startTrip = start@{
@@ -88,7 +88,7 @@ fun DriveScreen(modifier: Modifier = Modifier) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text("Drive", style = MaterialTheme.typography.headlineMedium)
+        ScreenTitle("Drive")
 
         Button(
             onClick = { if (status.recording) RecordingService.stop(context) else startTrip() },
@@ -108,15 +108,24 @@ fun DriveScreen(modifier: Modifier = Modifier) {
         TripStatus(status)
         UploadSection()
 
-        // Ground-truth labels. Enabled in Phase 4 once there's a trip to attach them to.
+        // Ground-truth labels for tuning the detector and training the classifier.
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { RecordingService.label(context, EventClass.POTHOLE) },
+                enabled = status.recording,
+                modifier = Modifier.weight(1f),
+            ) {
                 Text("Pothole!")
             }
-            OutlinedButton(onClick = {}, enabled = false, modifier = Modifier.weight(1f)) {
+            OutlinedButton(
+                onClick = { RecordingService.label(context, EventClass.SPEED_BUMP) },
+                enabled = status.recording,
+                modifier = Modifier.weight(1f),
+            ) {
                 Text("Speed bump!")
             }
         }
+        status.lastLabel?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Keep screen on", Modifier.weight(1f))
@@ -138,7 +147,7 @@ private fun TripStatus(status: RecordingStatus) {
             style = MaterialTheme.typography.titleMedium,
         )
         Text("Started ${timeOf(trip.startTime)}" + (trip.endTime?.let { ", ended ${timeOf(it)}" } ?: ""))
-        if (trip.source != DataSource.REAL) Text("Test data (${trip.source}): kept off the real map")
+        if (trip.source != DataSource.REAL) Text("Test device: marked as test data")
         Text(
             "Segments: ${status.segments}" +
                 (if (status.segmentsWithoutLocation > 0) " (${status.segmentsWithoutLocation} without location)" else "") +
@@ -160,8 +169,8 @@ private fun DeviceLine() {
     val text = when (device.state) {
         DeviceState.CONNECTED -> "Device connected" + (device.fwVersion?.let { " (firmware $it)" } ?: "")
         DeviceState.CONNECTING -> "Connecting to the device…"
-        DeviceState.RECONNECTING -> "Device lost: reconnects when it's back"
-        DeviceState.NOT_CONNECTED -> "No device connected: trips record GPS only. Connect on the Connect tab."
+        DeviceState.RECONNECTING -> "Device lost. Waiting for it…"
+        DeviceState.NOT_CONNECTED -> "No device: GPS only"
     }
     Text(
         text,

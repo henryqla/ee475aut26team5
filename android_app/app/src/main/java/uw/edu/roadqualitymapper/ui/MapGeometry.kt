@@ -1,6 +1,7 @@
 package uw.edu.roadqualitymapper.ui
 
 import com.google.android.gms.maps.model.LatLng
+import uw.edu.roadqualitymapper.data.BoundingBox
 import kotlin.math.cos
 import kotlin.math.pow
 import kotlin.math.sin
@@ -16,6 +17,18 @@ private const val EQUATOR_METERS_PER_DP_AT_ZOOM_0 = 156_543.03392
 fun metersToPixels(meters: Double, zoom: Float, latitude: Double, density: Float): Float {
     val metersPerDp = EQUATOR_METERS_PER_DP_AT_ZOOM_0 * cos(Math.toRadians(latitude)) / 2.0.pow(zoom.toDouble())
     return (meters / metersPerDp * density).toFloat()
+}
+
+/** A box reaching [halfSizeM] meters from [center] in every direction. */
+fun boxAround(center: LatLng, halfSizeM: Double): BoundingBox {
+    val dLat = halfSizeM / METERS_PER_DEGREE_LAT
+    val dLon = halfSizeM / (METERS_PER_DEGREE_LAT * cos(Math.toRadians(center.latitude)))
+    return BoundingBox(
+        south = center.latitude - dLat,
+        west = center.longitude - dLon,
+        north = center.latitude + dLat,
+        east = center.longitude + dLon,
+    )
 }
 
 /** Unit vector of the direction of travel, in east and north components. */

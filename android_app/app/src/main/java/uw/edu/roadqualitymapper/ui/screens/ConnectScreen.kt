@@ -17,11 +17,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.TextAutoSize
 import uw.edu.roadqualitymapper.ble.DeviceConnection
 import uw.edu.roadqualitymapper.ble.DeviceState
 import uw.edu.roadqualitymapper.ble.DeviceStatus
 import uw.edu.roadqualitymapper.ble.FoundDevice
 import uw.edu.roadqualitymapper.data.SelectedVehicle
+import uw.edu.roadqualitymapper.ui.ScreenTitle
 
 // Placeholder until vehicles come from the backend (Phase 2).
 private val placeholderVehicles = listOf(
@@ -47,7 +50,7 @@ fun ConnectScreen(modifier: Modifier = Modifier) {
         HorizontalDivider()
 
         Text("Vehicle", style = MaterialTheme.typography.titleMedium)
-        Text("Pick the car this phone is riding in.")
+        Text("Which car is this phone in?")
         placeholderVehicles.forEach { (id, name) ->
             Row(
                 Modifier
@@ -86,8 +89,7 @@ private fun DeviceSection() {
                 enableBluetooth.launch(Intent(BluetoothAdapter.ACTION_REQUEST_ENABLE))
             }
         } else {
-            permissionMessage = "The device can't be found without \"Nearby devices\". Allow it in " +
-                "Settings → Apps → Road Quality Mapper → Permissions."
+            permissionMessage = "Allow \"Nearby devices\" in Settings"
         }
     }
     val scan = {
@@ -100,28 +102,40 @@ private fun DeviceSection() {
         }
     }
 
-    Text("Device", style = MaterialTheme.typography.headlineMedium)
-    Text(stateText(status), style = MaterialTheme.typography.titleMedium)
+    ScreenTitle("Connect")
+    Text("Device", style = MaterialTheme.typography.titleMedium)
+    Text(stateText(status))
     (permissionMessage ?: status.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
+    // The buttons split the row's width, so they always fit on one line whatever the phone's width.
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(onClick = scan, enabled = !scanning) {
-            Text(if (scanning) "Scanning…" else "Scan for device")
+        val fill = Modifier.weight(1f)
+        Button(onClick = scan, enabled = !scanning, modifier = fill, contentPadding = TIGHT_PADDING) {
+            OneLine(if (scanning) "Scanning…" else "Scan for device")
         }
         when {
             status.state != DeviceState.NOT_CONNECTED ->
-                OutlinedButton(onClick = { DeviceConnection.disconnect() }) { Text("Disconnect") }
+                OutlinedButton(onClick = { DeviceConnection.disconnect() }, modifier = fill, contentPadding = TIGHT_PADDING) {
+                    OneLine("Disconnect")
+                }
             status.address != null -> {
-                OutlinedButton(onClick = { DeviceConnection.connectToRemembered() }) { Text("Connect") }
-                TextButton(onClick = { DeviceConnection.forget() }) { Text("Forget") }
+                OutlinedButton(onClick = { DeviceConnection.connectToRemembered() }, modifier = fill, contentPadding = TIGHT_PADDING) {
+                    OneLine("Connect")
+                }
+                TextButton(onClick = { DeviceConnection.forget() }, modifier = fill, contentPadding = TIGHT_PADDING) {
+                    OneLine("Forget")
+                }
             }
         }
     }
 
-    if (scanning || found.isNotEmpty()) {
-        Text("Tap a device to connect. Only Road Quality devices are listed.", style = MaterialTheme.typography.bodySmall)
+    var scannedOnce by remember { mutableStateOf(false) }
+    LaunchedEffect(scanning) { if (scanning) scannedOnce = true }
+    if (found.isNotEmpty()) {
+        Text("Tap to connect", style = MaterialTheme.typography.bodySmall)
         found.forEach { FoundDeviceRow(it) }
-        if (!scanning && found.isEmpty()) Text("No device found. Is it powered and advertising?")
+    } else if (scannedOnce && !scanning) {
+        Text("No device found. Is it powered on?")
     }
 
     if (status.address != null) DeviceDetails(status)
@@ -132,6 +146,20 @@ private fun DeviceSection() {
             Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
         }
     }
+}
+
+/** Less side padding than the default, so labels have room on narrow phones. */
+private val TIGHT_PADDING = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+
+/** A button label that stays on one line, shrinking its text if the button is too narrow. */
+@Composable
+private fun OneLine(text: String) {
+    Text(
+        text,
+        maxLines = 1,
+        softWrap = false,
+        autoSize = TextAutoSize.StepBased(minFontSize = 10.sp, maxFontSize = 14.sp),
+    )
 }
 
 @Composable
@@ -171,10 +199,10 @@ private fun DeviceDetails(status: DeviceStatus) {
 private fun stateText(status: DeviceStatus): String {
     val name = status.name ?: "the device"
     return when (status.state) {
-        DeviceState.NOT_CONNECTED -> if (status.address != null) "Not connected to $name" else "No device yet: scan to find it"
+        DeviceState.NOT_CONNECTED -> if (status.address != null) "Not connected" else "Tap Scan to find your device"
         DeviceState.CONNECTING -> "Connecting to $name…"
         DeviceState.CONNECTED -> "Connected to $name"
-        DeviceState.RECONNECTING -> "Lost $name. Reconnects when it's back"
+        DeviceState.RECONNECTING -> "Lost $name. Waiting for it…"
     }
 }
 

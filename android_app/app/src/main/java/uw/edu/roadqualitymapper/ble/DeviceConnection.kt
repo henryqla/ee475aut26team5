@@ -157,7 +157,7 @@ object DeviceConnection {
 
         override fun onScanFailed(errorCode: Int) {
             _scanning.value = false
-            setError("Scan failed (error $errorCode). Try turning Bluetooth off and on.")
+            setError("Scan failed. Turn Bluetooth off and on.")
         }
     }
 
@@ -211,7 +211,7 @@ object DeviceConnection {
         onMessage = ::onMessage,
         onMtuTooSmall = { mtu ->
             // A message would be cut off (contract §3), so don't use this link.
-            setError("The device only allows $mtu-byte packets; $REQUIRED_MTU are needed")
+            setError("Device packets too small ($mtu bytes)")
             disconnect()
         },
     ).also {
@@ -239,7 +239,7 @@ object DeviceConnection {
             when (reason) {
                 ConnectionObserver.REASON_NOT_SUPPORTED -> {
                     wantConnected = false
-                    setError("That device doesn't have the Road Quality service")
+                    setError("Not a Road Quality device")
                     _status.update { it.copy(state = DeviceState.NOT_CONNECTED) }
                 }
                 // Not around right now: wait for it in the background.
@@ -255,7 +255,7 @@ object DeviceConnection {
                     _status.update { it.copy(state = DeviceState.NOT_CONNECTED) }
                 reason == ConnectionObserver.REASON_NOT_SUPPORTED -> {
                     wantConnected = false
-                    setError("That device doesn't have the Road Quality service")
+                    setError("Not a Road Quality device")
                     _status.update { it.copy(state = DeviceState.NOT_CONNECTED) }
                 }
                 // Unplugged, out of range, or the device restarted.
@@ -314,7 +314,7 @@ object DeviceConnection {
         val adapter = adapter()
         when {
             adapter == null -> setError("This phone has no Bluetooth")
-            !hasBluetoothPermissions() -> setError("Allow \"Nearby devices\" to connect to the device")
+            !hasBluetoothPermissions() -> setError("Allow \"Nearby devices\" in Settings")
             !adapter.isEnabled -> setError("Turn on Bluetooth")
             else -> return adapter
         }

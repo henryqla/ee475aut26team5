@@ -18,6 +18,7 @@ data class RecordingStatus(
     val segmentsWithoutLocation: Int = 0,
     val events: Int = 0,
     val lastRoughness: Double? = null, // g, rms_z of the newest segment
+    val lastLabel: String? = null,    // what the last Pothole!/Speed bump! tap did
     val error: String? = null,        // why recording couldn't start, if it couldn't
 )
 

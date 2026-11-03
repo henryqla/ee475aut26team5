@@ -46,6 +46,7 @@ import uw.edu.roadqualitymapper.data.EventClass
 import uw.edu.roadqualitymapper.data.GpsFix
 import uw.edu.roadqualitymapper.data.Trip
 import uw.edu.roadqualitymapper.data.TripUploader
+import uw.edu.roadqualitymapper.data.shortMessage
 import uw.edu.roadqualitymapper.data.local.DeviceMessageEntity
 import uw.edu.roadqualitymapper.data.local.EventEntity
 import uw.edu.roadqualitymapper.data.local.RoadDao
@@ -69,6 +70,12 @@ private const val FINAL_UPLOAD_TIMEOUT_MS = 30_000L
 /** How long a message waits for the GPS fix after its time before it's saved anyway. */
 private const val WAIT_FOR_FIX_MS = MAX_FIX_GAP_MS + 500
 
+/**
+ * A label tap applies to the device's event from up to this long before it: the passenger
+ * reacts after feeling the bump. With no such event, the tap is saved as its own event.
+ */
+private const val LABEL_LOOKBACK_MS = 5_000L
+
 private const val CHANNEL_ID = "recording"
 private const val NOTIFICATION_ID = 1
 
@@ -86,7 +93,9 @@ class RecordingService : Service() {
     companion object {
         private const val ACTION_START = "uw.edu.roadqualitymapper.action.START_RECORDING"
         private const val ACTION_STOP = "uw.edu.roadqualitymapper.action.STOP_RECORDING"
+        private const val ACTION_LABEL = "uw.edu.roadqualitymapper.action.LABEL"
         private const val EXTRA_VEHICLE_ID = "vehicle_id"
+        private const val EXTRA_LABEL = "label"
 
         /** Call from the screen (the app must be in the foreground, e.g. after a button tap). */
         fun start(context: Context, vehicleId: String) {
@@ -98,6 +107,15 @@ class RecordingService : Service() {
 
         fun stop(context: Context) {
             context.startService(Intent(context, RecordingService::class.java).setAction(ACTION_STOP))
+        }
+
+        /** A Pothole!/Speed bump! tap on the Drive screen, during a trip. */
+        fun label(context: Context, label: EventClass) {
+            context.startService(
+                Intent(context, RecordingService::class.java)
+                    .setAction(ACTION_LABEL)
+                    .putExtra(EXTRA_LABEL, label.name)
+            )
         }
     }
 
@@ -113,6 +131,13 @@ class RecordingService : Service() {
 
     /** Device messages waiting for the GPS fix after their time, oldest first. */
     private val waiting = mutableListOf<DeviceMessage>()
+
+    /** Labels tapped for device events that are still waiting; applied when they're saved. */
+    private val waitingLabels = mutableMapOf<EvtMessage, EventClass>()
+
+    /** The device's events saved in the last few seconds, which a label tap can still apply to. */
+    private data class RecentEvent(val id: String, val t: Long)
+    private val recentEvents = ArrayDeque<RecentEvent>()
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -142,6 +167,9 @@ class RecordingService : Service() {
         when (intent?.action) {
             ACTION_START -> startRecording(intent.getStringExtra(EXTRA_VEHICLE_ID))
             ACTION_STOP -> stopRecording()
+            ACTION_LABEL -> intent.getStringExtra(EXTRA_LABEL)
+                ?.let { name -> EventClass.entries.firstOrNull { it.name == name } }
+                ?.let { label(it, System.currentTimeMillis()) }
             else -> stopSelf()   // restarted by the system without our intent; nothing to resume yet
         }
         // If Android kills the service, don't restart it on its own: a new trip needs a button tap.
@@ -156,7 +184,7 @@ class RecordingService : Service() {
             ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), foregroundTypes())
         } catch (e: Exception) {
             // Missing location permission, or started while the app was in the background.
-            fail("Couldn't start recording: ${e.message}")
+            fail("Couldn't start recording: ${e.shortMessage()}")
             return
         }
 
@@ -173,6 +201,9 @@ class RecordingService : Service() {
             source = DataSource.REAL,
         )
         trip = newTrip
+        waiting.clear()
+        waitingLabels.clear()
+        recentEvents.clear()
         RecordingState.update { RecordingStatus(recording = true, trip = newTrip) }
 
         // Save the trip before anything that belongs to it.
@@ -318,8 +349,11 @@ class RecordingService : Service() {
     }
 
     private fun saveEvent(trip: Trip, evt: EvtMessage, fix: GpsFix?) {
+        val id = UUID.randomUUID().toString()
+        recentEvents.addLast(RecentEvent(id, evt.t))
+        while (recentEvents.size > 10) recentEvents.removeFirst()
         val entity = EventEntity(
-            id = UUID.randomUUID().toString(),
+            id = id,
             tripId = trip.id,
             vehicleId = trip.vehicleId,
             t = evt.t,
@@ -334,9 +368,60 @@ class RecordingService : Service() {
             rollPeak = evt.rollPeak,
             pitchPeak = evt.pitchPeak,
             conf = evt.conf,
+            userLabel = waitingLabels.remove(evt),
         )
         scope.launch { dao.insertEvent(entity) }
         RecordingState.update { it.copy(events = it.events + 1) }
+    }
+
+    /**
+     * A Pothole!/Speed bump! tap. Labels the device's event from the last few seconds if there is
+     * one, so we learn whether the detector got it right; otherwise saves the tap as its own event
+     * (class UNKNOWN, labeled), so we learn what the detector missed.
+     */
+    private fun label(label: EventClass, tapTime: Long) {
+        val currentTrip = trip ?: return
+        val inWindow = { t: Long -> tapTime - t in 0..LABEL_LOOKBACK_MS }
+        val saved = "Saved"
+
+        // A device event still waiting for its GPS fix: label it when it's saved.
+        val waitingEvent = waiting.filterIsInstance<EvtMessage>().lastOrNull { inWindow(it.t) && it !in waitingLabels }
+        if (waitingEvent != null) {
+            waitingLabels[waitingEvent] = label
+            RecordingState.update { it.copy(lastLabel = saved) }
+            return
+        }
+
+        val recent = recentEvents.lastOrNull { inWindow(it.t) }
+        scope.launch {
+            // Fails if that event was already uploaded; then the tap gets its own event instead.
+            if (recent != null && dao.labelEvent(recent.id, label.name) > 0) {
+                recentEvents.remove(recent)   // one label per event
+                RecordingState.update { it.copy(lastLabel = saved) }
+                return@launch
+            }
+            val fix = fixes.at(tapTime)
+            dao.insertEvent(
+                EventEntity(
+                    id = UUID.randomUUID().toString(),
+                    tripId = currentTrip.id,
+                    vehicleId = currentTrip.vehicleId,
+                    t = tapTime,
+                    lat = fix?.lat,
+                    lon = fix?.lon,
+                    speedMps = fix?.speedMps,
+                    gpsAccuracyM = fix?.accuracyM,
+                    headingDeg = fix?.headingDeg,
+                    eventClass = EventClass.UNKNOWN,   // the device didn't detect anything
+                    peakZ = 0.0,
+                    rollPeak = 0.0,
+                    pitchPeak = 0.0,
+                    conf = 0.0,
+                    userLabel = label,
+                )
+            )
+            RecordingState.update { it.copy(events = it.events + 1, lastLabel = saved) }
+        }
     }
 
     /** The phone time a message's location is taken at: a segment's middle, an event's peak. */

@@ -1,6 +1,7 @@
 package uw.edu.roadqualitymapper.data
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -19,6 +20,8 @@ import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
 /** Rows per upload request (contract §6). */
 private const val BATCH_SIZE = 60
 
+private const val TAG = "TripUploader"
+
 data class UploadStatus(
     val uploading: Boolean = false,
     val lastResult: String? = null,   // e.g. "Uploaded 120 rows at 3:41 PM" or the error
@@ -36,19 +39,20 @@ object TripUploader {
 
     suspend fun uploadPending(context: Context) {
         if (!SupabaseConnection.isConfigured) {
-            _status.value = UploadStatus(lastResult = "Supabase isn't set up in local.properties")
+            _status.value = UploadStatus(lastResult = "Server not set up")
             return
         }
         lock.withLock {
             _status.value = _status.value.copy(uploading = true)
             val result = try {
                 val rows = upload(RoadDatabase.get(context).dao(), SupabaseTripRepository())
-                if (rows > 0) "Uploaded $rows row(s)" else "Everything is uploaded"
+                if (rows > 0) "Uploaded $rows" else "All uploaded"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 // Nothing is lost: rows stay marked as not uploaded and go next time.
-                "Upload failed, will retry: ${e.message}"
+                Log.w(TAG, "Upload failed", e)
+                "Upload failed, will retry: ${e.shortMessage()}"
             }
             _status.value = UploadStatus(uploading = false, lastResult = result)
         }
