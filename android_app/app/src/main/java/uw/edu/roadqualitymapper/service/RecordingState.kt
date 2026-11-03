@@ -14,6 +14,10 @@ data class RecordingStatus(
     val lastFix: GpsFix? = null,
     val fixCount: Int = 0,
     val gpsAvailable: Boolean = true, // false while the phone can't get a GPS fix
+    val segments: Int = 0,            // saved this trip
+    val segmentsWithoutLocation: Int = 0,
+    val events: Int = 0,
+    val lastRoughness: Double? = null, // g, rms_z of the newest segment
     val error: String? = null,        // why recording couldn't start, if it couldn't
 )
 

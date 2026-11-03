@@ -7,6 +7,8 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -16,8 +18,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
+import uw.edu.roadqualitymapper.ble.DeviceConnection
+import uw.edu.roadqualitymapper.ble.DeviceState
+import uw.edu.roadqualitymapper.data.DataSource
 import uw.edu.roadqualitymapper.data.GpsFix
 import uw.edu.roadqualitymapper.data.SelectedVehicle
+import uw.edu.roadqualitymapper.data.TripUploader
+import uw.edu.roadqualitymapper.data.local.RoadDatabase
 import uw.edu.roadqualitymapper.service.RecordingService
 import uw.edu.roadqualitymapper.service.RecordingState
 import uw.edu.roadqualitymapper.service.RecordingStatus
@@ -74,7 +82,12 @@ fun DriveScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    Column(modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Column(
+        modifier
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
         Text("Drive", style = MaterialTheme.typography.headlineMedium)
 
         Button(
@@ -91,7 +104,9 @@ fun DriveScreen(modifier: Modifier = Modifier) {
             Text(it, color = MaterialTheme.colorScheme.error)
         }
 
+        DeviceLine()
         TripStatus(status)
+        UploadSection()
 
         // Ground-truth labels. Enabled in Phase 4 once there's a trip to attach them to.
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -123,12 +138,55 @@ private fun TripStatus(status: RecordingStatus) {
             style = MaterialTheme.typography.titleMedium,
         )
         Text("Started ${timeOf(trip.startTime)}" + (trip.endTime?.let { ", ended ${timeOf(it)}" } ?: ""))
+        if (trip.source != DataSource.REAL) Text("Test data (${trip.source}): kept off the real map")
+        Text(
+            "Segments: ${status.segments}" +
+                (if (status.segmentsWithoutLocation > 0) " (${status.segmentsWithoutLocation} without location)" else "") +
+                " · Bumps: ${status.events}"
+        )
+        status.lastRoughness?.let { Text("Roughness now: %.3f g".format(it)) }
         Text("GPS fixes: ${status.fixCount}")
         if (status.recording && !status.gpsAvailable) {
             Text("Waiting for GPS…", color = MaterialTheme.colorScheme.error)
         }
         status.lastFix?.let { FixDetails(it) }
     }
+}
+
+/** Whether the device is connected; trips without it record GPS only. */
+@Composable
+private fun DeviceLine() {
+    val device by DeviceConnection.status.collectAsState()
+    val text = when (device.state) {
+        DeviceState.CONNECTED -> "Device connected" + (device.fwVersion?.let { " (firmware $it)" } ?: "")
+        DeviceState.CONNECTING -> "Connecting to the device…"
+        DeviceState.RECONNECTING -> "Device lost: reconnects when it's back"
+        DeviceState.NOT_CONNECTED -> "No device connected: trips record GPS only. Connect on the Connect tab."
+    }
+    Text(
+        text,
+        color = if (device.state == DeviceState.CONNECTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+    )
+}
+
+/** What's still on the phone only, and a button to send it now. */
+@Composable
+private fun UploadSection() {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val notUploaded by remember { RoadDatabase.get(context).dao().countNotUploaded() }.collectAsState(initial = 0)
+    val upload by TripUploader.status.collectAsState()
+
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text("Waiting to upload: $notUploaded", Modifier.weight(1f))
+        TextButton(
+            onClick = { scope.launch { TripUploader.uploadPending(context.applicationContext) } },
+            enabled = !upload.uploading,
+        ) {
+            Text(if (upload.uploading) "Uploading…" else "Upload now")
+        }
+    }
+    upload.lastResult?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
 }
 
 @Composable
