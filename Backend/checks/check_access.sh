@@ -4,7 +4,7 @@
 # what each one can and can't do. Creates a FAKE_DEVICE test trip and two anonymous test
 # users, then deletes them with the secret key. Prints PASS/FAIL only; never prints a key.
 #
-# Run on the laptop, with Supabase started and the migrations loaded:
+# Run on the laptop, with Supabase started and all migrations applied (supabase migration up):
 #     cd ~/ee475aut26team5/Backend && bash checks/check_access.sh
 
 set -u
@@ -68,8 +68,14 @@ req POST /rest/v1/trips "" "{\"id\":\"$(uuid)\",\"vehicle_id\":\"camry\",\"start
 refused "can't add a trip"
 
 echo "${BOLD}2. App (signed in): adding data${RESET}"
-req POST /rest/v1/trips "$PHONE_A" "{\"id\":\"$TRIP\",\"vehicle_id\":\"camry\",\"start_time\":$NOW,\"source\":\"FAKE_DEVICE\"}"
-allowed "can add its own trip"
+TRIP_ROW="{\"id\":\"$TRIP\",\"vehicle_id\":\"camry\",\"start_time\":$NOW,\"source\":\"FAKE_DEVICE\",\"fw_version\":\"check-access\"}"
+req POST /rest/v1/trips "$PHONE_A" "$TRIP_ROW";                            allowed "can add its own trip"
+req GET "/rest/v1/trips?id=eq.$TRIP&select=fw_version" "$PHONE_A"
+[[ $BODY == *check-access* ]] && pass "fw_version is stored" || fail "fw_version is stored (got $CODE)"
+# A retried trip upload whose first response was lost: skipped, and comes back as an empty list.
+req POST /rest/v1/trips "$PHONE_A" "$TRIP_ROW" "return=representation,resolution=ignore-duplicates"
+[[ $CODE == 2* && $BODY == "[]" ]] && pass "re-sending the same trip is skipped without an error" \
+    || fail "re-sending the same trip is skipped without an error (got $CODE)"
 req POST /rest/v1/segments "$PHONE_A" "$(segment "$TRIP")";                allowed "can add a segment to its trip"
 req POST /rest/v1/segments "$PHONE_A" "$(segment "$TRIP")" "return=minimal,resolution=ignore-duplicates"
 allowed "re-sending the same segment is skipped without an error"

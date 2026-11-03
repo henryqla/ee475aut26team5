@@ -61,5 +61,6 @@ AFTER PULLING NEW CODE
 
    If config.toml changed, restart:   supabase stop && supabase start
    If the access rules changed:       bash checks/check_access.sh
+   If the map functions changed:      bash checks/check_map_functions.sh
 
    Don't use `supabase db reset` once real drives are stored: it wipes everything.
