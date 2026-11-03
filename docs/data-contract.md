@@ -361,22 +361,28 @@ the app can't delete anything.
 always show the same thing. The app calls them through the API (supabase-kt `rpc(...)`).
 Both take the same parameters: `south`, `west`, `north`, `east` (the map's visible box, degrees),
 `include_fake` (default `false`: only `REAL` data), and `vehicle_id` (default `null`: all
-vehicles; e.g. `"camry"` for one vehicle only). Result columns are confirmed with Scott (Oct 2026).
+vehicles; e.g. `"camry"` for one vehicle only). `road_quality_in_area` also takes `cell_m` (see
+below). Result columns are confirmed with Scott (Oct 2026).
 Like table reads, a call returns at most 1000 rows; results come in a fixed order, so the app can
 read further pages with `range(...)`, the same way it pages segments.
 - `road_quality_in_area(...)`: segments combined per small area **and per direction of travel**,
   with vehicle/speed normalization applied. Each drive counts once per area, then the median over
-  drives, so one odd drive doesn't skew a road. Areas are ~15 m grid cells fixed to the globe
-  (panning the map doesn't regroup them), and directions are 8 sectors of 45°.
+  drives, so one odd drive doesn't skew a road. Areas are grid cells fixed to the globe (panning
+  the map doesn't regroup them), `cell_m` metres on a side (default `15`, kept between 5 and
+  1000, so the app can ask for bigger cells when zoomed out), and directions are 8 sectors of 45°.
+  Each segment counts along the **stretch of road it covered**, not only at its midpoint: from
+  halfway to the drive's previous segment to halfway to its next one (speed × duration / 2 along
+  the heading at the ends of a drive and across GPS gaps). So every area a drive crossed gets a
+  row, even at highway speed, where segments are farther apart than a cell.
   Result, one row per area and direction:
 
   | Column | Type | Meaning |
   |---|---|---|
-  | `lat`, `lon` | `double precision` | Average position of the segments in the area |
+  | `lat`, `lon` | `double precision` | Middle of the road driven inside the area (average over drives) |
   | `heading_deg` | `real` | Average direction of travel |
   | `roughness` | `real` | g; median over drives of the normalized `rms_z` |
   | `drives` | `integer` | Drives that contributed |
-  | `length_m` | `real` | Length of road the row stands for, for drawing the line; `15` for now |
+  | `length_m` | `real` | Length of road driven inside the area (longest over drives, at most the cell's diagonal). Drawn as a line this long centred on `lat`, `lon` along `heading_deg`, the rows of a road meet end to end |
 
 - `events_in_area(...)`: events merged into one when they are within **10 m** of each other, have
   the same class, and headings within ~45° (so potholes on opposite sides of a road stay
