@@ -1,8 +1,10 @@
 /*
  * File:        imu_acq.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-02
- * Version:     0.1.0-draft (first draft)
+ * Date:        2026-11-03
+ * Version:     0.2.0-draft
+ * Change:      Heartbeat sent as a sys_msg_t with named counters. PCB target
+ *              (same pins). No change to acquisition.
  * Description: imu_acq task (core 1, highest of our priorities). Sole owner of
  *              the SPI bus and the LSM6DSO32X. Initializes the IMU, then for
  *              each INT1 data-ready notification reads one sample, stamps it
@@ -128,7 +130,7 @@ static bool imu_init(void) {
   s_imu.setAccelDataRate(IMU_DATA_RATE);
   s_imu.setGyroDataRate(IMU_DATA_RATE);
 
-  // A bad MOSI wire shows up here, instead of later as wrongly scaled data.
+  // A bad MOSI connection shows up here, instead of later as wrongly scaled data.
   if (s_imu.getAccelRange() != IMU_ACCEL_RANGE ||
       s_imu.getGyroRange() != IMU_GYRO_RANGE ||
       s_imu.getAccelDataRate() != IMU_DATA_RATE ||
@@ -171,8 +173,9 @@ void imu_acq_task(void *param) {
     sys_fault_and_stop(ctx->sys_q, TASK_IMU_ACQ, FAULT_IMU_INIT);  // F1
   }
 
-  // Pull-down so a loose INT1 wire reads low (no edges, then F2) instead of
-  // floating and firing at random.
+  // Pull-down so a broken INT1 connection reads low (no edges, then F2)
+  // instead of floating and firing at random. The IMU drives the line
+  // push-pull, so the weak pull-down does not fight it.
   pinMode(PIN_IMU_INT1, INPUT_PULLDOWN);
   // Attached from this task, so the GPIO interrupt is allocated on core 1.
   attachInterrupt(digitalPinToInterrupt(PIN_IMU_INT1), imu_int1_isr, RISING);
@@ -219,12 +222,17 @@ void imu_acq_task(void *param) {
       // not drift against the supervisor's 1 s tick. Otherwise HLT samples
       // would now and then repeat one second and jump ~832 the next.
       last_check_us += (int64_t)HEARTBEAT_PERIOD_MS * 1000;
-      // A pulled MISO or CS wire still lets samples "arrive" (INT1 keeps
-      // firing), but they are garbage. WHO_AM_I catches it.
+      // A broken MISO or CS connection still lets samples "arrive" (INT1
+      // keeps firing), but they are garbage. WHO_AM_I catches it.
       if (s_imu.who_am_i() != IMU_WHO_AM_I) {
         sys_fault_and_stop(ctx->sys_q, TASK_IMU_ACQ, FAULT_IMU_LOST);  // F2
       }
-      sys_heartbeat(ctx->sys_q, TASK_IMU_ACQ, n, sample_q_drops, drdy_timeouts);
+      sys_msg_t hb = {};
+      hb.task = TASK_IMU_ACQ;
+      hb.samples = n;
+      hb.drdy_timeouts = drdy_timeouts;
+      hb.sample_q_drops = sample_q_drops;
+      sys_heartbeat(ctx->sys_q, &hb);
     }
   }
 }

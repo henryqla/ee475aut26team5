@@ -1,10 +1,11 @@
 /*
  * File:        dsp.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-02
- * Version:     0.1.0-draft (first draft)
- * Description: dsp task: axis mapping, gravity removal, thresholds, lockout,
- *              and pothole / speed bump classification.
+ * Date:        2026-11-03
+ * Version:     0.2.0-draft
+ * Change:      Adds 1 s segments and phone time; sends to ble_q too.
+ * Description: dsp task: axis mapping, gravity removal, 1 s segment summaries,
+ *              thresholds, lockout, and pothole / speed bump classification.
  */
 
 #ifndef DSP_H
