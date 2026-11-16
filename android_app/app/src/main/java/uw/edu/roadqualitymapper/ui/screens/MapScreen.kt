@@ -15,6 +15,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,7 +57,9 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import uw.edu.roadqualitymapper.BuildConfig
+import uw.edu.roadqualitymapper.data.AppSettings
 import uw.edu.roadqualitymapper.data.BoundingBox
+import uw.edu.roadqualitymapper.data.ColorMode
 import uw.edu.roadqualitymapper.data.Drive
 import uw.edu.roadqualitymapper.data.EventClass
 import uw.edu.roadqualitymapper.data.EventSpot
@@ -72,11 +75,10 @@ import uw.edu.roadqualitymapper.ui.boxAround
 import uw.edu.roadqualitymapper.ui.layOutPieces
 import uw.edu.roadqualitymapper.ui.headingDirection
 import uw.edu.roadqualitymapper.ui.metersToPixels
+import uw.edu.roadqualitymapper.ui.eventMarkerHue
 import uw.edu.roadqualitymapper.ui.roughnessColor
 import uw.edu.roadqualitymapper.ui.shiftPathRight
 import uw.edu.roadqualitymapper.ui.shiftRight
-import uw.edu.roadqualitymapper.ui.travelDirectionAt
-import kotlin.math.abs
 import kotlin.math.max
 
 private val UW_CAMPUS = LatLng(47.6553, -122.3035)
@@ -103,10 +105,12 @@ private const val ROAD_LINE_WIDTH_M = 5.0
 private const val MIN_ROAD_LINE_WIDTH_DP = 4f
 
 /**
- * How far each direction is drawn to the right of the road's centerline. With 5 m lines this
- * leaves a ~1 m gap between the two directions when zoomed in; zoomed out they overlap.
+ * How far each direction is drawn to the right of where the car was, so the two directions of a
+ * road don't sit on top of each other. 0 for now: raw GPS already puts the car in its own lane,
+ * and 3 m pushed lines off the road. Once positions are snapped to roads (Ben's map matching),
+ * they sit on the road's centerline, and this needs to be about half a lane again.
  */
-private const val DIRECTION_OFFSET_M = 3.0
+private const val DIRECTION_OFFSET_M = 0.0
 
 /** What the map shows. Release builds always show Road quality. */
 private enum class MapView(val label: String) {
@@ -141,6 +145,7 @@ fun MapScreen(modifier: Modifier = Modifier) {
         position = CameraPosition.fromLatLngZoom(UW_CAMPUS, DEFAULT_ZOOM)
     }
     val density = LocalDensity.current.density
+    val colorMode by AppSettings.colorMode.collectAsState()
 
     // Trips: load whole trips when the view is picked.
     LaunchedEffect(view) {
@@ -238,13 +243,14 @@ fun MapScreen(modifier: Modifier = Modifier) {
         ) {
             if (view == MapView.ROAD_QUALITY && camera.zoom >= MIN_ROAD_QUALITY_ZOOM) {
                 drawnPieces.forEach { drawn ->
-                    RoadPieceOnMap(drawn, lineWidthPx, onClick = {
+                    RoadPieceOnMap(drawn, lineWidthPx, colorMode, onClick = {
                         status = "%.3f g · %d drive(s)".format(drawn.piece.roughness, drawn.piece.drives)
                     })
                 }
-                spots.forEach { EventSpotMarker(it) }
+                // Only potholes and speed bumps are shown; unknown bumps stay in the data for tuning.
+                spots.filter { it.eventClass != EventClass.UNKNOWN }.forEach { EventSpotMarker(it, colorMode) }
             }
-            if (view == MapView.TRIPS) drives.forEach { drive -> DriveOnMap(drive, lineWidthPx) }
+            if (view == MapView.TRIPS) drives.forEach { drive -> DriveOnMap(drive, lineWidthPx, colorMode) }
         }
 
         NorthButton(
@@ -366,11 +372,11 @@ private fun DebugBar(
  */
 @Composable
 @GoogleMapComposable
-private fun RoadPieceOnMap(drawn: DrawnPiece, lineWidthPx: Float, onClick: () -> Unit) {
-    val spans = remember(drawn) {
-        val startColor = roughnessColor(drawn.startRoughness).toArgb()
-        val middleColor = roughnessColor(drawn.piece.roughness).toArgb()
-        val endColor = roughnessColor(drawn.endRoughness).toArgb()
+private fun RoadPieceOnMap(drawn: DrawnPiece, lineWidthPx: Float, colorMode: ColorMode, onClick: () -> Unit) {
+    val spans = remember(drawn, colorMode) {
+        val startColor = roughnessColor(drawn.startRoughness, colorMode).toArgb()
+        val middleColor = roughnessColor(drawn.piece.roughness, colorMode).toArgb()
+        val endColor = roughnessColor(drawn.endRoughness, colorMode).toArgb()
         listOf(
             StyleSpan(StrokeStyle.gradientBuilder(startColor, middleColor).build()),
             StyleSpan(StrokeStyle.gradientBuilder(middleColor, endColor).build()),
@@ -391,32 +397,81 @@ private fun RoadPieceOnMap(drawn: DrawnPiece, lineWidthPx: Float, onClick: () ->
 /** Road quality view: a pothole or speed bump spot, merged over every drive that hit it. */
 @Composable
 @GoogleMapComposable
-private fun EventSpotMarker(spot: EventSpot) {
+private fun EventSpotMarker(spot: EventSpot, colorMode: ColorMode) {
     val position = remember(spot) {
         val point = LatLng(spot.lat, spot.lon)
         // On its direction's side of the road, like the road pieces. No heading: leave it centered.
         spot.headingDeg?.let { shiftRight(point, headingDirection(it), DIRECTION_OFFSET_M) } ?: point
     }
     EventMarker(
+        colorMode = colorMode,
         eventClass = spot.eventClass,
         position = position,
         snippet = "Hit by %d of %d drives · %.1f g".format(spot.hits, spot.passes, spot.maxPeakZ),
     )
 }
 
-/** One trip: its road line and its event markers, shifted to the side of the road it drove on. */
+/** One trip: its road lines and its event markers, shifted to the side of the road it drove on. */
 @Composable
 @GoogleMapComposable
-private fun DriveOnMap(drive: Drive, lineWidthPx: Float) {
-    // Segments without a GPS fix can't be drawn; skip them.
-    val located = remember(drive) { drive.segments.filter { it.latLng() != null } }
+private fun DriveOnMap(drive: Drive, lineWidthPx: Float, colorMode: ColorMode) {
+    // Drawn: segments with a GPS fix and a heading. Without a heading the car was barely moving,
+    // and its GPS points jitter in place, which made the line zigzag. Road quality leaves them
+    // out too. Where segments are missing for a while (lost GPS or device link), the line breaks
+    // instead of jumping straight across the gap.
+    val stretches = remember(drive) {
+        splitAtGaps(drive.segments.filter { it.latLng() != null && it.headingDeg != null })
+    }
+    stretches.forEach { RoadLine(it, lineWidthPx, colorMode) }
+
+    // Events without a GPS fix can't be placed; skip them.
+    drive.events.filter { it.latLng() != null }.forEach { event ->
+        // A user label wins, except UNKNOWN, which means "not sure" (contract §7).
+        val eventClass = event.userLabel?.takeIf { it != EventClass.UNKNOWN } ?: event.eventClass
+        // Only potholes and speed bumps are shown; unknown bumps stay in the data for tuning.
+        if (eventClass == EventClass.UNKNOWN) return@forEach
+        val position = remember(event) {
+            // On its direction's side of the road, like the line. No heading: leave it unshifted.
+            event.headingDeg?.let { shiftRight(event.latLng()!!, headingDirection(it), DIRECTION_OFFSET_M) }
+                ?: event.latLng()!!
+        }
+        EventMarker(
+            colorMode = colorMode,
+            eventClass = eventClass,
+            position = position,
+            snippet = "%.1f g · %d%% sure".format(event.peakZ, (event.conf * 100).toInt()),
+        )
+    }
+}
+
+/** A gap longer than this between two segments breaks a trip's line. */
+private const val MAX_SEGMENT_GAP_MS = 5_000L
+
+/** Splits a trip's segments into stretches with no gap longer than [MAX_SEGMENT_GAP_MS]. */
+private fun splitAtGaps(segments: List<Segment>): List<List<Segment>> {
+    val stretches = mutableListOf<MutableList<Segment>>()
+    segments.forEach { segment ->
+        val previous = stretches.lastOrNull()?.last()
+        if (previous == null || segment.tMid - previous.tMid > MAX_SEGMENT_GAP_MS) {
+            stretches += mutableListOf(segment)
+        } else {
+            stretches.last() += segment
+        }
+    }
+    return stretches
+}
+
+/** One unbroken stretch of a trip, its color fading from each segment's roughness to the next. */
+@Composable
+@GoogleMapComposable
+private fun RoadLine(located: List<Segment>, lineWidthPx: Float, colorMode: ColorMode) {
     val path = remember(located) { located.mapNotNull { it.latLng() } }
     if (path.size < 2) return
     val shiftedPath = remember(path) { shiftPathRight(path, DIRECTION_OFFSET_M) }
     // Each piece between two points fades from the first point's color to the second's.
     // A span covers one piece by default, so there's one span per piece.
-    val spans = remember(located) {
-        val colors = located.map { roughnessColor(it.rmsZ).toArgb() }
+    val spans = remember(located, colorMode) {
+        val colors = located.map { roughnessColor(it.rmsZ, colorMode).toArgb() }
         (1 until colors.size).map { i ->
             StyleSpan(StrokeStyle.gradientBuilder(colors[i - 1], colors[i]).build())
         }
@@ -429,37 +484,22 @@ private fun DriveOnMap(drive: Drive, lineWidthPx: Float) {
         endCap = RoundCap(),
         jointType = JointType.ROUND,
     )
-
-    // Events without a GPS fix can't be placed; skip them.
-    drive.events.filter { it.latLng() != null }.forEach { event ->
-        // Shift the marker the same way as the road under it, using the direction of travel
-        // at the segment closest in time to the event.
-        val position = remember(event, path) {
-            val nearest = located.indices.minBy { abs(located[it].tMid - event.t) }
-            shiftRight(event.latLng()!!, travelDirectionAt(path, nearest), DIRECTION_OFFSET_M)
-        }
-        EventMarker(
-            // A user label wins, except UNKNOWN, which means "not sure" (contract §7).
-            eventClass = event.userLabel?.takeIf { it != EventClass.UNKNOWN } ?: event.eventClass,
-            position = position,
-            snippet = "%.1f g · %d%% sure".format(event.peakZ, (event.conf * 100).toInt()),
-        )
-    }
 }
 
 private fun Segment.latLng(): LatLng? = if (lat != null && lon != null) LatLng(lat, lon) else null
 
 private fun RoadEvent.latLng(): LatLng? = if (lat != null && lon != null) LatLng(lat, lon) else null
 
-/** Violet = pothole, blue = speed bump, so markers don't blend into the green/red roads. */
+/** A pothole or speed bump pin, colored for the chosen color mode (see eventMarkerHue). */
 @Composable
 @GoogleMapComposable
-private fun EventMarker(eventClass: EventClass, position: LatLng, snippet: String) {
-    val (title, hue) = when (eventClass) {
-        EventClass.POTHOLE -> "Pothole" to BitmapDescriptorFactory.HUE_VIOLET
-        EventClass.SPEED_BUMP -> "Speed bump" to BitmapDescriptorFactory.HUE_AZURE
-        EventClass.UNKNOWN -> "Bump" to BitmapDescriptorFactory.HUE_YELLOW
+private fun EventMarker(colorMode: ColorMode, eventClass: EventClass, position: LatLng, snippet: String) {
+    val title = when (eventClass) {
+        EventClass.POTHOLE -> "Pothole"
+        EventClass.SPEED_BUMP -> "Speed bump"
+        EventClass.UNKNOWN -> "Bump"
     }
+    val hue = eventMarkerHue(eventClass, colorMode)
     Marker(
         state = rememberUpdatedMarkerState(position = position),
         title = title,

@@ -7,6 +7,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import uw.edu.roadqualitymapper.ble.DeviceConnection
+import uw.edu.roadqualitymapper.data.AppSettings
 import uw.edu.roadqualitymapper.data.SelectedVehicle
 import uw.edu.roadqualitymapper.data.TripUploader
 import uw.edu.roadqualitymapper.ui.AppScaffold
@@ -16,6 +17,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         SelectedVehicle.load(this)
+        AppSettings.load(this)
         DeviceConnection.init(this)
         // Send anything left over from an earlier trip (no signal, or the app was closed).
         lifecycleScope.launch { TripUploader.uploadPending(applicationContext) }

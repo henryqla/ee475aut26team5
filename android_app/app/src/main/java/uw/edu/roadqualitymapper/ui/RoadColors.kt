@@ -1,6 +1,9 @@
 package uw.edu.roadqualitymapper.ui
 
 import androidx.compose.ui.graphics.Color
+import com.google.android.gms.maps.model.BitmapDescriptorFactory
+import uw.edu.roadqualitymapper.data.ColorMode
+import uw.edu.roadqualitymapper.data.EventClass
 
 /**
  * Roughness anchors, in g (RMS vertical acceleration), like Google Maps traffic colors.
@@ -26,8 +29,57 @@ private val ModerateYellow = HsvColor(hue = 47f, saturation = 0.90f, value = 0.9
 private val I5LightRed = HsvColor(hue = 3f, saturation = 0.74f, value = 0.91f)
 private val VeryRoughDarkRed = HsvColor(hue = 0f, saturation = 0.92f, value = 0.48f)
 
-/** Blends between the anchor colors, so values between anchors get an in-between color. */
-fun roughnessColor(roughness: Double): Color = when {
+/** The road color for [roughness] in the chosen color mode. */
+fun roughnessColor(roughness: Double, mode: ColorMode): Color = when (mode) {
+    ColorMode.OFF -> standardColor(roughness)
+    ColorMode.PROTANOPIA, ColorMode.DEUTERANOPIA -> blendStops(roughness, RedGreenSafeStops)
+    ColorMode.TRITANOPIA -> blendStops(roughness, BlueYellowSafeStops)
+}
+
+/**
+ * For red-green color blindness (protanopia and deuteranopia both): blue for smooth, through
+ * yellow, to dark red. Blue and yellow stay distinct for these viewers, and the rough end also
+ * gets darker, so the order shows even where hues look alike.
+ */
+private val RedGreenSafeStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF4575B4),       // blue
+    0.045 to Color(0xFF74ADD1),                       // light blue
+    RoughnessScale.MODERATE to Color(0xFFF5C518),     // yellow
+    RoughnessScale.I5 to Color(0xFFF46D43),           // orange-red
+    RoughnessScale.VERY_ROUGH to Color(0xFFA50026),   // dark red
+)
+
+/**
+ * For blue-yellow color blindness (tritanopia): green for smooth, skipping yellow (which these
+ * viewers see as pale pink), through salmon and red, to dark red.
+ */
+private val BlueYellowSafeStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF1A9850),       // green
+    RoughnessScale.MODERATE to Color(0xFFF4A582),     // salmon
+    RoughnessScale.I5 to Color(0xFFD6604D),           // red
+    RoughnessScale.VERY_ROUGH to Color(0xFF67001F),   // dark red
+)
+
+/** Straight blend between the two stops around [roughness]; flat past the first and last. */
+private fun blendStops(roughness: Double, stops: List<Pair<Double, Color>>): Color {
+    if (roughness <= stops.first().first) return stops.first().second
+    for (i in 1 until stops.size) {
+        val (to, toColor) = stops[i]
+        if (roughness <= to) {
+            val (from, fromColor) = stops[i - 1]
+            val t = fraction(roughness, from, to)
+            return Color(
+                red = mix(fromColor.red, toColor.red, t),
+                green = mix(fromColor.green, toColor.green, t),
+                blue = mix(fromColor.blue, toColor.blue, t),
+            )
+        }
+    }
+    return stops.last().second
+}
+
+/** The original scale: blends between the anchor colors, so values between anchors get an in-between color. */
+private fun standardColor(roughness: Double): Color = when {
     roughness <= RoughnessScale.SMOOTH -> SmoothGreen.toColor()
     roughness <= RoughnessScale.MODERATE ->
         blend(SmoothGreen, ModerateYellow, fraction(roughness, RoughnessScale.SMOOTH, RoughnessScale.MODERATE))
@@ -46,6 +98,20 @@ private fun blend(from: HsvColor, to: HsvColor, t: Float): Color = Color.hsv(
 )
 
 private fun HsvColor.toColor(): Color = Color.hsv(hue, saturation, value)
+
+/**
+ * Marker pin color for an event, in the chosen color mode. Off: violet pothole, blue speed bump.
+ * Red-green modes: orange pothole instead, since violet and blue look alike to these viewers.
+ * Tritanopia keeps violet and blue, which these viewers see as pinkish and teal.
+ */
+fun eventMarkerHue(eventClass: EventClass, mode: ColorMode): Float = when (eventClass) {
+    EventClass.POTHOLE -> when (mode) {
+        ColorMode.PROTANOPIA, ColorMode.DEUTERANOPIA -> BitmapDescriptorFactory.HUE_ORANGE
+        else -> BitmapDescriptorFactory.HUE_VIOLET
+    }
+    EventClass.SPEED_BUMP -> BitmapDescriptorFactory.HUE_AZURE
+    EventClass.UNKNOWN -> BitmapDescriptorFactory.HUE_YELLOW
+}
 
 private fun mix(from: Float, to: Float, t: Float): Float = from + (to - from) * t
 

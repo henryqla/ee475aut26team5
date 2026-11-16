@@ -12,6 +12,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -43,6 +44,12 @@ fun ConnectScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     // Remembered between launches; every trip is tagged with it.
     val selectedVehicle by SelectedVehicle.id.collectAsState()
+    // Settings opens in place of this tab (no navigation library), from the gear by the title.
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+    if (showSettings) {
+        SettingsScreen(onBack = { showSettings = false }, modifier = modifier)
+        return
+    }
 
     Column(
         modifier
@@ -50,6 +57,13 @@ fun ConnectScreen(modifier: Modifier = Modifier) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        Box(Modifier.fillMaxWidth()) {
+            ScreenTitle("Connect")
+            IconButton(onClick = { showSettings = true }, modifier = Modifier.align(Alignment.CenterEnd)) {
+                Text("⚙️", style = MaterialTheme.typography.titleLarge)
+            }
+        }
+
         DeviceSection()
 
         HorizontalDivider()
@@ -107,7 +121,6 @@ private fun DeviceSection() {
         }
     }
 
-    ScreenTitle("Connect")
     Text("Device", style = MaterialTheme.typography.titleMedium)
     Text(stateText(status))
     (permissionMessage ?: status.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -140,7 +153,7 @@ private fun DeviceSection() {
         Text("Tap to connect", style = MaterialTheme.typography.bodySmall)
         found.forEach { FoundDeviceRow(it) }
     } else if (scannedOnce && !scanning) {
-        Text("No device found. Is it powered on?")
+        Text("No device found")
     }
 
     if (status.address != null) DeviceDetails(status)
