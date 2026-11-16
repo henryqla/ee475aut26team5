@@ -41,6 +41,7 @@ fun DriveScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val status by RecordingState.status.collectAsState()
     val vehicleId by SelectedVehicle.id.collectAsState()
+    val device by DeviceConnection.status.collectAsState()
     var keepScreenOn by rememberSaveable { mutableStateOf(true) }
     var permissionMessage by remember { mutableStateOf<String?>(null) }
     // Ask for notifications once per screen visit; recording works without them, just hidden.
@@ -92,7 +93,9 @@ fun DriveScreen(modifier: Modifier = Modifier) {
 
         Button(
             onClick = { if (status.recording) RecordingService.stop(context) else startTrip() },
-            enabled = status.recording || vehicleId != null,
+            // A trip needs the device: without it there's no road data. Losing the device
+            // mid-trip doesn't stop the trip; it reconnects.
+            enabled = status.recording || (vehicleId != null && device.state == DeviceState.CONNECTED),
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (status.recording) "Stop trip" else "Start trip")
@@ -170,12 +173,16 @@ private fun DeviceLine() {
         DeviceState.CONNECTED -> "Device connected" + (device.fwVersion?.let { " (firmware $it)" } ?: "")
         DeviceState.CONNECTING -> "Connecting to the device…"
         DeviceState.RECONNECTING -> "Device lost. Waiting for it…"
-        DeviceState.NOT_CONNECTED -> "No device: GPS only"
+        DeviceState.NOT_CONNECTED -> "No device connected"
     }
     Text(
         text,
         color = if (device.state == DeviceState.CONNECTED) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
     )
+    // The device's own status message says its IMU stopped: no road data until it's fixed.
+    if (device.state == DeviceState.CONNECTED && device.imuOk == false) {
+        Text("IMU not OK: no road data", color = MaterialTheme.colorScheme.error)
+    }
 }
 
 /** What's still on the phone only, and a button to send it now. */
