@@ -455,6 +455,46 @@ read further pages with `range(...)`, the same way it pages segments.
 
   The map shows "hit by `hits` of `passes` drives". This is a different shape from `RoadEvent`,
   so the app will need a small model for it.
+
+- `road_quality_snapped(...)` — **proposed by Ben (Nov 2026), waiting for Scott's OK.** Will
+  replace `road_quality_in_area` in the Road quality view; `road_quality_in_area` stays unchanged
+  until the app has switched. Drives are snapped to OpenStreetMap roads on the server (Valhalla
+  map matching, run on the laptop once a trip has its `end_time`), so lines lie on the road and
+  follow its curves, and every drive over the same piece of road and direction is combined.
+  Takes the same parameters as the other two, plus `piece_m` (default `15`; rounded to a multiple
+  of 15, at most 3000) instead of `cell_m`, so the app can ask for longer pieces when zoomed out.
+  - **ROAD** rows: one per piece of road and **direction of travel** (not per lane). Pieces are
+    15 m (or `piece_m`) stretches of an OSM road. Each drive counts once per piece.
+  - **CELL** rows: everything not on a matched road (parking lots, roads missing from OSM,
+    trips not matched yet), with the cell method of `road_quality_in_area`, as a straight
+    two-point line. A trip shows as CELL rows right after upload and switches to ROAD rows
+    within seconds of the app setting `end_time` (or 30 min after its last segment if
+    `end_time` never arrives).
+  - `roughness` is the **age-weighted** median over drives of `rms_z` × `scale_factor`: a drive
+    14 days old counts half as much as one from today, 28 days a quarter, so repairs and new
+    damage show up.
+  - Events are not affected: `events_in_area` stays as it is.
+
+  Result, one row per piece, in a fixed order (by `piece_id`) for paging:
+
+  | Column | Type | Meaning |
+  |---|---|---|
+  | `piece_id` | `text` | Stable id of the piece (also the sort order) |
+  | `kind` | `text` | `ROAD` (snapped) or `CELL` (not matched) |
+  | `path` | `jsonb` | `[[lat, lon], ...]`, in the direction of travel; draw as one polyline |
+  | `lat`, `lon` | `double precision` | Middle of the piece |
+  | `heading_deg` | `real` | Direction of travel, start to end of the piece |
+  | `length_m` | `real` | Length of the line |
+  | `roughness` | `real` | g; age-weighted median over drives |
+  | `drives` | `integer` | Drives that contributed |
+  | `weight` | `real` | Sum of the drives' age weights (1.0 = one drive from today); a confidence value |
+  | `last_t` | `bigint` | Epoch ms of the newest drive |
+  | `oneway` | `boolean` | `ROAD` only: one-way road (e.g. each side of a divided highway). Draw without the side offset, since the road line is already that direction's own road. `null` for `CELL` |
+  | `road_name` | `text` | `ROAD` only: OSM road name, may be `null` |
+
+  ROAD paths lie on the road's centre line, so two-way roads need the side offset of §8
+  (about half a lane) to keep the directions apart; CELL rows keep today's offset of 0.
+  The map must show "© OpenStreetMap contributors" (ODbL licence).
 - Directions are compared around the circle: 350° and 10° count as the same direction.
 - Rows with no heading (car barely moving) are left out of `road_quality_in_area`; events with no
   heading are merged by distance and class only. Rows with no location are stored but not shown.

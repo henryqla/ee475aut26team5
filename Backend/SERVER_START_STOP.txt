@@ -4,8 +4,11 @@ Road Quality Mapper - EE475 Team 5
 
 For the Linux laptop that runs Supabase. First-time setup is in SUPABASE_SETUP.txt.
 
-What starts by itself after a reboot:   Docker, Tailscale, Funnel
+What starts by itself after a reboot:   Docker, Tailscale, Funnel, Valhalla (a Docker container),
+                                        the road-matcher service (waits until Supabase is up)
 What does NOT:                          Supabase (you run `supabase start`)
+
+Road matching setup and details: ROAD_MATCHING_SETUP.txt.
 
 
 ------------------------------------------------------------------
@@ -31,6 +34,13 @@ START-UP (after turning the laptop on or rebooting)
 4. (Optional) Quick check that the keys are still right:
 
        bash checks/check_keys.sh
+
+5. (Optional) Check road matching is up (Valhalla, matcher service, locked down):
+
+       bash checks/check_matcher.sh
+
+   The matcher retries every 30 s until Supabase is up, then matches any trips that ended
+   while it was down. Its log:   journalctl -u road-matcher -f
 
 
 ------------------------------------------------------------------
@@ -62,5 +72,8 @@ AFTER PULLING NEW CODE
    If config.toml changed, restart:   supabase stop && supabase start
    If the access rules changed:       bash checks/check_access.sh
    If the map functions changed:      bash checks/check_map_functions.sh
+                                      bash checks/check_snapped_map.sh
+   If matcher/road_matcher.py or matcher/requirements.txt changed:
+                                      bash matcher/install_matcher.sh
 
    Don't use `supabase db reset` once real drives are stored: it wipes everything.

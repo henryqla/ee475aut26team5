@@ -1,0 +1,2 @@
+# Pinned on purpose; install_matcher.sh installs these into matcher/.venv only.
+psycopg[binary]==3.2.3
