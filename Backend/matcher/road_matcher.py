@@ -235,8 +235,15 @@ def serve():
                 next_catch_up = time.monotonic() + CATCH_UP_EVERY_S
                 while True:
                     wait = max(1.0, next_catch_up - time.monotonic())
-                    for note in conn.notifies(timeout=wait, stop_after=1):
-                        handle_notification(conn, note.payload)
+                    # notifies() holds the connection's lock while its generator is open, so
+                    # running queries inside the loop would wait on itself forever. Collect the
+                    # notifications first (the first one, then any that arrive within a
+                    # second, e.g. several trips ended at once), then handle them.
+                    notes = list(conn.notifies(timeout=wait, stop_after=1))
+                    if notes:
+                        notes += list(conn.notifies(timeout=1.0))
+                    for payload in dict.fromkeys(n.payload for n in notes):   # once each, in order
+                        handle_notification(conn, payload)
                     if time.monotonic() >= next_catch_up:
                         catch_up(conn)
                         next_catch_up = time.monotonic() + CATCH_UP_EVERY_S
