@@ -435,6 +435,7 @@ class RecordingService : Service() {
 
     private suspend fun uploadEveryMinute() {
         while (scope.isActive) {
+            RecordingState.update { it.copy(nextUploadAt = System.currentTimeMillis() + UPLOAD_INTERVAL_MS) }
             delay(UPLOAD_INTERVAL_MS)
             TripUploader.uploadPending(applicationContext)
         }

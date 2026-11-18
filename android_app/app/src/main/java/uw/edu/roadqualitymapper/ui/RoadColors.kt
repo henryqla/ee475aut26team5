@@ -32,8 +32,8 @@ private val VeryRoughDarkRed = HsvColor(hue = 0f, saturation = 0.92f, value = 0.
 /** The road color for [roughness] in the chosen color mode. */
 fun roughnessColor(roughness: Double, mode: ColorMode): Color = when (mode) {
     ColorMode.OFF -> standardColor(roughness)
-    ColorMode.PROTANOPIA, ColorMode.DEUTERANOPIA -> blendStops(roughness, RedGreenSafeStops)
-    ColorMode.TRITANOPIA -> blendStops(roughness, BlueYellowSafeStops)
+    ColorMode.RED_GREEN -> blendStops(roughness, RedGreenSafeStops)
+    ColorMode.BLUE_YELLOW -> blendStops(roughness, BlueYellowSafeStops)
 }
 
 /**
@@ -106,7 +106,7 @@ private fun HsvColor.toColor(): Color = Color.hsv(hue, saturation, value)
  */
 fun eventMarkerHue(eventClass: EventClass, mode: ColorMode): Float = when (eventClass) {
     EventClass.POTHOLE -> when (mode) {
-        ColorMode.PROTANOPIA, ColorMode.DEUTERANOPIA -> BitmapDescriptorFactory.HUE_ORANGE
+        ColorMode.RED_GREEN -> BitmapDescriptorFactory.HUE_ORANGE
         else -> BitmapDescriptorFactory.HUE_VIOLET
     }
     EventClass.SPEED_BUMP -> BitmapDescriptorFactory.HUE_AZURE

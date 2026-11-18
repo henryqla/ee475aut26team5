@@ -5,10 +5,14 @@ import android.bluetooth.BluetoothAdapter
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.DrawableRes
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,80 +23,58 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.text.TextAutoSize
+import uw.edu.roadqualitymapper.R
 import uw.edu.roadqualitymapper.ble.DeviceConnection
 import uw.edu.roadqualitymapper.ble.DeviceState
 import uw.edu.roadqualitymapper.ble.DeviceStatus
 import uw.edu.roadqualitymapper.ble.FoundDevice
 import uw.edu.roadqualitymapper.data.SelectedVehicle
-import uw.edu.roadqualitymapper.ui.ScreenTitle
+import uw.edu.roadqualitymapper.ui.components.AppCard
+import uw.edu.roadqualitymapper.ui.components.AppIcon
+import uw.edu.roadqualitymapper.ui.components.NeutralChip
+import uw.edu.roadqualitymapper.ui.components.SectionLabel
+import uw.edu.roadqualitymapper.ui.components.StatusChip
+import uw.edu.roadqualitymapper.ui.components.StatusDot
+import uw.edu.roadqualitymapper.ui.theme.StatusAmber
+import uw.edu.roadqualitymapper.ui.theme.StatusGray
+import uw.edu.roadqualitymapper.ui.theme.StatusGreen
+
+/** A vehicle the phone can be in: its ID in the database, the name shown, and its icon. */
+private class VehicleOption(val id: String, val label: String, @DrawableRes val icon: Int)
 
 // Shown as general vehicle types, but uploaded with the IDs of the team's own cars, which are the
 // only vehicles in the database (Ben's vehicles table) and carry each car's calibration.
-private val placeholderVehicles = listOf(
-    "camry" to "Sedan",
-    "escape" to "SUV",
-    "truck" to "Truck",
+private val vehicleOptions = listOf(
+    VehicleOption("camry", "Sedan", R.drawable.ic_car),
+    VehicleOption("escape", "SUV", R.drawable.ic_car_suv),
+    VehicleOption("truck", "Truck", R.drawable.ic_truck),
 )
 
 /** The name shown for a vehicle ID, e.g. "Sedan" for camry. */
 internal fun vehicleLabel(vehicleId: String): String =
-    placeholderVehicles.firstOrNull { it.first == vehicleId }?.second ?: vehicleId
+    vehicleOptions.firstOrNull { it.id == vehicleId }?.label ?: vehicleId
 
 @Composable
 fun ConnectScreen(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
-    // Remembered between launches; every trip is tagged with it.
-    val selectedVehicle by SelectedVehicle.id.collectAsState()
-    // Settings opens in place of this tab (no navigation library), from the gear by the title.
-    var showSettings by rememberSaveable { mutableStateOf(false) }
-    if (showSettings) {
-        SettingsScreen(onBack = { showSettings = false }, modifier = modifier)
-        return
-    }
-
     Column(
         modifier
             .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(Modifier.fillMaxWidth()) {
-            ScreenTitle("Connect")
-            IconButton(onClick = { showSettings = true }, modifier = Modifier.align(Alignment.CenterEnd)) {
-                Text("⚙️", style = MaterialTheme.typography.titleLarge)
-            }
-        }
-
-        DeviceSection()
-
-        HorizontalDivider()
-
-        Text("Vehicle", style = MaterialTheme.typography.titleMedium)
-        Text("Which car is this phone in?")
-        placeholderVehicles.forEach { (id, name) ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .selectable(
-                        selected = selectedVehicle == id,
-                        onClick = { SelectedVehicle.set(context, id) },
-                    ),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(selected = selectedVehicle == id, onClick = null)
-                Text(name, Modifier.padding(start = 8.dp))
-            }
-        }
+        DeviceCard()
+        VehicleCard()
+        LiveMessagesCard()
     }
 }
 
+// ---------------------------------------------------------------- device
+
 @Composable
-private fun DeviceSection() {
+private fun DeviceCard() {
     val status by DeviceConnection.status.collectAsState()
     val scanning by DeviceConnection.scanning.collectAsState()
     val found by DeviceConnection.found.collectAsState()
-    val rawLog by DeviceConnection.rawLog.collectAsState()
     var permissionMessage by remember { mutableStateOf<String?>(null) }
 
     // Bluetooth must be on, and "Nearby devices" allowed, before scanning.
@@ -121,50 +103,136 @@ private fun DeviceSection() {
         }
     }
 
-    Text("Device", style = MaterialTheme.typography.titleMedium)
-    Text(stateText(status))
-    (permissionMessage ?: status.error)?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-
-    // The buttons split the row's width, so they always fit on one line whatever the phone's width.
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        val fill = Modifier.weight(1f)
-        Button(onClick = scan, enabled = !scanning, modifier = fill, contentPadding = TIGHT_PADDING) {
-            OneLine(if (scanning) "Scanning…" else "Scan for device")
+    AppCard {
+        SectionLabel("Device")
+        DeviceHeader(status)
+        if (status.state == DeviceState.CONNECTED) DeviceChips(status)
+        (permissionMessage ?: status.error)?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
-        when {
-            status.state != DeviceState.NOT_CONNECTED ->
-                OutlinedButton(onClick = { DeviceConnection.disconnect() }, modifier = fill, contentPadding = TIGHT_PADDING) {
-                    OneLine("Disconnect")
+
+        // The buttons split the row's width, so they always fit on one line whatever the phone's width.
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val fill = Modifier.weight(1f)
+            val scanLabel = if (scanning) "Scanning…" else "Scan"
+            if (status.address == null) {
+                // No device yet: scanning is the one thing to do here.
+                Button(onClick = scan, enabled = !scanning, modifier = fill, shape = BUTTON_SHAPE) { OneLine(scanLabel) }
+            } else {
+                OutlinedButton(onClick = scan, enabled = !scanning, modifier = fill, shape = BUTTON_SHAPE, contentPadding = TIGHT_PADDING) {
+                    OneLine(scanLabel)
                 }
-            status.address != null -> {
-                OutlinedButton(onClick = { DeviceConnection.connectToRemembered() }, modifier = fill, contentPadding = TIGHT_PADDING) {
-                    OneLine("Connect")
-                }
-                TextButton(onClick = { DeviceConnection.forget() }, modifier = fill, contentPadding = TIGHT_PADDING) {
-                    OneLine("Forget")
+            }
+            when {
+                status.state != DeviceState.NOT_CONNECTED ->
+                    FilledTonalButton(onClick = { DeviceConnection.disconnect() }, modifier = fill, shape = BUTTON_SHAPE, contentPadding = TIGHT_PADDING) {
+                        OneLine("Disconnect")
+                    }
+                status.address != null -> {
+                    FilledTonalButton(onClick = { DeviceConnection.connectToRemembered() }, modifier = fill, shape = BUTTON_SHAPE, contentPadding = TIGHT_PADDING) {
+                        OneLine("Connect")
+                    }
+                    TextButton(onClick = { DeviceConnection.forget() }, modifier = fill, shape = BUTTON_SHAPE, contentPadding = TIGHT_PADDING) {
+                        OneLine("Forget")
+                    }
                 }
             }
         }
-    }
 
-    var scannedOnce by remember { mutableStateOf(false) }
-    LaunchedEffect(scanning) { if (scanning) scannedOnce = true }
-    if (found.isNotEmpty()) {
-        Text("Tap to connect", style = MaterialTheme.typography.bodySmall)
-        found.forEach { FoundDeviceRow(it) }
-    } else if (scannedOnce && !scanning) {
-        Text("No device found")
-    }
-
-    if (status.address != null) DeviceDetails(status)
-
-    if (rawLog.isNotEmpty()) {
-        Text("Last messages (newest first)", style = MaterialTheme.typography.titleSmall)
-        rawLog.forEach {
-            Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        var scannedOnce by remember { mutableStateOf(false) }
+        LaunchedEffect(scanning) { if (scanning) scannedOnce = true }
+        if (found.isNotEmpty()) {
+            SectionLabel("Tap to connect")
+            found.forEach { FoundDeviceRow(it) }
+        } else if (scannedOnce && !scanning) {
+            Text("No device found", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
+
+/** Icon, device name, and a colored dot with the connection state. */
+@Composable
+private fun DeviceHeader(status: DeviceStatus) {
+    val (stateText, dot) = when (status.state) {
+        DeviceState.CONNECTED -> "Connected" to StatusGreen
+        DeviceState.CONNECTING -> "Connecting…" to StatusAmber
+        DeviceState.RECONNECTING -> "Lost. Waiting for it…" to StatusAmber
+        DeviceState.NOT_CONNECTED ->
+            (if (status.address != null) "Not connected" else "Tap Scan to find your device") to StatusGray
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Box(
+            Modifier
+                .size(40.dp)
+                .background(MaterialTheme.colorScheme.primaryContainer, RoundedCornerShape(12.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            AppIcon(R.drawable.ic_bluetooth, contentDescription = null, size = 22.dp, tint = MaterialTheme.colorScheme.primary)
+        }
+        Column {
+            Text(status.name ?: "No device yet", style = MaterialTheme.typography.titleMedium)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                StatusDot(dot)
+                Text(stateText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+/** What the device reported about itself in its status message (contract §4.3). */
+@Composable
+private fun DeviceChips(status: DeviceStatus) {
+    @OptIn(ExperimentalLayoutApi::class)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        status.fwVersion?.let { NeutralChip("Firmware $it") }
+        when (status.imuOk) {
+            true -> OkChip("IMU")
+            false -> ProblemChip("IMU not OK")
+            null -> {}
+        }
+        when (status.sdOk) {
+            true -> OkChip("SD card")
+            false -> NeutralChip("No SD card")
+            null -> {}
+        }
+    }
+}
+
+@Composable
+private fun OkChip(text: String) = StatusChip(
+    text = text,
+    container = StatusGreen.copy(alpha = 0.15f),
+    content = MaterialTheme.colorScheme.onSurface,
+    icon = R.drawable.ic_check,
+)
+
+@Composable
+private fun ProblemChip(text: String) = StatusChip(
+    text = text,
+    container = MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+    content = MaterialTheme.colorScheme.error,
+    icon = R.drawable.ic_alert_circle,
+)
+
+@Composable
+private fun FoundDeviceRow(device: FoundDevice) {
+    Surface(
+        onClick = { DeviceConnection.connect(device) },
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(device.name, style = MaterialTheme.typography.titleSmall)
+                Text(device.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("${device.rssi} dBm", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+private val BUTTON_SHAPE = RoundedCornerShape(12.dp)
 
 /** Less side padding than the default, so labels have room on narrow phones. */
 private val TIGHT_PADDING = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
@@ -180,52 +248,95 @@ private fun OneLine(text: String) {
     )
 }
 
+// ---------------------------------------------------------------- vehicle
+
 @Composable
-private fun FoundDeviceRow(device: FoundDevice) {
-    Card(
-        Modifier
-            .fillMaxWidth()
-            .clickable { DeviceConnection.connect(device) }
-    ) {
-        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(device.name, style = MaterialTheme.typography.titleSmall)
-                Text(device.address, style = MaterialTheme.typography.bodySmall)
+private fun VehicleCard() {
+    val context = LocalContext.current
+    // Remembered between launches; every trip is tagged with it.
+    val selectedVehicle by SelectedVehicle.id.collectAsState()
+    AppCard {
+        SectionLabel("Vehicle")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            vehicleOptions.forEach { option ->
+                VehicleTile(
+                    option = option,
+                    selected = selectedVehicle == option.id,
+                    onClick = { SelectedVehicle.set(context, option.id) },
+                    modifier = Modifier.weight(1f),
+                )
             }
-            Text("${device.rssi} dBm", style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
 @Composable
-private fun DeviceDetails(status: DeviceStatus) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("${status.name ?: "Device"} · ${status.address}", style = MaterialTheme.typography.bodySmall)
-        status.fwVersion?.let { fw ->
-            Text(
-                "Firmware $fw · IMU ${okText(status.imuOk)} · SD card ${okText(status.sdOk)}" +
-                    (status.rateHz?.let { " · $it Hz" } ?: "")
+private fun VehicleTile(option: VehicleOption, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        modifier = modifier,
+        shape = RoundedCornerShape(12.dp),
+        color = if (selected) colors.primaryContainer.copy(alpha = 0.5f) else colors.surfaceContainerLowest,
+        contentColor = if (selected) colors.primary else colors.onSurfaceVariant,
+        border = if (selected) BorderStroke(2.dp, colors.primary) else BorderStroke(1.dp, colors.outlineVariant),
+    ) {
+        Column(
+            Modifier.padding(vertical = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            AppIcon(option.icon, contentDescription = null, size = 26.dp)
+            Text(option.label, style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+// ---------------------------------------------------------------- live messages
+
+/** The device's raw messages, folded away by default: mostly for debugging the firmware. */
+@Composable
+private fun LiveMessagesCard() {
+    val status by DeviceConnection.status.collectAsState()
+    val rawLog by DeviceConnection.rawLog.collectAsState()
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    if (status.address == null && rawLog.isEmpty()) return
+
+    AppCard {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Live messages", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "%,d received · %,d lost".format(status.received, status.dropped),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            AppIcon(
+                if (expanded) R.drawable.ic_chevron_up else R.drawable.ic_chevron_down,
+                contentDescription = if (expanded) "Hide messages" else "Show messages",
+                size = 20.dp,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Text(
-            "Received ${status.received} · lost ${status.dropped} · " +
-                "before time sync ${status.unsynced} · unreadable ${status.unreadable}"
-        )
+        if (expanded) {
+            Text(
+                "Before time sync ${status.unsynced} · unreadable ${status.unreadable}" +
+                    (status.rateHz?.let { " · $it Hz" } ?: ""),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (rawLog.isEmpty()) {
+                Text("No messages yet", style = MaterialTheme.typography.bodySmall)
+            }
+            rawLog.forEach {
+                Text(it, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+            }
+        }
     }
-}
-
-private fun stateText(status: DeviceStatus): String {
-    val name = status.name ?: "the device"
-    return when (status.state) {
-        DeviceState.NOT_CONNECTED -> if (status.address != null) "Not connected" else "Tap Scan to find your device"
-        DeviceState.CONNECTING -> "Connecting to $name…"
-        DeviceState.CONNECTED -> "Connected to $name"
-        DeviceState.RECONNECTING -> "Lost $name. Waiting for it…"
-    }
-}
-
-private fun okText(ok: Boolean?) = when (ok) {
-    true -> "OK"
-    false -> "NOT OK"
-    null -> "?"
 }
