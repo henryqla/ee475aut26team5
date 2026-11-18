@@ -1,0 +1,306 @@
+ROAD MATCHING SETUP ON THE LINUX LAPTOP
+Road Quality Mapper - EE475 Team 5
+==================================================================
+
+What this adds: drives are snapped to OpenStreetMap (OSM) roads, so the Road quality map draws
+on the road itself, follows curves, and combines every drive over the same piece of road and
+direction instead of drawing them on top of each other. Off-road data still shows as before.
+
+Day-to-day use (start-up, shut-down, after pulling) is in SERVER_START_STOP.txt.
+Supabase must already be set up (SUPABASE_SETUP.txt).
+
+Every command below is one line, run from ~/ee475aut26team5/Backend unless it says otherwise.
+None of the scripts print keys or passwords, so their output is safe to share.
+
+
+------------------------------------------------------------------
+HOW IT WORKS
+------------------------------------------------------------------
+
+  app uploads trip ──▶ Supabase ──(end_time set: NOTIFY)──▶ road-matcher service (Python)
+                                                                    │
+                          Valhalla (Docker, 127.0.0.1:8002) ◀──────┘ "which road was each point on?"
+                                                                    │
+  roads.segment_matches, roads.drive_pieces ◀───────────────────────┘ stored through 3 functions
+                    │
+  road_quality_snapped(...) ──▶ app map: ROAD rows (on the road) + CELL rows (everything else)
+
+Pieces:
+  - Valhalla:        a map-matching server, built from the Washington OSM extract. Runs in
+                     Docker, reachable from this laptop only.
+  - roads.ways:      the same OSM roads, loaded into Postgres (non-exposed schema `roads`), so the
+                     database can measure distance along each road.
+  - road-matcher:    a systemd service (Backend/matcher/road_matcher.py). Matches a trip within
+                     seconds of the app setting end_time; every 30 minutes it also catches up on
+                     trips with no end_time (30 min after their last segment), trips that got
+                     more segments later, and trips missed while something was down.
+  - Map function:    road_quality_snapped. 15 m pieces per OSM road and direction, age-weighted
+                     median roughness (14-day half-life), longer pieces with piece_m when zoomed
+                     out. Unmatched segments come back with the cell method (kind CELL).
+  - Unchanged:       road_quality_in_area (until the app switches), events_in_area, all tables
+                     the app writes to.
+
+Disk and memory: the Washington extract is a few hundred MB; Valhalla's tiles a few GB.
+Building the tiles takes several GB of RAM for tens of minutes, once. After that Valhalla and
+the matcher use well under 2 GB.
+
+
+------------------------------------------------------------------
+STEP 1 - Get the code and apply the migrations
+------------------------------------------------------------------
+
+    cd ~/ee475aut26team5 && git fetch && git switch supabase-work && git pull
+
+(After the PR is merged, use main instead: git switch main && git pull)
+
+    cd ~/ee475aut26team5/Backend && supabase migration up
+
+This applies two migrations and keeps all data:
+  - road_matching:         schema `roads`, its tables, the road_matcher role (no login yet),
+                           the worker functions, and a trigger on trips.end_time.
+  - road_quality_snapped:  the new map function.
+
+Check:   bash checks/check_access.sh      (all PASS: access rules for the app are unchanged)
+         bash checks/check_map_functions.sh   (all PASS: the old functions are unchanged)
+
+The new map function already works now: with no roads loaded, everything comes back as CELL.
+
+
+------------------------------------------------------------------
+STEP 2 - Install tools
+------------------------------------------------------------------
+
+    sudo apt update && sudo apt install -y osm2pgsql python3-venv postgresql-client
+
+  - osm2pgsql:      loads OSM roads into Postgres (step 5)
+  - python3-venv:   the matcher's private Python environment (step 6)
+  - postgresql-client (psql): used by the scripts; probably already installed
+
+Check:   osm2pgsql --version     (1.6 or newer)
+
+
+------------------------------------------------------------------
+STEP 3 - Download the Washington OSM extract
+------------------------------------------------------------------
+
+    mkdir -p valhalla/custom_files && curl -L --fail -o valhalla/custom_files/washington-latest.osm.pbf https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf
+
+Valhalla (step 4) and the road import (step 5) both read this one file, so their road ids match.
+valhalla/custom_files/ is gitignored.
+
+
+------------------------------------------------------------------
+STEP 4 - Start Valhalla and build its tiles (tens of minutes, once)
+------------------------------------------------------------------
+
+The container must be able to write to custom_files/. Find which user it runs as:
+
+    docker run --rm --entrypoint id ghcr.io/valhalla/valhalla-scripted:3.9.1 -u
+
+The first time, Docker downloads the image and prints progress lines first (including a
+"Digest: sha256:..." checksum; ignore it). The user id is the LAST line, a plain number.
+
+  - It prints 0 (root; this is what 3.9.1 does): skip the chown below, root can already write
+    there. Files Valhalla creates in custom_files/ will be owned by root, so replacing or
+    deleting files there later needs sudo (see UPDATING THE MAP DATA).
+  - It prints any other number: give that user the folder (you can still read the files in it):
+
+        sudo chown -R <that number>:$(id -g) valhalla/custom_files && sudo chmod -R g+rwX valhalla/custom_files
+
+Start it:
+
+    cd valhalla && docker compose up -d && cd ..
+
+Watch it build (Ctrl+C stops watching, not Valhalla):
+
+    docker compose -f valhalla/docker-compose.yml logs -f
+
+It's ready when the log stops building and shows the service starting. Then:
+
+    curl -s http://127.0.0.1:8002/status
+
+should print a short JSON with a version. The port is bound to 127.0.0.1 only, so it is not
+reachable from the network or through Funnel (Funnel forwards only 54321).
+
+The container restarts by itself after a reboot and reuses the built tiles.
+
+
+------------------------------------------------------------------
+STEP 5 - Load the roads into the database (a few minutes)
+------------------------------------------------------------------
+
+    bash roads/import_roads.sh
+
+It runs osm2pgsql on the extract (drivable roads only), copies them into roads.ways, and
+removes the temporary import schema. It ends with "Loaded <n> roads." (expect several hundred
+thousand).
+
+Running it again later replaces the roads and clears all matches; the matcher then matches every
+trip again by itself.
+
+
+------------------------------------------------------------------
+STEP 6 - Install the road-matcher service
+------------------------------------------------------------------
+
+    bash matcher/install_matcher.sh
+
+It asks for your sudo password once (to install the systemd service). It:
+  1. creates matcher/.venv with the one pinned package (psycopg)
+  2. gives the road_matcher database role a new random password and saves it in
+     matcher/matcher.env (gitignored, mode 600, readable by you only)
+  3. installs, enables and starts /etc/systemd/system/road-matcher.service
+
+How it is kept safe:
+  - Runs as you, not root, with NoNewPrivileges, a read-only view of the disk, no devices,
+    and network access to 127.0.0.1 only (systemd IPAddressAllow=localhost).
+  - Logs in as road_matcher, which has no access to any table. It can only call
+    roads.trips_to_match, roads.trip_points and roads.save_trip_match.
+  - Nothing it listens on: it only makes outgoing connections to Postgres and Valhalla.
+  - Only one third-party package, pinned to an exact version, in its own environment.
+
+Watch its log:
+
+    journalctl -u road-matcher -f
+
+On first start it matches every trip already stored (one log line per trip). Fake trips that
+don't follow roads (e.g. the check scripts' Pacific drives) show as NO_MATCH: expected; they stay
+on the map as CELL rows.
+
+Run it again after pulling a new road_matcher.py or requirements.txt (it also changes the
+password; that's fine).
+
+
+------------------------------------------------------------------
+STEP 7 - Run the checks
+------------------------------------------------------------------
+
+    bash checks/check_matcher.sh
+
+  Valhalla up and localhost-only, roads loaded, road_matcher role locked down, nothing new
+  reachable through the API, service running locked down. All should PASS.
+
+    bash checks/check_match_trip.sh list
+
+  Lists recent trips. Then try one (or leave out the id for the newest):
+
+    bash checks/check_match_trip.sh <trip id>
+
+  Matches it without storing anything and prints how many points landed on a road and how far
+  they were moved (median, 90%, max). For real drives expect most points on a road and a median
+  of a few metres. Try Scott's FAKE_ASSET trips too.
+
+    bash checks/check_snapped_map.sh
+
+  End to end: uploads 5 fake test drives on a quiet road in eastern Washington (plus one in the
+  Pacific), checks they show as CELL before matching, ends them, waits for the matcher, then
+  checks the ROAD rows (directions kept apart, age-weighted median, piece_m, filters). Deletes
+  everything at the end. All should PASS.
+
+
+------------------------------------------------------------------
+STEP 8 - Hand over to Scott
+------------------------------------------------------------------
+
+The new function and its result columns are in docs/data-contract.md §7
+(road_quality_snapped, marked "waiting for Scott's OK"). For the app:
+  - call road_quality_snapped instead of road_quality_in_area, with piece_m instead of cell_m
+    (larger when zoomed out, e.g. 15 / 60 / 240 / 960)
+  - draw each row's `path` as one polyline, coloured by roughness; page past 1000 rows the same
+    way as today (rows are ordered by piece_id)
+  - ROAD rows with oneway = false: offset to the right of travel by about half a lane (~2 m),
+    with a separate offset for road-quality lines (MapScreen.kt DIRECTION_OFFSET_M also
+    shifts event markers and trip paths; leave it as is) and the existing shiftPathRight;
+    oneway = true and CELL rows: no offset
+  - include piece_m in the RoadQualityCache key, so zooming reloads
+  - show "© OpenStreetMap contributors" on the map
+  - layOutPieces (RoadPieceLayout.kt) isn't needed for ROAD rows
+  - ask him to add a §10 change-log line once agreed
+
+
+------------------------------------------------------------------
+STEP 9 - First real drives
+------------------------------------------------------------------
+
+Drive a short loop in both directions 2-3 times, then:
+  - bash checks/check_match_trip.sh   (how far points moved)
+  - look at the map with include_fake off: ROAD lines on the road, one per direction
+  - if many points are NO_MATCH or matched to the wrong road, tune in matcher/matcher.env:
+      SEARCH_RADIUS_M (default 30), GPS_ACCURACY_M (default 8), MAX_OFF_M (default 40)
+    then: sudo systemctl restart road-matcher
+    To redo all trips with new settings, in Studio's SQL editor: delete from roads.trip_matches;
+    (the matcher re-matches everything at its next catch-up, within 30 min, or right away
+    after: sudo systemctl restart road-matcher)
+
+
+------------------------------------------------------------------
+UPDATING THE MAP DATA (optional, e.g. every few months)
+------------------------------------------------------------------
+
+1. Download a new extract over the old one. Valhalla's files in custom_files/ belong to root
+   (or the container's user), so use sudo:
+
+       sudo curl -L --fail -o valhalla/custom_files/washington-latest.osm.pbf https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf
+2. Rebuild Valhalla's tiles:
+
+       cd valhalla && VALHALLA_FORCE_REBUILD=True docker compose up -d --force-recreate && cd ..
+
+   Wait for the build (logs, as in step 4). Then recreate it once more without the variable, so
+   later restarts don't rebuild:   cd valhalla && docker compose up -d --force-recreate && cd ..
+3. bash roads/import_roads.sh   (the matcher then re-matches every trip by itself)
+
+Do 2 and 3 together: Valhalla and roads.ways must come from the same file.
+
+
+------------------------------------------------------------------
+TROUBLESHOOTING
+------------------------------------------------------------------
+
+Valhalla log says "Permission denied" in /custom_files
+    The container isn't running as root and step 4's chown wasn't done or used the wrong id.
+    Redo it, then: cd valhalla && docker compose restart
+
+import_roads.sh: "Permission denied" reading the .pbf
+    The download is owned by root (e.g. downloaded with sudo). Make it readable:
+    sudo chmod a+r valhalla/custom_files/washington-latest.osm.pbf
+
+`docker compose` not found
+    Docker from get.docker.com includes it. Otherwise: sudo apt install -y docker-compose-plugin
+
+Valhalla image not found (3.9.1)
+    Check https://github.com/valhalla/valhalla/pkgs/container/valhalla-scripted for tags and
+    put one at least two weeks old in valhalla/docker-compose.yml.
+
+import_roads.sh: osm2pgsql error about the geometry type or "postgis"
+    PostGIS is in the extensions schema; the script sets the search path for that. If it still
+    fails, send the output.
+
+install_matcher.sh: "Couldn't set the password" / "must have admin option"
+    The migration's role was created by a different database user. In Studio's SQL editor run:
+    alter role road_matcher with login; then run install_matcher.sh again. If it still fails,
+    send the output.
+
+Service won't start (journalctl -u road-matcher -n 50)
+    "MATCHER_DB_URL is not set": rerun install_matcher.sh.
+    A crash right after start that mentions memory or mprotect: delete the line
+    MemoryDenyWriteExecute=yes from matcher/road-matcher.service, rerun install_matcher.sh.
+
+"database unavailable ... retrying" in the log
+    Normal after a reboot until you run supabase start.
+
+A trip stays CELL after it ended
+    journalctl -u road-matcher -n 50 shows why. NO_MATCH means Valhalla found no road (off-road,
+    or a road missing from OSM). A Valhalla error is retried at the next catch-up (30 min).
+
+Never `supabase db reset`: it wipes trips AND the loaded roads (step 5 would have to be redone).
+
+
+------------------------------------------------------------------
+REMOVING IT
+------------------------------------------------------------------
+
+    sudo systemctl disable --now road-matcher && sudo rm /etc/systemd/system/road-matcher.service && sudo systemctl daemon-reload
+    cd valhalla && docker compose down && cd ..
+
+The tables stay (they're harmless; road_quality_snapped then returns CELL rows only). Removing
+them would need a new migration.

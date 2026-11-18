@@ -1,0 +1,27 @@
+# Valhalla map matcher for road matching (Backend/ROAD_MATCHING_SETUP.txt).
+# Builds routing tiles from the .osm.pbf in custom_files/ on first start (tens of minutes), then
+# serves the API on 127.0.0.1:8002 only: never reachable from the network or through Funnel.
+#
+#     cd ~/ee475aut26team5/Backend/valhalla && docker compose up -d
+#
+# Rebuild tiles after replacing the .pbf:  VALHALLA_FORCE_REBUILD=True docker compose up -d --force-recreate
+services:
+  valhalla:
+    # Pinned; change on purpose only. 3.9.1 was published about a month before this file.
+    image: ghcr.io/valhalla/valhalla-scripted:3.9.1
+    container_name: valhalla
+    restart: unless-stopped          # starts again after a reboot, like Docker itself
+    ports:
+      - "127.0.0.1:8002:8002"
+    volumes:
+      - ./custom_files:/custom_files
+    environment:
+      - tile_urls=                   # use the .pbf already in custom_files/
+      - use_tiles_ignore_pbf=True    # reuse built tiles on restart
+      - force_rebuild=${VALHALLA_FORCE_REBUILD:-False}
+      - build_elevation=False
+      - build_admins=True            # country/state rules (driving side, access)
+      - build_time_zones=True
+      - build_transit=False
+      - serve_tiles=True
+      - server_threads=4

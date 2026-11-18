@@ -1,3 +1,9 @@
 # Secrets for the Supabase server. Never commit these.
 .env
 supabase/signing_keys.json
+matcher/matcher.env
+
+# Road matching: downloaded map data, built tiles, Python environment (large, rebuilt on the laptop)
+valhalla/custom_files/
+matcher/.venv/
+__pycache__/
