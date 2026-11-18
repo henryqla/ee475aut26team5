@@ -24,7 +24,8 @@ private const val TAG = "TripUploader"
 
 data class UploadStatus(
     val uploading: Boolean = false,
-    val lastResult: String? = null,   // e.g. "Uploaded 120 rows at 3:41 PM" or the error
+    val lastResult: String? = null,   // e.g. "Uploaded 120" or the error
+    val failed: Boolean = false,      // the last try didn't get everything up
 )
 
 /**
@@ -39,22 +40,21 @@ object TripUploader {
 
     suspend fun uploadPending(context: Context) {
         if (!SupabaseConnection.isConfigured) {
-            _status.value = UploadStatus(lastResult = "Server not set up")
+            _status.value = UploadStatus(lastResult = "Server not set up", failed = true)
             return
         }
         lock.withLock {
             _status.value = _status.value.copy(uploading = true)
-            val result = try {
+            _status.value = try {
                 val rows = upload(RoadDatabase.get(context).dao(), SupabaseTripRepository())
-                if (rows > 0) "Uploaded $rows" else "All uploaded"
+                UploadStatus(lastResult = if (rows > 0) "Uploaded $rows" else "All uploaded")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 // Nothing is lost: rows stay marked as not uploaded and go next time.
                 Log.w(TAG, "Upload failed", e)
-                "Upload failed, will retry: ${e.shortMessage()}"
+                UploadStatus(lastResult = "Upload failed, will retry: ${e.shortMessage()}", failed = true)
             }
-            _status.value = UploadStatus(uploading = false, lastResult = result)
         }
     }
 

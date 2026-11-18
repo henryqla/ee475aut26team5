@@ -1,15 +1,23 @@
 package uw.edu.roadqualitymapper.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Card
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -25,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -71,6 +80,7 @@ import uw.edu.roadqualitymapper.data.shortMessage
 import uw.edu.roadqualitymapper.data.supabase.SupabaseConnection
 import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
 import uw.edu.roadqualitymapper.ui.DrawnPiece
+import uw.edu.roadqualitymapper.ui.RoughnessScale
 import uw.edu.roadqualitymapper.ui.boxAround
 import uw.edu.roadqualitymapper.ui.layOutPieces
 import uw.edu.roadqualitymapper.ui.headingDirection
@@ -266,16 +276,60 @@ fun MapScreen(modifier: Modifier = Modifier) {
                 .padding(end = NORTH_BUTTON_END_PADDING, bottom = NORTH_BUTTON_BOTTOM_PADDING),
         )
 
-        val topCenter = Modifier.align(Alignment.TopCenter).padding(8.dp)
+        // What the colors mean, in the current color-blind mode. Bottom center, between Google's
+        // logo (bottom left, which must stay visible) and the zoom buttons (bottom right).
+        if (view == MapView.ROAD_QUALITY) {
+            MapLegend(colorMode, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+        }
+
+        val topBar = Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(10.dp)
         if (BuildConfig.DEBUG) {
-            DebugBar(view = view, onViewChange = { view = it }, status = status, modifier = topCenter)
+            DebugBar(view = view, onViewChange = { view = it }, status = status, modifier = topBar)
         } else if (status.isNotEmpty()) {
-            Card(topCenter) {
-                Text(status, Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
+            MapOverlayCard(topBar) {
+                Text(status, style = MaterialTheme.typography.bodyMedium)
             }
         }
     }
 }
+
+/** The rounded card that floats over the map, in the app's card style. */
+@Composable
+private fun MapOverlayCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(14.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
+    ) {
+        Box(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) { content() }
+    }
+}
+
+/** Smooth to rough, as a small color bar. */
+@Composable
+private fun MapLegend(colorMode: ColorMode, modifier: Modifier = Modifier) {
+    val steps = remember(colorMode) {
+        (0 until LEGEND_STEPS).map { i ->
+            val roughness = RoughnessScale.SMOOTH +
+                (RoughnessScale.VERY_ROUGH - RoughnessScale.SMOOTH) * i / (LEGEND_STEPS - 1)
+            roughnessColor(roughness, colorMode)
+        }
+    }
+    MapOverlayCard(modifier) {
+        Column(Modifier.width(120.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Row(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
+                steps.forEach { Box(Modifier.weight(1f).fillMaxHeight().background(it)) }
+            }
+            Row(Modifier.fillMaxWidth()) {
+                Text("Smooth", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+                Text("Rough", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }
+}
+
+private const val LEGEND_STEPS = 12
 
 // Lines the north button up above Google's +/− zoom buttons in the bottom-right corner.
 private val NORTH_BUTTON_END_PADDING = 12.dp
@@ -291,8 +345,8 @@ private fun NorthButton(bearing: Float, onClick: () -> Unit, modifier: Modifier 
     Surface(
         onClick = onClick,
         shape = CircleShape,
-        color = Color.White,
-        shadowElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerLowest,
+        border = BorderStroke(0.5.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = modifier.size(NORTH_BUTTON_SIZE),
     ) {
         Canvas(
@@ -345,8 +399,8 @@ private fun DebugBar(
     status: String,
     modifier: Modifier = Modifier,
 ) {
-    Card(modifier) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
+    MapOverlayCard(modifier) {
+        Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 MapView.entries.forEach { option ->
                     FilterChip(
@@ -354,11 +408,16 @@ private fun DebugBar(
                         onClick = { onViewChange(option) },
                         label = { Text(option.label) },
                         modifier = Modifier.padding(end = 8.dp),
+                        shape = RoundedCornerShape(50),
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.primary,
+                        ),
                     )
                 }
             }
             if (status.isNotEmpty()) {
-                Text(status, style = MaterialTheme.typography.bodySmall)
+                Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
