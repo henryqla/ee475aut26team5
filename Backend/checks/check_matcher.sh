@@ -64,6 +64,12 @@ echo "${BOLD}2. OSM roads${RESET}"
 n=$(q "select count(*) from roads.ways"); n=${n:-0}
 check "roads.ways has Washington's roads ($n)" '(( n > 100000 ))' "run: bash roads/import_roads.sh"
 check "no leftover import schema" '[[ -z $(q "select 1 from pg_namespace where nspname = '"'osm_import'"'") ]]'
+osm_public=$(q "select string_agg(tablename, ' ') from pg_tables where schemaname = 'public'
+                and (tablename like 'osm2pgsql%' or tablename like 'planet_osm%')")
+check "no osm2pgsql tables in public (the API would expose them)" '[[ -z $osm_public ]]' "found: $osm_public"
+open_public=$(q "select string_agg(c.relname, ' ') from pg_class c
+                 where c.relnamespace = 'public'::regnamespace and c.relkind = 'r' and not c.relrowsecurity")
+check "every table in public has RLS on" '[[ -z $open_public ]]' "without RLS: $open_public"
 
 echo "${BOLD}3. road_matcher database role${RESET}"
 role=$(q "select rolcanlogin, rolsuper, rolcreaterole, rolcreatedb, rolbypassrls, rolreplication

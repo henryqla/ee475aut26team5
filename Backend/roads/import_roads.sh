@@ -27,9 +27,13 @@ psql "$DB_URL" -qAtc "select 1 from pg_proc where proname = 'load_ways' and pron
 
 echo "${BOLD}1. osm2pgsql: reading $PBF (takes a few minutes)${RESET}"
 psql "$DB_URL" -q -v ON_ERROR_STOP=1 -c "drop schema if exists osm_import cascade; create schema osm_import;"
+# osm2pgsql 1.9+ also writes a bookkeeping table (osm2pgsql_properties), by default into public,
+# where the API would expose it. --schema puts it in osm_import too, which is dropped below.
+schema_opt=()
+osm2pgsql --help 2>&1 | grep -qE '(^|[ ,])--schema[= ]' && schema_opt=(--schema=osm_import)
 # PostGIS lives in the extensions schema, so osm2pgsql needs it on its search path.
-PGOPTIONS='-c search_path=osm_import,extensions,public' \
-    osm2pgsql --output=flex --style=roads/roads.lua --create --cache=4000 \
+PGOPTIONS='-c search_path=osm_import,extensions' \
+    osm2pgsql --output=flex --style=roads/roads.lua --create --cache=4000 "${schema_opt[@]}" \
               --database="$DB_URL" "$PBF" 2>&1 | grep -viE 'password|postgresql://' || true
 psql "$DB_URL" -qAtc "select count(*) from osm_import.ways" | grep -qE '^[1-9]' \
     || die "osm2pgsql loaded no roads. Scroll up for its error."
@@ -37,6 +41,11 @@ psql "$DB_URL" -qAtc "select count(*) from osm_import.ways" | grep -qE '^[1-9]' 
 echo "${BOLD}2. Replace roads.ways${RESET}"
 n=$(psql "$DB_URL" -qAt -v ON_ERROR_STOP=1 -c "select roads.load_ways();")
 psql "$DB_URL" -q -c "drop schema osm_import cascade;"
+# Safety net: nothing osm2pgsql makes may stay in public (it would be reachable through the API).
+psql "$DB_URL" -q -c "drop table if exists public.osm2pgsql_properties;" 2>/dev/null
+left=$(psql "$DB_URL" -qAt -c "select string_agg(tablename, ' ') from pg_tables
+                               where schemaname = 'public' and (tablename like 'osm2pgsql%' or tablename like 'planet_osm%')")
+[[ -z $left ]] || die "osm2pgsql left tables in public: $left. Drop them in Studio before going on."
 psql "$DB_URL" -q -c "analyze roads.ways;"
 
 echo
