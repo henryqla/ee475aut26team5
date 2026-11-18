@@ -159,7 +159,7 @@ done
     && pass "the 4 drives on the road: MATCHED" || fail "the 4 road drives weren't all MATCHED"
 [[ $(q "select status from roads.trip_matches where trip_id = '$P'") == NO_MATCH ]] \
     && pass "the Pacific drive: NO_MATCH" || fail "the Pacific drive should be NO_MATCH"
-[[ $(q "select count(distinct way_id) || ' ' || bool_and(way_id = $WAY) from roads.segment_matches where trip_id in ('$A','$B','$C','$D')") == "1 t" ]] \
+[[ $(q "select count(distinct way_id) = 1 and bool_and(way_id = $WAY) from roads.segment_matches where trip_id in ('$A','$B','$C','$D')") == t ]] \
     && pass "every matched segment is on way $WAY" \
     || fail "segments matched to other ways: $(q "select string_agg(distinct way_id::text, ' ') from roads.segment_matches where trip_id in ('$A','$B','$C','$D')")"
 
