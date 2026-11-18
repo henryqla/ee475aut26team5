@@ -93,12 +93,19 @@ valhalla/custom_files/ is gitignored.
 STEP 4 - Start Valhalla and build its tiles (tens of minutes, once)
 ------------------------------------------------------------------
 
-The container runs as its own user, which must be able to write to custom_files/. Find its
-user id, then give it the folder (you can still read the files in it):
+The container must be able to write to custom_files/. Find which user it runs as:
 
     docker run --rm --entrypoint id ghcr.io/valhalla/valhalla-scripted:3.9.1 -u
 
-    sudo chown -R <the number it printed>:$(id -g) valhalla/custom_files && sudo chmod -R g+rwX valhalla/custom_files
+The first time, Docker downloads the image and prints progress lines first (including a
+"Digest: sha256:..." checksum; ignore it). The user id is the LAST line, a plain number.
+
+  - It prints 0 (root; this is what 3.9.1 does): skip the chown below, root can already write
+    there. Files Valhalla creates in custom_files/ will be owned by root, so replacing or
+    deleting files there later needs sudo (see UPDATING THE MAP DATA).
+  - It prints any other number: give that user the folder (you can still read the files in it):
+
+        sudo chown -R <that number>:$(id -g) valhalla/custom_files && sudo chmod -R g+rwX valhalla/custom_files
 
 Start it:
 
@@ -227,7 +234,10 @@ Drive a short loop in both directions 2-3 times, then:
 UPDATING THE MAP DATA (optional, e.g. every few months)
 ------------------------------------------------------------------
 
-1. Download a new extract (step 3; use sudo if custom_files is owned by the container user).
+1. Download a new extract over the old one. Valhalla's files in custom_files/ belong to root
+   (or the container's user), so use sudo:
+
+       sudo curl -L --fail -o valhalla/custom_files/washington-latest.osm.pbf https://download.geofabrik.de/north-america/us/washington-latest.osm.pbf
 2. Rebuild Valhalla's tiles:
 
        cd valhalla && VALHALLA_FORCE_REBUILD=True docker compose up -d --force-recreate && cd ..
@@ -244,7 +254,12 @@ TROUBLESHOOTING
 ------------------------------------------------------------------
 
 Valhalla log says "Permission denied" in /custom_files
-    Step 4's chown wasn't done or used the wrong id. Redo it, then: cd valhalla && docker compose restart
+    The container isn't running as root and step 4's chown wasn't done or used the wrong id.
+    Redo it, then: cd valhalla && docker compose restart
+
+import_roads.sh: "Permission denied" reading the .pbf
+    The download is owned by root (e.g. downloaded with sudo). Make it readable:
+    sudo chmod a+r valhalla/custom_files/washington-latest.osm.pbf
 
 `docker compose` not found
     Docker from get.docker.com includes it. Otherwise: sudo apt install -y docker-compose-plugin

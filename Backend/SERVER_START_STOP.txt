@@ -42,6 +42,10 @@ START-UP (after turning the laptop on or rebooting)
    The matcher retries every 30 s until Supabase is up, then matches any trips that ended
    while it was down. Its log:   journalctl -u road-matcher -f
 
+   If Valhalla isn't running (docker ps doesn't list "valhalla"):
+       cd ~/ee475aut26team5/Backend/valhalla && docker compose up -d
+   If the matcher isn't running:   sudo systemctl start road-matcher
+
 
 ------------------------------------------------------------------
 SHUT-DOWN
@@ -58,7 +62,19 @@ SHUT-DOWN
    retry later. To turn Funnel off completely:   sudo tailscale funnel reset
    (Then turn it back on with `sudo tailscale funnel --bg 54321` next time.)
 
-3. Turn off the laptop:   sudo shutdown now
+3. Valhalla and the road matcher can stay on; they stop with the laptop and start again by
+   themselves. While Supabase is stopped the matcher just retries every 30 s. To stop them
+   without turning the laptop off:
+
+       sudo systemctl stop road-matcher
+       cd ~/ee475aut26team5/Backend/valhalla && docker compose stop
+
+   (Start again: docker compose start, then sudo systemctl start road-matcher.)
+   After a reboot the matcher starts again by itself, but a Valhalla you stopped this way stays
+   stopped until you start it (start-up step 5). To remove both for good, see
+   ROAD_MATCHING_SETUP.txt "REMOVING IT".
+
+4. Turn off the laptop:   sudo shutdown now
 
 
 ------------------------------------------------------------------
@@ -75,5 +91,8 @@ AFTER PULLING NEW CODE
                                       bash checks/check_snapped_map.sh
    If matcher/road_matcher.py or matcher/requirements.txt changed:
                                       bash matcher/install_matcher.sh
+   If valhalla/docker-compose.yml changed:
+                                      cd valhalla && docker compose up -d && cd ..
+   If roads/roads.lua changed:        bash roads/import_roads.sh
 
    Don't use `supabase db reset` once real drives are stored: it wipes everything.
