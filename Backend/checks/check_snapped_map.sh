@@ -137,18 +137,24 @@ expect "before matching: cells already use the age-weighted median (0.9, not 0.2
     'fwd(cell) and all(r["drives"] == 3 and abs(r["roughness"] - 0.9) < 0.01 for r in fwd(cell))'
 
 echo "${BOLD}3. End the trips; the matcher should match them within a minute${RESET}"
+ok=1
 for t in "$A $OLD" "$B $OLD" "$D $NOW" "$C $NOW" "$P $NOW"; do
     set -- $t
     req PATCH "/rest/v1/trips?id=eq.$1" "$PHONE" "{\"end_time\":$(($2 + 15000))}"
+    [[ $CODE == 2* ]] || { ok=0; patch_err="$CODE: ${BODY:0:300}"; }
 done
 IDS="'$A','$B','$C','$D','$P'"
+(( ok )) && pass "app set end_time on all 5 trips" || fail "setting end_time failed ($patch_err)"
+ended=$(q "select count(*) from public.trips where id in ($IDS) and end_time is not null")
+[[ $ended == 5 ]] && pass "all 5 trips have end_time in the database" || fail "only ${ended:-?} of 5 trips have end_time"
 for _ in $(seq 1 60); do
     [[ $(q "select count(*) from roads.trip_matches where trip_id in ($IDS)") == 5 ]] && break
     sleep 2
 done
 [[ $(q "select count(*) from roads.trip_matches where trip_id in ($IDS)") == 5 ]] \
     && pass "all 5 trips matched within 2 minutes of ending" \
-    || fail "not all trips were matched (see: journalctl -u road-matcher -n 50)"
+    || { fail "not all trips were matched; matcher log for the last 3 minutes:"
+         journalctl -u road-matcher --since "-3 min" --no-pager -o cat 2>/dev/null | tail -n 20 | sed 's/^/        /'; }
 [[ $(q "select count(*) from roads.trip_matches where trip_id in ('$A','$B','$C','$D') and status = 'MATCHED'") == 4 ]] \
     && pass "the 4 drives on the road: MATCHED" || fail "the 4 road drives weren't all MATCHED"
 [[ $(q "select status from roads.trip_matches where trip_id = '$P'") == NO_MATCH ]] \
