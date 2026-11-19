@@ -107,12 +107,13 @@ class SupabaseTripRepository(
             order(Columns.T, Order.ASCENDING)
         }.map { it.toEvent() }
 
-    override suspend fun roadQualityInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String?): List<RoadPiece> =
-        rpcAllPages<RoadPieceRow>(Functions.ROAD_QUALITY_IN_AREA, area.toParams(includeFake, vehicleId))
-            .map { it.toRoadPiece() }
+    override suspend fun roadQuality(area: BoundingBox, pieceM: Int, includeFake: Boolean, vehicleId: String?): List<RoadPiece> =
+        rpcAllPages<RoadPieceRow, SnappedAreaParams>(
+            Functions.ROAD_QUALITY_SNAPPED, area.toSnappedParams(pieceM, includeFake, vehicleId),
+        ).map { it.toRoadPiece() }
 
     override suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String?): List<EventSpot> =
-        rpcAllPages<EventSpotRow>(Functions.EVENTS_IN_AREA, area.toParams(includeFake, vehicleId))
+        rpcAllPages<EventSpotRow, AreaParams>(Functions.EVENTS_IN_AREA, area.toParams(includeFake, vehicleId))
             .map { it.toEventSpot() }
 
     override suspend fun vehicles(): List<Vehicle> =
@@ -143,7 +144,7 @@ class SupabaseTripRepository(
     }
 
     /** Calls a database function and reads every result row. Ben's functions sort their results. */
-    private suspend inline fun <reified T : Any> rpcAllPages(function: String, params: AreaParams): List<T> =
+    private suspend inline fun <reified T : Any, reified P : Any> rpcAllPages(function: String, params: P): List<T> =
         readAllPages { from, to ->
             client.postgrest.rpc(function, params) { range(from, to) }.decodeList<T>()
         }

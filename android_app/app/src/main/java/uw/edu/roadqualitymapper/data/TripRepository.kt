@@ -20,7 +20,8 @@ interface TripRepository {
 
     // The map: every drive in [area] combined. [includeFake] also counts FAKE_ASSET / FAKE_DEVICE
     // data; [vehicleId] limits it to one vehicle (null = all of them).
-    suspend fun roadQualityInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String? = null): List<RoadPiece>
+    /** Road pieces snapped to OpenStreetMap roads, [pieceM] meters long (longer when zoomed out). */
+    suspend fun roadQuality(area: BoundingBox, pieceM: Int, includeFake: Boolean, vehicleId: String? = null): List<RoadPiece>
     suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String? = null): List<EventSpot>
 
     suspend fun vehicles(): List<Vehicle>

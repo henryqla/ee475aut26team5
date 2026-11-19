@@ -6,8 +6,10 @@ import uw.edu.roadqualitymapper.data.BoundingBox
 import uw.edu.roadqualitymapper.data.DataSource
 import uw.edu.roadqualitymapper.data.EventClass
 import uw.edu.roadqualitymapper.data.EventSpot
+import uw.edu.roadqualitymapper.data.PathPoint
 import uw.edu.roadqualitymapper.data.RoadEvent
 import uw.edu.roadqualitymapper.data.RoadPiece
+import uw.edu.roadqualitymapper.data.RoadPieceKind
 import uw.edu.roadqualitymapper.data.Segment
 import uw.edu.roadqualitymapper.data.Trip
 import uw.edu.roadqualitymapper.data.Vehicle
@@ -44,7 +46,7 @@ internal object Columns {
 
 /** Ben's map functions, which combine all drives in an area (contract §7 "Map functions"). */
 internal object Functions {
-    const val ROAD_QUALITY_IN_AREA = "road_quality_in_area"
+    const val ROAD_QUALITY_SNAPPED = "road_quality_snapped"
     const val EVENTS_IN_AREA = "events_in_area"
 }
 
@@ -118,14 +120,34 @@ internal data class AreaParams(
     @SerialName("vehicle_id") val vehicleId: String?,   // null = every vehicle
 )
 
+/** road_quality_snapped takes the usual area parameters plus the piece length. */
+@Serializable
+internal data class SnappedAreaParams(
+    @SerialName("south") val south: Double,
+    @SerialName("west") val west: Double,
+    @SerialName("north") val north: Double,
+    @SerialName("east") val east: Double,
+    @SerialName("include_fake") val includeFake: Boolean,
+    @SerialName("vehicle_id") val vehicleId: String?,   // null = every vehicle
+    @SerialName("piece_m") val pieceM: Int,             // rounded by the server to a multiple of 15, at most 3000
+)
+
 @Serializable
 internal data class RoadPieceRow(
+    @SerialName("piece_id") val pieceId: String,
+    @SerialName("kind") val kind: String,
+    @SerialName("path") val path: List<List<Double>>,   // [[lat, lon], ...]
     @SerialName("lat") val lat: Double,
     @SerialName("lon") val lon: Double,
-    @SerialName("heading_deg") val headingDeg: Double,
+    @SerialName("heading_deg") val headingDeg: Double? = null,
+    @SerialName("length_m") val lengthM: Double,
     @SerialName("roughness") val roughness: Double,
     @SerialName("drives") val drives: Int,
-    @SerialName("length_m") val lengthM: Double,
+    @SerialName("weight") val weight: Double,
+    @SerialName("last_t") val lastT: Long,
+    @SerialName("oneway") val oneway: Boolean? = null,
+    @SerialName("lanes_dir") val lanesDir: Int? = null,
+    @SerialName("road_name") val roadName: String? = null,
 )
 
 @Serializable
@@ -242,13 +264,32 @@ internal fun BoundingBox.toParams(includeFake: Boolean, vehicleId: String?) = Ar
     vehicleId = vehicleId,
 )
 
+internal fun BoundingBox.toSnappedParams(pieceM: Int, includeFake: Boolean, vehicleId: String?) = SnappedAreaParams(
+    south = south,
+    west = west,
+    north = north,
+    east = east,
+    includeFake = includeFake,
+    vehicleId = vehicleId,
+    pieceM = pieceM,
+)
+
 internal fun RoadPieceRow.toRoadPiece() = RoadPiece(
+    pieceId = pieceId,
+    // An unknown kind (e.g. one added later) is drawn like CELL: as sent, with no side offset.
+    kind = RoadPieceKind.entries.firstOrNull { it.name == kind } ?: RoadPieceKind.CELL,
+    path = path.filter { it.size >= 2 }.map { PathPoint(lat = it[0], lon = it[1]) },
     lat = lat,
     lon = lon,
     headingDeg = headingDeg,
+    lengthM = lengthM,
     roughness = roughness,
     drives = drives,
-    lengthM = lengthM,
+    weight = weight,
+    lastT = lastT,
+    oneway = oneway,
+    lanesDir = lanesDir,
+    roadName = roadName,
 )
 
 internal fun EventSpotRow.toEventSpot() = EventSpot(
