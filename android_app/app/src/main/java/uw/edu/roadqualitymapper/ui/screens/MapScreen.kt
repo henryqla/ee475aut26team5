@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -74,15 +75,14 @@ import uw.edu.roadqualitymapper.data.EventClass
 import uw.edu.roadqualitymapper.data.EventSpot
 import uw.edu.roadqualitymapper.data.RoadEvent
 import uw.edu.roadqualitymapper.data.RoadPiece
+import uw.edu.roadqualitymapper.data.RoadPieceKind
 import uw.edu.roadqualitymapper.data.Segment
 import uw.edu.roadqualitymapper.data.downloadDrives
 import uw.edu.roadqualitymapper.data.shortMessage
 import uw.edu.roadqualitymapper.data.supabase.SupabaseConnection
 import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
-import uw.edu.roadqualitymapper.ui.DrawnPiece
 import uw.edu.roadqualitymapper.ui.RoughnessScale
 import uw.edu.roadqualitymapper.ui.boxAround
-import uw.edu.roadqualitymapper.ui.layOutPieces
 import uw.edu.roadqualitymapper.ui.headingDirection
 import uw.edu.roadqualitymapper.ui.metersToPixels
 import uw.edu.roadqualitymapper.ui.eventMarkerHue
@@ -108,19 +108,46 @@ private const val MIN_ROAD_QUALITY_ZOOM = 13f
 private const val MIN_LOAD_RADIUS_M = 1_000.0
 private const val LOAD_RADIUS_PER_SCREEN = 2.0
 
-/** Line width on the ground, about one direction's lanes on a city street. */
+/** Trips line width on the ground, about one direction's lanes on a city street. */
 private const val ROAD_LINE_WIDTH_M = 5.0
 
-/** So the line stays visible when zoomed out, where 5 m would be less than a pixel. */
+/**
+ * Road quality lines snapped to a road (ROAD pieces) are as wide as the lanes in their direction:
+ * lanes × LANE_WIDTH_M × LANE_FILL, a little narrower than the lanes so the road's edges show.
+ * One width covers every lane in that direction, since GPS can't tell lanes apart.
+ */
+private const val LANE_WIDTH_M = 3.3
+private const val LANE_FILL = 0.9
+
+/** CELL pieces (not on a matched road) have no lane count; about one lane. */
+private const val CELL_LINE_WIDTH_M = 3.5
+
+/**
+ * On a two-way road, ROAD pieces lie on the road's center line, so each direction is moved to its
+ * right by half its width plus this, leaving twice this between the two directions.
+ * One-way roads (including each side of a divided highway) and CELL pieces are drawn where they are.
+ */
+private const val ROAD_SIDE_GAP_M = 0.25
+
+/** So lines stay visible when zoomed out, where a few meters would be less than a pixel. */
 private const val MIN_ROAD_LINE_WIDTH_DP = 4f
 
 /**
- * How far each direction is drawn to the right of where the car was, so the two directions of a
- * road don't sit on top of each other. 0 for now: raw GPS already puts the car in its own lane,
- * and 3 m pushed lines off the road. Once positions are snapped to roads (Ben's map matching),
- * they sit on the road's centerline, and this needs to be about half a lane again.
+ * How far event markers and Trips lines are drawn to the right of where the car was, so the two
+ * directions of a road don't sit on top of each other. 0: raw GPS already puts the car in its own
+ * lane, and 3 m pushed lines off the road.
  */
 private const val DIRECTION_OFFSET_M = 0.0
+
+/**
+ * Road quality piece length asked for at each zoom level: longer pieces when zoomed out, so a
+ * big area loads fewer rows. Below MIN_ROAD_QUALITY_ZOOM nothing is loaded.
+ */
+private fun pieceLengthM(zoom: Float): Int = when {
+    zoom >= 15f -> 15
+    zoom >= 14f -> 60
+    else -> 240
+}
 
 /** What the map shows. Release builds always show Road quality. */
 private enum class MapView(val label: String) {
@@ -134,6 +161,7 @@ private enum class MapView(val label: String) {
  */
 private object RoadQualityCache {
     var area: BoundingBox? = null
+    var pieceM = 0
     var pieces = emptyList<RoadPiece>()
     var spots = emptyList<EventSpot>()
 }
@@ -195,8 +223,11 @@ fun MapScreen(modifier: Modifier = Modifier) {
             }
             val screenRadiusM = max(mapSize.width, mapSize.height) / 2.0 /
                 metersToPixels(1.0, camera.zoom, camera.target.latitude, density)
+            val pieceM = pieceLengthM(camera.zoom)
             val loaded = RoadQualityCache.area
-            if (loaded != null && loaded.contains(boxAround(camera.target, screenRadiusM))) {
+            if (loaded != null && RoadQualityCache.pieceM == pieceM &&
+                loaded.contains(boxAround(camera.target, screenRadiusM))
+            ) {
                 status = roadQualitySummary(pieces, spots)
                 return@collectLatest
             }
@@ -206,13 +237,14 @@ fun MapScreen(modifier: Modifier = Modifier) {
             status = try {
                 // Both requests at once. Debug builds count fake trips too; release builds only real ones.
                 val (newPieces, newSpots) = coroutineScope {
-                    val p = async { repository.roadQualityInArea(area, includeFake = BuildConfig.DEBUG) }
+                    val p = async { repository.roadQuality(area, pieceM, includeFake = BuildConfig.DEBUG) }
                     val s = async { repository.eventsInArea(area, includeFake = BuildConfig.DEBUG) }
                     p.await() to s.await()
                 }
                 pieces = newPieces
                 spots = newSpots
                 RoadQualityCache.area = area
+                RoadQualityCache.pieceM = pieceM
                 RoadQualityCache.pieces = newPieces
                 RoadQualityCache.spots = newSpots
                 roadQualitySummary(newPieces, newSpots)
@@ -241,8 +273,9 @@ fun MapScreen(modifier: Modifier = Modifier) {
         metersToPixels(ROAD_LINE_WIDTH_M, camera.zoom, camera.target.latitude, density),
         MIN_ROAD_LINE_WIDTH_DP * density,
     )
-    // Which pieces meet along a road, worked out once per load, so colors can fade between them.
-    val drawnPieces = remember(pieces) { layOutPieces(pieces, DIRECTION_OFFSET_M) }
+    // Road quality lines each have their own width on the ground (see lineWidthM).
+    val pixelsPerMeter = metersToPixels(1.0, camera.zoom, camera.target.latitude, density)
+    val minLineWidthPx = MIN_ROAD_LINE_WIDTH_DP * density
     Box(modifier.onSizeChanged { mapSize = it }) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
@@ -252,9 +285,9 @@ fun MapScreen(modifier: Modifier = Modifier) {
             onMapLoaded = { mapLoaded = true },
         ) {
             if (view == MapView.ROAD_QUALITY && camera.zoom >= MIN_ROAD_QUALITY_ZOOM) {
-                drawnPieces.forEach { drawn ->
-                    RoadPieceOnMap(drawn, lineWidthPx, colorMode, onClick = {
-                        status = "%.3f g · %d drive(s)".format(drawn.piece.roughness, drawn.piece.drives)
+                pieces.forEach { piece ->
+                    RoadPieceOnMap(piece, max((piece.lineWidthM() * pixelsPerMeter).toFloat(), minLineWidthPx), colorMode, onClick = {
+                        status = "%.3f g · %d drive(s)".format(piece.roughness, piece.drives)
                     })
                 }
                 // Only potholes and speed bumps are shown; unknown bumps stay in the data for tuning.
@@ -317,7 +350,7 @@ private fun MapLegend(colorMode: ColorMode, modifier: Modifier = Modifier) {
         }
     }
     MapOverlayCard(modifier) {
-        Column(Modifier.width(120.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+        Column(Modifier.width(IntrinsicSize.Max), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             Row(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
                 steps.forEach { Box(Modifier.weight(1f).fillMaxHeight().background(it)) }
             }
@@ -325,6 +358,14 @@ private fun MapLegend(colorMode: ColorMode, modifier: Modifier = Modifier) {
                 Text("Smooth", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
                 Text("Rough", style = MaterialTheme.typography.labelSmall)
             }
+            // Road quality lines follow OpenStreetMap roads, whose licence (ODbL) requires this.
+            Text(
+                "© OpenStreetMap contributors",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                softWrap = false,
+            )
         }
     }
 }
@@ -424,34 +465,37 @@ private fun DebugBar(
 }
 
 /**
- * Road quality view: one piece of road as a short line along its direction of travel, on that
- * direction's side of the road. Its color fades from the in-between color where it meets the
- * previous piece, to its own color in the middle, to the in-between color with the next piece,
- * like the Trips lines. (Gradients need Google's newer map renderer, as Trips does.)
+ * Road quality view: one piece of road, drawn along its path in one color. Snapped pieces on a
+ * two-way road are moved to their direction's side of the road.
  */
 @Composable
 @GoogleMapComposable
-private fun RoadPieceOnMap(drawn: DrawnPiece, lineWidthPx: Float, colorMode: ColorMode, onClick: () -> Unit) {
-    val spans = remember(drawn, colorMode) {
-        val startColor = roughnessColor(drawn.startRoughness, colorMode).toArgb()
-        val middleColor = roughnessColor(drawn.piece.roughness, colorMode).toArgb()
-        val endColor = roughnessColor(drawn.endRoughness, colorMode).toArgb()
-        listOf(
-            StyleSpan(StrokeStyle.gradientBuilder(startColor, middleColor).build()),
-            StyleSpan(StrokeStyle.gradientBuilder(middleColor, endColor).build()),
-        )
+private fun RoadPieceOnMap(piece: RoadPiece, lineWidthPx: Float, colorMode: ColorMode, onClick: () -> Unit) {
+    val points = remember(piece) {
+        val path = piece.path.map { LatLng(it.lat, it.lon) }
+        if (piece.kind == RoadPieceKind.ROAD && piece.oneway == false) {
+            shiftPathRight(path, piece.lineWidthM() / 2 + ROAD_SIDE_GAP_M)
+        } else {
+            path
+        }
     }
+    if (points.size < 2) return
     Polyline(
-        points = listOf(drawn.start, drawn.middle, drawn.end),
-        spans = spans,
+        points = points,
+        color = roughnessColor(piece.roughness, colorMode),
         width = lineWidthPx,
-        // Round ends overlap the next piece a little, so the road looks continuous.
+        // Round ends and joints overlap the next piece a little, so the road looks continuous.
         startCap = RoundCap(),
         endCap = RoundCap(),
+        jointType = JointType.ROUND,
         clickable = true,
         onClick = { onClick() },
     )
 }
+
+/** Width on the ground: the lanes in the piece's direction for ROAD pieces, about one lane for CELL. */
+private fun RoadPiece.lineWidthM(): Double =
+    if (kind == RoadPieceKind.ROAD) (lanesDir ?: 1).coerceIn(1, 8) * LANE_WIDTH_M * LANE_FILL else CELL_LINE_WIDTH_M
 
 /** Road quality view: a pothole or speed bump spot, merged over every drive that hit it. */
 @Composable

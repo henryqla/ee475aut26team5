@@ -456,9 +456,10 @@ read further pages with `range(...)`, the same way it pages segments.
   The map shows "hit by `hits` of `passes` drives". This is a different shape from `RoadEvent`,
   so the app will need a small model for it.
 
-- `road_quality_snapped(...)` — **proposed by Ben (Nov 2026), waiting for Scott's OK.** Will
-  replace `road_quality_in_area` in the Road quality view; `road_quality_in_area` stays unchanged
-  until the app has switched. Drives are snapped to OpenStreetMap roads on the server (Valhalla
+- `road_quality_snapped(...)` — **proposed by Ben (Nov 2026), OK from Scott (Nov 2026); the app's
+  Road quality view uses it** (`piece_m` 15 / 60 / 240 by zoom; line width and side offset from
+  `lanes_dir`, as in §8). Replaces `road_quality_in_area` in the Road quality view;
+  `road_quality_in_area` stays unchanged until Ben retires it. Drives are snapped to OpenStreetMap roads on the server (Valhalla
   map matching, run on the laptop once a trip has its `end_time`), so lines lie on the road and
   follow its curves, and every drive over the same piece of road and direction is combined.
   Takes the same parameters as the other two, plus `piece_m` (default `15`; rounded to a multiple
@@ -514,7 +515,11 @@ read further pages with `range(...)`, the same way it pages segments.
   I-5 = light red) and will be listed here once measured, so both maps use identical values.
 - Each direction of a road is drawn on its own side (offset to the right of travel, as US traffic
   drives on the right). Zoomed out, the two directions overlap.
-- Lines are about 5 m wide on the ground, so they widen as you zoom in.
+- Line width on the ground, so lines widen as you zoom in (at least 4 dp wide when zoomed out):
+  - `ROAD` rows: `lanes_dir` × 3.3 m × 0.9, covering every lane in that direction (the grade is
+    still one per direction). Two-way roads: each direction moved right of the centre line by
+    width ÷ 2 + 0.25 m, so the directions never overlap; one-way roads: no offset.
+  - `CELL` rows: 3.5 m, no offset.
 - Distinct markers for pothole and speed bump.
 - Grading is per direction, **not per lane**: phone GPS can't reliably tell lanes apart.
 
@@ -590,3 +595,4 @@ Earlier v0.3 changes:
 - Column types, primary keys, and app-made UUIDs for the tables (§7).
 - `fw` starting with `fake` marks a test device; its trips are `FAKE_DEVICE` (§4.3).
 - `road_quality_in_area`: each segment counts along the stretch of road it drove, so pieces meet even at highway speed; `length_m` is now the road driven inside the piece (no longer always 15); new optional `cell_m` piece size (default 15, between 5 and 1000) (§7).
+- `road_quality_snapped` with `lanes_dir`: OK from Scott; the app's Road quality view switched to it from `road_quality_in_area` (`piece_m` 15 / 60 / 240 m by zoom, "© OpenStreetMap contributors" under the map legend) (§7). Line width and side offset now come from `lanes_dir` instead of a fixed 5 m (§8).
