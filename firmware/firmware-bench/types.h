@@ -1,9 +1,13 @@
 /*
  * File:        types.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-16
- * Version:     0.1.1-bench
- * Change:      IMU recovery: sample epoch, SYS_IMU_DOWN / SYS_IMU_UP,
+ * Date:        2026-11-18
+ * Version:     0.1.2-bench
+ * Change:      Record mode (cnn-record-train-handoff.md v0.4, request 1):
+ *              snapshot row and buffer types, OUT_SNAP (a snapshot buffer
+ *              pointer in out_q), snap_drops in heartbeats and HLT, and the
+ *              snap_free_q handle. Includes config.h for the SNAP_* sizes.
+ *              0.1.1-bench: IMU recovery: sample epoch, SYS_IMU_DOWN / SYS_IMU_UP,
  *              BLE_IMU_UP, imu_recoveries in heartbeats and HLT. Events carry
  *              the pitch sequence and the basis of their class.
  *              0.2.0-draft: BLE. Segment and event payloads shared by out_q and ble_q,
@@ -23,6 +27,7 @@
 // ============================================================================
 
 #include <Arduino.h>  // Fixed-width ints and FreeRTOS types on the ESP32 core
+#include "config.h"   // SNAP_ROWS and SNAP_N_CH size the snapshot buffer
 
 // ============================================================================
 // Globals: types
@@ -96,6 +101,22 @@ typedef struct {
   evt_basis_t basis;           // What decided cls
 } evt_t;
 
+// One snapshot row: the model channels of one sample, in SNAP_CHANNELS order
+// (z_hp in g, roll rate and pitch rate in dps, bias removed).
+typedef struct {
+  float c[SNAP_N_CH];
+} snap_row_t;
+
+// One snapshot (record mode): SNAP_N_PRE rows before the trigger sample,
+// then the trigger sample (row SNAP_N_PRE) and the rows after it. The buffers
+// are fixed, created in setup(), and owned by whoever holds the pointer:
+// snap_free_q (free), dsp (filling), out_q (queued), serial_out (sending).
+typedef struct {
+  uint32_t   seq;              // seq of this event's EVT line (CR-6: 0 at every boot)
+  uint32_t   trig_n;           // Sample count n at the threshold crossing (SNB trig_idx)
+  snap_row_t rows[SNAP_ROWS];
+} snap_t;
+
 // BLE link changes, reported by the NimBLE callbacks and printed on Serial.
 typedef enum : uint8_t {
   LINK_ADVERTISING = 0,  // Advertising started after boot (value 0)
@@ -121,6 +142,7 @@ typedef enum : uint8_t {
   OUT_HLT,              // Health line, once per second
   OUT_FLT,              // Fault line, once per second in the safe state
   OUT_BLE,              // BLE link line, on each link change
+  OUT_SNAP,             // Record mode: a full snapshot, printed as SNB, SNR..., SNE
 } out_tag_t;
 
 // Payload of an S line.
@@ -141,6 +163,9 @@ typedef struct {
   uint32_t ble_fails;       // Notifications that failed or were too long
   uint32_t serial_drops;    // Lines serial_out dropped: USB TX buffer full (no host reading)
   uint32_t imu_recoveries;  // Times the IMU came back after F1/F2
+  uint32_t snap_drops;      // Record mode: snapshots lost (dsp could not fill or queue
+                            // one, or serial_out abandoned one mid-send). Printed only
+                            // in record builds
 } out_hlt_t;
 
 // Payload of an FLT line.
@@ -158,6 +183,7 @@ typedef struct {
     out_hlt_t hlt;
     out_flt_t flt;
     link_t    link;
+    snap_t   *snap;         // OUT_SNAP: the buffer, owned by serial_out once received
   };
 } out_msg_t;
 
@@ -219,6 +245,7 @@ typedef struct {
   uint32_t     ble_sent;        // ble_link
   uint32_t     ble_fails;       // ble_link
   uint32_t     serial_drops;    // serial_out
+  uint32_t     snap_drops;      // dsp, serial_out (record mode; 0 otherwise)
 } sys_msg_t;
 
 // Queue and task handles, filled once in setup() and read-only afterwards.
@@ -229,6 +256,7 @@ typedef struct {
   QueueHandle_t sys_q;
   QueueHandle_t ble_q;
   QueueHandle_t time_q;
+  QueueHandle_t snap_free_q;   // Record mode: free snapshot buffers (snap_t *). NULL otherwise
   TaskHandle_t  imu_acq_task;  // For the supervisor's safe state
   TaskHandle_t  dsp_task;      // For the supervisor's safe state
 } app_ctx_t;

@@ -1,0 +1,10 @@
+# Local only, never committed:
+# - .venv: each computer builds its own from cnn_record_gui/requirements.txt
+# - __pycache__ / *.pyc: written by Python automatically
+# - data: recorded takes are shared outside git (team decision, 2026-11-18)
+# - logs: GUI logs; attach a specific log as test evidence when one is asked for
+.venv/
+__pycache__/
+*.pyc
+data/
+logs/

@@ -1,9 +1,12 @@
 /*
  * File:        config.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-16
- * Version:     0.1.1-bench
- * Change:      FW_VERSION 0.1.1-bench. Pitch-sequence classification settings
+ * Date:        2026-11-18
+ * Version:     0.1.2-bench
+ * Change:      FW_VERSION 0.1.2-bench. Re-arm rule (cnn-record-train-handoff.md
+ *              v0.4, request 0, C16): REARM_FRAC, REARM_HOLD_MS. Record mode
+ *              (request 1): RECORD_MODE and the SNAP_* settings.
+ *              0.1.1-bench: Pitch-sequence classification settings
  *              (PITCH_*, Z_LOBE_G, GYRO_BIAS_MAX_DPS) replace DOMINANCE_RATIO.
  *              IMU recovery settings (IMU_RETRY_MS, IMU_RECOVER_GOOD_READS).
  *              0.1.0-bench: bench build for the ESP32-S3-DevKitC-1, copied
@@ -22,7 +25,7 @@
 // Macros: firmware identity
 // ============================================================================
 
-#define FW_VERSION            "0.1.1-bench"  // Printed in BOOT and sent in status. Must not
+#define FW_VERSION            "0.1.2-bench"  // Printed in BOOT and sent in status. Must not
                                              // start with "fake". Bench trips upload as REAL
                                              // and Ben deletes them by this version, so tell
                                              // Henry before changing it
@@ -60,6 +63,17 @@
 #define THR_ROLL_DPS          60.0f    // DRAFT, bench only. A quick hand tilt passes
 #define THR_PITCH_DPS         60.0f    // DRAFT, bench only. Same as roll
 #define LOCKOUT_MS            1250     // DRAFT. Middle of the DECIDED 1.0 to 1.5 s range
+#define REARM_FRAC            0.5f     // DRAFT (C16). After a lockout ends, no new window opens
+                                       // until every axis is below this fraction of its own
+                                       // threshold (absolute values, like the trigger), so the
+                                       // tail of one event cannot fire a second. Must be in
+                                       // (0, 1]; dsp.cpp fails the build otherwise
+#define REARM_HOLD_MS         200      // DRAFT (owner, 2026-11-18). ... and has stayed below it
+                                       // this long, so a zero crossing of a ringing or shaken
+                                       // signal does not re-arm. Covers steady oscillation down
+                                       // to ~0.8 Hz at threshold amplitude. Quiet time before
+                                       // the lockout ends counts. 0 = re-arm on the first quiet
+                                       // sample (the rule without a hold)
 #define SEGMENT_MS           1000     // CONTRACT 4.1. One seg per 1 s window of local time
 #define EVT_CONF              1.0f     // CONTRACT 4.2. The detector has no confidence measure
 
@@ -91,6 +105,42 @@
 #define GYRO_BIAS_MAX_DPS     10.0f    // DRAFT. Roll and pitch bias is the mean over the
                                        // settle time. A larger mean means the board moved,
                                        // so no bias is subtracted
+
+// ============================================================================
+// Macros: record mode (CNN data, cnn-record-train-handoff.md v0.4)
+// ============================================================================
+
+// Record build: every trigger's snapshot of the model channels goes to Serial
+// as SNB / SNR / SNE lines for the desktop record GUI. Detection, EVT, SEG and
+// BLE are the same as in the product build. Snapshots never go over BLE.
+#define RECORD_MODE           0        // DECIDED (C6): compile-time flag, off by default.
+                                       // 1 = record build (set locally to record; commit 0)
+#if RECORD_MODE != 0 && RECORD_MODE != 1
+#error "RECORD_MODE must be 0 or 1"
+#endif
+#define SNAP_RATE_HZ          IMU_ODR_HZ  // DRAFT (C5). No decimation: data can be decimated
+                                       // later in Python, never un-decimated
+#define SNAP_PRE_MS           250      // DECIDED (C4). Captures the onset before the crossing
+#define SNAP_POST_MS          LOCKOUT_MS  // DECIDED (C4). Tied to the lockout, so a snapshot
+                                       // is full when its window closes and two never overlap
+#define SNAP_N_PRE            ((SNAP_PRE_MS * SNAP_RATE_HZ) / 1000)   // 104 rows before the trigger
+#define SNAP_N_POST           ((SNAP_POST_MS * SNAP_RATE_HZ) / 1000)  // 520 rows from the trigger on
+#define SNAP_ROWS             (SNAP_N_PRE + SNAP_N_POST)              // 624 rows (C4)
+#define SNAP_N_CH             3        // DECIDED (C3). Channels per row
+#define SNAP_CHANNELS         "az_hp/gx/gy"  // DECIDED (C3), bench mapping in map_axes()
+                                       // (dsp.cpp, the one mapping table): vertical accel after
+                                       // the HPF (chip Z, g), roll rate (chip X gyro, dps),
+                                       // pitch rate (chip Y gyro, dps). Gyro with the settle-time
+                                       // bias removed, exactly as the trigger sees it (C7)
+#define SNAP_DECIMALS         4        // DRAFT. 0.1 mg and 0.1 mdps, below the sensor noise
+#define SNAP_BUFFERS          2        // DRAFT. One filling while one sends, ~7.5 KB each
+#define SNAP_MAX_GAP_US       ((3 * 1000000) / (2 * IMU_ODR_HZ))  // DRAFT. 1.5 sample periods
+                                       // (3605 us). A longer gap between two samples means some
+                                       // were missed; a snapshot across it is dropped, never
+                                       // sent with a hole in it
+#define SNAP_SEND_TIMEOUT_MS  2000     // DRAFT. serial_out abandons a snapshot (no SNE) if the
+                                       // USB TX buffer stays full this long, e.g. no host reading
+#define SNAP_WAIT_MS          1        // DRAFT. serial_out's sleep between checks for TX space
 
 // ============================================================================
 // Macros: BLE (data contract section 3)

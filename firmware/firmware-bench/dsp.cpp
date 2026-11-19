@@ -1,9 +1,18 @@
 /*
  * File:        dsp.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-16
- * Version:     0.1.1-bench
- * Change:      Classification by pitch sequence. The front axle decides: a
+ * Date:        2026-11-18
+ * Version:     0.1.2-bench
+ * Change:      Re-arm rule (cnn-record-train-handoff.md v0.4, request 0,
+ *              C16). A window closing disarms the detector; it re-arms once
+ *              every axis has stayed below REARM_FRAC x its own threshold for
+ *              REARM_HOLD_MS, so the tail of one event (still above threshold
+ *              when its lockout ends) no longer opens a second window. Record
+ *              mode (request 1, RECORD_MODE): a ring buffer of the last
+ *              SNAP_N_PRE samples of the model channels; each trigger copies
+ *              it into a free snapshot buffer, which fills to SNAP_ROWS rows
+ *              and goes to serial_out by pointer through out_q.
+ *              0.1.1-bench: Classification by pitch sequence. The front axle decides: a
  *              pothole pitches the nose down then up, a speed bump up then
  *              down, so the class is the sign of the first pitch lobe of the
  *              event (smoothed, bias-corrected pitch rate, with hysteresis; a
@@ -22,10 +31,12 @@
  *              sample_q: map chip axes to car axes, high-pass the vertical
  *              acceleration, add the sample to the current 1 s segment, and
  *              run the event detector (settle hold-off, thresholds, one shared
- *              lockout window, peak tracking, pitch / vertical lobe tracking,
- *              and classification at the end of the window). Sends every PRINT_EVERY_N-th sample as an S line,
+ *              lockout window, re-arm, peak tracking, pitch / vertical lobe
+ *              tracking, and classification at the end of the window). Sends every PRINT_EVERY_N-th sample as an S line,
  *              and each segment and event to both out_q (Serial) and ble_q
- *              (app), all without waiting. DRAFT detection algorithm from
+ *              (app), all without waiting. In record builds it also keeps
+ *              the pre-trigger ring buffer and fills one snapshot per
+ *              trigger, again without waiting. DRAFT detection algorithm from
  *              devkit-phase1-context.md v0.4, "Detection".
  */
 
@@ -39,6 +50,21 @@
 #include "types.h"
 #include "dsp.h"
 #include "supervisor.h"
+
+// ============================================================================
+// Compile-time checks
+// ============================================================================
+
+// A bad value fails the build instead of running a detector that never
+// re-arms (REARM_FRAC <= 0: nothing is below 0) or re-arms while still above
+// threshold (REARM_FRAC > 1).
+static_assert(REARM_FRAC > 0.0f && REARM_FRAC <= 1.0f, "REARM_FRAC must be in (0, 1]");
+static_assert(REARM_HOLD_MS >= 0, "REARM_HOLD_MS must not be negative");
+#if RECORD_MODE
+static_assert(SNAP_RATE_HZ == IMU_ODR_HZ, "Snapshot decimation is not implemented");
+static_assert(SNAP_N_PRE >= 1 && SNAP_N_POST >= 1, "A snapshot needs rows before and after the trigger");
+static_assert(SNAP_N_CH == 3, "dsp_task builds each snapshot row from exactly three channels");
+#endif
 
 // ============================================================================
 // Globals: types
@@ -119,6 +145,34 @@ typedef struct {
   lobe_seq_t z;           // Vertical lobes of z_hp (+1 = up)
 } window_t;
 
+// Re-arm state (C16). While armed, a threshold crossing may open a window.
+// A window closing disarms it, and it re-arms once every axis has been below
+// REARM_FRAC x its threshold for REARM_HOLD_MS. The quiet run is timed on
+// every sample, inside windows too, so a tail that calmed down before the
+// lockout ended re-arms at once.
+typedef struct {
+  bool    armed;
+  bool    quiet;          // This sample and the ones before it in the run are below
+                          // the re-arm level on every axis
+  int64_t quiet_start_us; // Time of the first sample of the current quiet run
+} rearm_t;
+
+#if RECORD_MODE
+// Record mode: the pre-trigger ring buffer and the snapshot being filled.
+typedef struct {
+  snap_row_t ring[SNAP_N_PRE];  // The SNAP_N_PRE samples before the current one
+  uint32_t   ring_idx;          // Next slot to write, which is also the oldest held
+  uint32_t   usable;            // Usable samples in a row, ending with the current one:
+                                // gyro bias ready and nothing missed (saturates at SNAP_ROWS)
+  bool       have_prev;         // prev_n and prev_t_us are valid
+  uint32_t   prev_n;            // Previous sample's count and time, for the gap check
+  int64_t    prev_t_us;
+  snap_t    *fill;              // Buffer being filled (owned by dsp), NULL if none
+  uint32_t   rows;              // Rows written to fill so far
+  uint32_t   drops;             // Snapshots lost in dsp, reported as snap_drops
+} snap_rec_t;
+#endif
+
 // Running sums for one 1 s segment.
 typedef struct {
   bool     open;          // false before the first sample
@@ -131,6 +185,16 @@ typedef struct {
   float    sum_pitch2;
   float    peak_z;        // Largest |z_hp| so far, g
 } seg_acc_t;
+
+// ============================================================================
+// Globals
+// ============================================================================
+
+#if RECORD_MODE
+// Record-mode state. File scope only to keep its ~1.3 KB ring off dsp's 4 KB
+// stack; only dsp_task touches it.
+static snap_rec_t s_rec;
+#endif
 
 // ============================================================================
 // Prototypes
@@ -150,6 +214,17 @@ static void lobe_seq_open(lobe_seq_t *q, const lobe_track_t *k, int64_t t_us);
 static void lobe_seq_step(lobe_seq_t *q, const lobe_track_t *k, int8_t started,
                           int64_t t_us);
 static evt_class_t classify(const window_t *w, evt_basis_t *basis);
+static void rearm_step(rearm_t *r, int64_t t_us, float z_hp, float roll_dps,
+                       float pitch_dps);
+#if RECORD_MODE
+static void snap_drop(snap_rec_t *r, const app_ctx_t *ctx);
+static void snap_track(snap_rec_t *r, const app_ctx_t *ctx, const imu_sample_t *s,
+                       bool bias_ready);
+static void snap_start(snap_rec_t *r, const app_ctx_t *ctx, uint32_t seq,
+                       uint32_t trig_n);
+static void snap_append(snap_rec_t *r, const app_ctx_t *ctx, const snap_row_t *row);
+static void snap_push(snap_rec_t *r, const snap_row_t *row);
+#endif
 static void send_out(QueueHandle_t out_q, const out_msg_t *m, uint32_t *drops);
 static void send_ble(QueueHandle_t ble_q, const ble_msg_t *m, uint32_t *drops);
 
@@ -391,6 +466,166 @@ static evt_class_t classify(const window_t *w, evt_basis_t *basis) {
 }
 
 /**
+ * Times the current quiet run (every axis below REARM_FRAC x its threshold)
+ * and re-arms a disarmed detector once the run has lasted REARM_HOLD_MS.
+ * Called once per sample, after a window may have closed (which disarms) and
+ * before a new one may open. While a window is open, armed is still true
+ * from its opening, so this only ever re-arms between windows. A quiet
+ * sample cannot also trigger: with REARM_FRAC <= 1 it is below threshold.
+ * @param r          Re-arm state, updated.
+ * @param t_us       Sample time.
+ * @param z_hp       High-passed vertical acceleration, g.
+ * @param roll_dps   Roll rate, dps, bias removed (as the trigger sees it).
+ * @param pitch_dps  Pitch rate, dps, bias removed (as the trigger sees it).
+ * @return None.
+ */
+static void rearm_step(rearm_t *r, int64_t t_us, float z_hp, float roll_dps,
+                       float pitch_dps) {
+  // Absolute values, like the trigger. Strict "<": the axis has dropped below.
+  const bool below = fabsf(z_hp) < REARM_FRAC * THR_Z_G &&
+                     fabsf(roll_dps) < REARM_FRAC * THR_ROLL_DPS &&
+                     fabsf(pitch_dps) < REARM_FRAC * THR_PITCH_DPS;
+  if (!below) {
+    r->quiet = false;  // Any loud sample restarts the hold time
+    return;
+  }
+  if (!r->quiet) {
+    r->quiet = true;
+    r->quiet_start_us = t_us;
+  }
+  // The run's length is first-to-current sample time, so a hold of 0 re-arms
+  // on the first quiet sample.
+  if (!r->armed && t_us - r->quiet_start_us >= (int64_t)REARM_HOLD_MS * 1000) {
+    r->armed = true;
+  }
+}
+
+#if RECORD_MODE
+/**
+ * Gives up the snapshot being filled: its buffer goes back to the free list
+ * and the loss is counted. A partial snapshot is never sent.
+ * @param r    Record state; r->fill must not be NULL.
+ * @param ctx  For snap_free_q.
+ * @return None.
+ */
+static void snap_drop(snap_rec_t *r, const app_ctx_t *ctx) {
+  // Cannot fail: snap_free_q has room for every buffer, and this one is not in it.
+  xQueueSend(ctx->snap_free_q, &r->fill, 0);
+  r->fill = NULL;
+  r->drops++;
+}
+
+/**
+ * Counts the run of usable samples that ends with this one. Usable means the
+ * gyro bias is ready (every row has it removed, as the trigger sees it) and
+ * nothing was missed since the previous sample: no jump in n (a sample_q
+ * drop) and no time gap over SNAP_MAX_GAP_US (merged data-ready edges, or a
+ * data-ready timeout, which skip a sample without a jump in n). A gap while a
+ * snapshot is filling drops that snapshot, so rows are always consecutive
+ * samples.
+ * @param r           Record state, updated.
+ * @param ctx         For snap_drop().
+ * @param s           Current sample.
+ * @param bias_ready  bias.ready after this sample.
+ * @return None.
+ */
+static void snap_track(snap_rec_t *r, const app_ctx_t *ctx, const imu_sample_t *s,
+                       bool bias_ready) {
+  const bool gap = r->have_prev &&
+                   (s->n != r->prev_n + 1 || s->t_us - r->prev_t_us > SNAP_MAX_GAP_US);
+  r->have_prev = true;
+  r->prev_n = s->n;
+  r->prev_t_us = s->t_us;
+
+  if (!bias_ready) {
+    r->usable = 0;
+  } else if (gap) {
+    r->usable = 1;  // This sample starts a new run
+  } else if (r->usable < (uint32_t)SNAP_ROWS) {
+    r->usable++;
+  }
+  if (r->fill != NULL && r->usable <= 1) {
+    snap_drop(r, ctx);  // The run broke while filling
+  }
+}
+
+/**
+ * Starts a snapshot on a trigger: takes a free buffer and copies in the
+ * SNAP_N_PRE samples before this one, oldest first. snap_append() then adds
+ * this sample as row SNAP_N_PRE, and the rest. Never waits. The trigger gets
+ * no snapshot (counted as a drop) if no buffer is free, if fewer than
+ * SNAP_N_PRE usable samples come before it, or if the previous snapshot is
+ * still filling (only possible if the IMU runs slower than 416 Hz, so
+ * SNAP_N_POST samples outlast the time-based lockout).
+ * @param r       Record state, updated.
+ * @param ctx     For snap_free_q.
+ * @param seq     seq that this window's EVT will carry.
+ * @param trig_n  Sample count of the trigger sample.
+ * @return None.
+ */
+static void snap_start(snap_rec_t *r, const app_ctx_t *ctx, uint32_t seq,
+                       uint32_t trig_n) {
+  if (r->fill != NULL || r->usable < (uint32_t)SNAP_N_PRE + 1) {
+    r->drops++;
+    return;
+  }
+  snap_t *b = NULL;
+  if (xQueueReceive(ctx->snap_free_q, &b, 0) != pdTRUE) {
+    r->drops++;  // Both buffers still queued or sending
+    return;
+  }
+  b->seq = seq;
+  b->trig_n = trig_n;
+  for (uint32_t k = 0; k < (uint32_t)SNAP_N_PRE; k++) {
+    b->rows[k] = r->ring[(r->ring_idx + k) % SNAP_N_PRE];
+  }
+  r->fill = b;
+  r->rows = SNAP_N_PRE;
+}
+
+/**
+ * Adds this sample to the snapshot being filled, if any. A full snapshot goes
+ * to out_q by pointer (no 7.5 KB copy); serial_out then owns the buffer and
+ * returns it to snap_free_q after sending. If out_q is full the buffer goes
+ * straight back and the loss is counted.
+ * @param r    Record state, updated.
+ * @param ctx  For out_q and snap_free_q.
+ * @param row  This sample's model channels.
+ * @return None.
+ */
+static void snap_append(snap_rec_t *r, const app_ctx_t *ctx, const snap_row_t *row) {
+  if (r->fill == NULL) {
+    return;
+  }
+  r->fill->rows[r->rows++] = *row;
+  if (r->rows < (uint32_t)SNAP_ROWS) {
+    return;
+  }
+  out_msg_t o = {};
+  o.tag = OUT_SNAP;
+  o.snap = r->fill;
+  if (xQueueSend(ctx->out_q, &o, 0) == pdTRUE) {
+    r->fill = NULL;  // serial_out owns it now
+  } else {
+    snap_drop(r, ctx);
+  }
+}
+
+/**
+ * Adds this sample to the pre-trigger ring buffer, overwriting the oldest.
+ * Runs after snap_start(), so at a trigger the ring holds the samples before
+ * the trigger sample.
+ * @param r    Record state, updated.
+ * @param row  This sample's model channels.
+ * @return None.
+ */
+static void snap_push(snap_rec_t *r, const snap_row_t *row) {
+  r->ring[r->ring_idx] = *row;
+  r->ring_idx = (r->ring_idx + 1) % SNAP_N_PRE;
+}
+#endif
+
+/**
  * Sends one line to out_q without waiting. A full queue drops the line.
  * @param out_q  The out_q handle.
  * @param m      Line to send.
@@ -440,6 +675,7 @@ void dsp_task(void *param) {
   const lobe_track_t z_idle = {Z_LOBE_G, 0.5f * Z_LOBE_G, 0, 0, 0, 0};
   lobe_track_t pitch_trk = pitch_idle;  // Input: nose-down rate, dps
   lobe_track_t z_trk = z_idle;          // Input: z_hp, g
+  rearm_t rearm = {};          // Set to armed on the first sample (restart block)
   bool have_first = false;
   uint32_t epoch = 0;          // Sample epoch in use (imu_acq bumps it per recovery)
   int64_t settle_end_us = 0;   // No detection before this sample time
@@ -464,6 +700,18 @@ void dsp_task(void *param) {
         pitch_trk = pitch_idle;
         z_trk = z_idle;
         win = window_t{};
+        // Armed from the start, as before the re-arm rule: the settle
+        // hold-off alone keeps the first window from opening too early.
+        rearm = rearm_t{};
+        rearm.armed = true;
+#if RECORD_MODE
+        // A snapshot being filled would mix pre-loss and new data: drop it.
+        // The usable-sample run restarts by itself (bias is not ready yet).
+        if (s_rec.fill != NULL) {
+          snap_drop(&s_rec, ctx);
+        }
+        s_rec.have_prev = false;
+#endif
       }
 
       car_axes_t car = map_axes(&s);
@@ -489,6 +737,13 @@ void dsp_task(void *param) {
         car.pitch_dps -= bias.pitch;
       }
       const float z_hp = hpf_step(&hpf, car.vert_g);
+#if RECORD_MODE
+      // Model channels in SNAP_CHANNELS order, after the same preprocessing
+      // the trigger uses (HPF, bias removal), so a take matches what the CNN
+      // will see on the device.
+      snap_track(&s_rec, ctx, &s, bias.ready);
+      const snap_row_t row = {{z_hp, car.roll_dps, car.pitch_dps}};
+#endif
 
       // Lobe trackers run from the end of settle, inside and outside
       // windows, so a lobe just before a window opens is still known.
@@ -559,13 +814,19 @@ void dsp_task(void *param) {
         b.evt = e;
         send_ble(ctx->ble_q, &b, &ble_q_drops);
         win.open = false;
+        rearm.armed = false;  // C16: no new window until every axis calms down
       }
 
+      // Re-arm (C16). Runs on every sample to time the quiet run, but only
+      //    re-arms between windows (see rearm_step).
+      rearm_step(&rearm, s.t_us, z_hp, car.roll_dps, car.pitch_dps);
+
       // Events 2. Open a window when any axis reaches its threshold, after the
-      //    settle hold-off and outside any window. One window for all axes.
-      //    The first lobes come from the trackers, looking one lobe back.
+      //    settle hold-off, outside any window, and only while armed. One
+      //    window for all axes. The first lobes come from the trackers,
+      //    looking one lobe back.
       bool opened = false;
-      if (!win.open && s.t_us >= settle_end_us &&
+      if (!win.open && rearm.armed && s.t_us >= settle_end_us &&
           (fabsf(z_hp) >= THR_Z_G ||
            fabsf(car.roll_dps) >= THR_ROLL_DPS ||
            fabsf(car.pitch_dps) >= THR_PITCH_DPS)) {
@@ -575,6 +836,10 @@ void dsp_task(void *param) {
         lobe_seq_open(&win.pitch, &pitch_trk, s.t_us);
         lobe_seq_open(&win.z, &z_trk, s.t_us);
         opened = true;
+#if RECORD_MODE
+        // seq is the number this window's EVT will get when it closes.
+        snap_start(&s_rec, ctx, seq, s.n);
+#endif
       }
 
       // Events 3. Inside a window, track peaks (starting with the trigger
@@ -588,6 +853,13 @@ void dsp_task(void *param) {
           lobe_seq_step(&win.z, &z_trk, z_started, s.t_us);
         }
       }
+
+#if RECORD_MODE
+      // Snapshot: this sample goes into the one being filled (the trigger
+      //    sample becomes row SNAP_N_PRE), then into the ring buffer.
+      snap_append(&s_rec, ctx, &row);
+      snap_push(&s_rec, &row);
+#endif
 
       // Every PRINT_EVERY_N-th sample also goes out as an S line.
       if (s.n % PRINT_EVERY_N == 0) {
@@ -606,6 +878,9 @@ void dsp_task(void *param) {
       hb.task = TASK_DSP;
       hb.out_q_drops = out_q_drops;
       hb.ble_q_drops = ble_q_drops;
+#if RECORD_MODE
+      hb.snap_drops = s_rec.drops;
+#endif
       sys_heartbeat(ctx->sys_q, &hb);
     }
   }

@@ -1,8 +1,10 @@
 /*
  * File:        serial_out.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-02
- * Version:     0.1.0-draft (first draft)
+ * Date:        2026-11-18
+ * Version:     0.1.2-bench
+ * Change:      Comments only: record-mode snapshots.
+ *              0.1.0-draft: first draft.
  * Description: serial_out task: sole owner of Serial.
  */
 
@@ -15,7 +17,9 @@
 
 /**
  * serial_out task entry (core 0, above supervisor). Starts Serial, prints the
- * BOOT line and column headers, then prints one line per out_q item.
+ * BOOT line and column headers, then prints one line per out_q item. In
+ * record builds a snapshot item prints as SNB, SNR lines and SNE, and its
+ * buffer then goes back to snap_free_q.
  * @param param  Pointer to the app_ctx_t from setup(). Must outlive the task.
  * @return Never returns.
  */

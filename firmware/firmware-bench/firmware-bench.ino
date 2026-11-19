@@ -1,9 +1,15 @@
 /*
  * File:        firmware-bench.ino
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-16
- * Version:     0.1.1-bench
- * Change:      0.1.1-bench: pothole / speed bump by pitch sequence (nose down
+ * Date:        2026-11-18
+ * Version:     0.1.2-bench
+ * Change:      0.1.2-bench (cnn-record-train-handoff.md v0.4): re-arm rule,
+ *              so a lockout's tail cannot fire a second event (request 0).
+ *              Record mode (request 1): with RECORD_MODE 1 in config.h, each
+ *              trigger's snapshot of the model channels goes to Serial for
+ *              the CNN record GUI; setup() also creates snap_free_q and its
+ *              buffers.
+ *              0.1.1-bench: pothole / speed bump by pitch sequence (nose down
  *              then up = pothole), never UNKNOWN; the IMU recovers from F1/F2
  *              (power loss or a loose wire) without a reset. Now differs from
  *              road_quality_fw in dsp, imu_acq, supervisor, ble_link, and the
@@ -17,7 +23,9 @@
  *              Reads the IMU at 416 Hz, classifies potholes and speed bumps by
  *              thresholding, sends 1 s segment summaries and events to the
  *              Android app over BLE, and prints samples, segments, events, and
- *              health to Serial.
+ *              health to Serial. The record build (RECORD_MODE 1 in config.h)
+ *              also prints each trigger's snapshot (SNB / SNR / SNE lines) for
+ *              the CNN record GUI in firmware/cnn/cnn_record_gui/.
  *
  *              setup() only creates the queues and the five tasks, then deletes
  *              its own task, so loop() never runs. Each task initializes the
@@ -39,8 +47,8 @@
  *              The "UART" connector is optional: plug it in too to see ROM boot
  *              messages and configASSERT output when chasing a reboot loop.
  *
- *              Bench trips upload as REAL with fw_version 0.1.1-bench; Ben
- *              deletes them by that version.
+ *              Bench trips upload as REAL with fw_version 0.1.2-bench (earlier:
+ *              0.1.1-bench, 0.1.0-bench); Ben deletes them by that version.
  */
 
 // ============================================================================
@@ -62,6 +70,13 @@
 // Queue and task handles. Filled here before any task that reads them exists,
 // read-only afterwards.
 static app_ctx_t s_ctx;
+
+#if RECORD_MODE
+// The fixed snapshot buffers (~7.5 KB each, internal RAM). Never touched here
+// after setup() puts their pointers in snap_free_q; from then on whoever
+// holds a pointer owns that buffer (see snap_t in types.h).
+static snap_t s_snap_bufs[SNAP_BUFFERS];
+#endif
 
 // ============================================================================
 // Prototypes
@@ -111,6 +126,21 @@ void setup() {
   configASSERT(s_ctx.sys_q != NULL);
   configASSERT(s_ctx.ble_q != NULL);
   configASSERT(s_ctx.time_q != NULL);
+
+#if RECORD_MODE
+  // Free list of snapshot buffers: dsp takes one per trigger, serial_out puts
+  // it back after sending. Room for every buffer, so returning one never fails.
+  s_ctx.snap_free_q = xQueueCreate(SNAP_BUFFERS, sizeof(snap_t *));
+  configASSERT(s_ctx.snap_free_q != NULL);
+  for (int i = 0; i < SNAP_BUFFERS; i++) {
+    snap_t *p = &s_snap_bufs[i];
+    const BaseType_t ok = xQueueSend(s_ctx.snap_free_q, &p, 0);
+    configASSERT(ok == pdPASS);
+    (void)ok;  // Keeps the build warning-free if asserts are compiled out
+  }
+#else
+  s_ctx.snap_free_q = NULL;  // No snapshots in the product build
+#endif
 
   // serial_out first so BOOT prints as early as possible. supervisor last,
   // because it needs the imu_acq and dsp handles.
