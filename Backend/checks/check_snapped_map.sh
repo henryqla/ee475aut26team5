@@ -89,6 +89,7 @@ mapfile -t PTS < <(q "select round(extensions.st_y(a)::numeric, 7) || ' ' || rou
                                            extensions.st_transform(extensions.st_lineinterpolatepoint(w.geom, (101 + i * 10) / w.len_m), 4326) as b) p
                       where w.way_id = $WAY order by i")
 (( ${#PTS[@]} == 15 )) || die "Couldn't sample points on way $WAY."
+read -r LANES_FWD LANES_BWD <<<"$(q "select lanes_fwd || ' ' || lanes_bwd from roads.ways where way_id = $WAY")"
 read -r LAT0 LON0 H <<<"${PTS[0]}"
 read -r LAT1 LON1 _ <<<"${PTS[14]}"
 pass "OSM way $WAY, heading ${H}°"
@@ -178,6 +179,8 @@ expect "against the road: kept apart, 1 drive, 0.5" \
 expect "every row is one direction or the other" 'len(fwd(road)) + len(back(road)) == len(road)'
 expect "along the road: pieces cover the 150 m driven (140-170 m of line)" \
     '140 <= sum(r["length_m"] for r in fwd(road)) <= 170'
+expect "lanes_dir is the way's lanes in each direction ($LANES_FWD along, $LANES_BWD against)" \
+    'all(r["lanes_dir"] == '"${LANES_FWD:-0}"' for r in fwd(road)) and all(r["lanes_dir"] == '"${LANES_BWD:-0}"' for r in back(road))'
 expect "last_t is the newest drive (today)" 'all(r["last_t"] >= NOW - 60000 for r in fwd(road))'
 req POST /rest/v1/rpc/road_quality_snapped "" "{$BOX,\"include_fake\":true,\"piece_m\":60}"
 expect "piece_m 60: fewer, longer pieces along the road (2-4, longest over 15 m)" \
@@ -185,7 +188,7 @@ expect "piece_m 60: fewer, longer pieces along the road (2-4, longest over 15 m)
 req POST /rest/v1/rpc/road_quality_snapped "" "{$BOX,\"include_fake\":true,\"vehicle_id\":\"truck\"}"
 expect "vehicle_id filter: truck sees none of the camry rows" 'rows == []'
 req POST /rest/v1/rpc/road_quality_snapped "" "{$PAC_BOX,\"include_fake\":true}"
-expect "Pacific drive (no road): still shown, as CELL rows" 'len(cell) > 0 and road == [] and all(r["drives"] == 1 for r in cell)'
+expect "Pacific drive (no road): still shown, as CELL rows" 'len(cell) > 0 and road == [] and all(r["drives"] == 1 and r["lanes_dir"] is None for r in cell)'
 
 echo "${BOLD}5. Cleanup${RESET}"
 code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X DELETE "$API/rest/v1/trips?id=in.($A,$B,$C,$D,$P)" -H "apikey: $SECRET")

@@ -490,10 +490,15 @@ read further pages with `range(...)`, the same way it pages segments.
   | `weight` | `real` | Sum of the drives' age weights (1.0 = one drive from today); a confidence value |
   | `last_t` | `bigint` | Epoch ms of the newest drive |
   | `oneway` | `boolean` | `ROAD` only: one-way road (e.g. each side of a divided highway). Draw without the side offset, since the road line is already that direction's own road. `null` for `CELL` |
+  | `lanes_dir` | `integer` | `ROAD` only: lanes in this row's direction of travel, 1–8, for sizing the line. From OSM `lanes`, `lanes:forward`, `lanes:backward` (a centre turn lane, `lanes:both_ways`, counts for neither side); where untagged, a default by road type (motorway, trunk, primary 2; others 1). `null` for `CELL` |
   | `road_name` | `text` | `ROAD` only: OSM road name, may be `null` |
 
-  ROAD paths lie on the road's centre line, so two-way roads need the side offset of §8
-  (about half a lane) to keep the directions apart; CELL rows keep today's offset of 0.
+  ROAD paths lie on the road's centre line (for a one-way road, the centre of that carriageway).
+  Suggested drawing, so the two directions of a two-way road never overlap however wide it is:
+  width ≈ `lanes_dir` × 3.3 m × 0.9; two-way (`oneway = false`): offset to the right of travel
+  by width ÷ 2 + a small gap; one-way: no offset. CELL rows keep today's width and no offset.
+  `lanes_dir` only sets the drawn width: the value is still one per direction, shared by all
+  its lanes, because GPS can't tell which lane a drive was in.
   The map must show "© OpenStreetMap contributors" (ODbL licence).
 - Directions are compared around the circle: 350° and 10° count as the same direction.
 - Rows with no heading (car barely moving) are left out of `road_quality_in_area`; events with no

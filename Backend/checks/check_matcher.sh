@@ -67,6 +67,21 @@ check "no leftover import schema" '[[ -z $(q "select 1 from pg_namespace where n
 osm_public=$(q "select string_agg(tablename, ' ') from pg_tables where schemaname = 'public'
                 and (tablename like 'osm2pgsql%' or tablename like 'planet_osm%')")
 check "no osm2pgsql tables in public (the API would expose them)" '[[ -z $osm_public ]]' "found: $osm_public"
+tagged=$(q "select count(*) filter (where lanes_tagged) from roads.ways"); tagged=${tagged:-0}
+check "lane counts read from OSM tags ($tagged ways tagged)" '(( tagged > 1000 ))' \
+    "re-run bash roads/import_roads.sh after the road_lanes migration"
+# lanes_by_direction(highway, oneway, lanes, lanes:forward, lanes:backward, lanes:both_ways)
+lanes=$(q "select string_agg(array_to_string(v, '+'), ' ' order by i) from (values
+             (1, roads.lanes_by_direction('residential', false, null, null, null, null)),
+             (2, roads.lanes_by_direction('primary',     false, null, null, null, null)),
+             (3, roads.lanes_by_direction('secondary',   false, '4',  null, null, null)),
+             (4, roads.lanes_by_direction('secondary',   false, '3',  null, null, null)),
+             (5, roads.lanes_by_direction('primary',     false, '5',  null, null, '1')),
+             (6, roads.lanes_by_direction('primary',     false, '3',  '2',  null, null)),
+             (7, roads.lanes_by_direction('motorway',    true,  '4',  null, null, null)),
+             (8, roads.lanes_by_direction('residential', false, '2;3', null, null, null))) t(i, v)")
+check "lanes per direction from the tags (defaults, splits, turn lanes, one-way, bad values)" \
+    '[[ $lanes == "1+1 2+2 2+2 1+1 2+2 2+1 4+4 1+1" ]]' "got $lanes"
 open_public=$(q "select string_agg(c.relname, ' ') from pg_class c
                  where c.relnamespace = 'public'::regnamespace and c.relkind = 'r' and not c.relrowsecurity")
 check "every table in public has RLS on" '[[ -z $open_public ]]' "without RLS: $open_public"
@@ -93,7 +108,8 @@ check "anon and authenticated can't call the worker functions" \
     '[[ $(q "select bool_or(has_function_privilege(r, f, '"'execute'"'))
              from unnest(array['"'anon'"', '"'authenticated'"']) r,
                   unnest(array['"'roads.trip_points(uuid)'"', '"'roads.save_trip_match(uuid, integer, text, jsonb)'"',
-                               '"'roads.trips_to_match(integer)'"', '"'roads.load_ways()'"']) f") == f ]]'
+                               '"'roads.trips_to_match(integer)'"', '"'roads.load_ways()'"',
+                               '"'roads.lanes_by_direction(text, boolean, text, text, text, text)'"']) f") == f ]]'
 
 echo "${BOLD}4. API${RESET}"
 code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$API/rest/v1/ways?limit=1" -H "apikey: $PUB" -H "Accept-Profile: roads")

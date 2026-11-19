@@ -140,7 +140,7 @@ trip again by itself.
 
 
 ------------------------------------------------------------------
-STEP 6 - Install the road-matcher service
+STEP 6 - Install the road-matcher service -- HERE
 ------------------------------------------------------------------
 
     bash matcher/install_matcher.sh
@@ -208,10 +208,13 @@ The new function and its result columns are in docs/data-contract.md §7
     (larger when zoomed out, e.g. 15 / 60 / 240 / 960)
   - draw each row's `path` as one polyline, coloured by roughness; page past 1000 rows the same
     way as today (rows are ordered by piece_id)
-  - ROAD rows with oneway = false: offset to the right of travel by about half a lane (~2 m),
+  - ROAD rows: line width from lanes_dir (lanes in that direction), about
+    lanes_dir x 3.3 m x 0.9, with a minimum width in pixels for zoomed-out views
+  - ROAD rows with oneway = false: offset to the right of travel by width / 2 + a small gap,
     with a separate offset for road-quality lines (MapScreen.kt DIRECTION_OFFSET_M also
     shifts event markers and trip paths; leave it as is) and the existing shiftPathRight;
-    oneway = true and CELL rows: no offset
+    oneway = true: full width, no offset; CELL rows: today's width, no offset
+  - §8 says lines are about 5 m wide; with lanes_dir that line needs his update
   - include piece_m in the RoadQualityCache key, so zooming reloads
   - show "© OpenStreetMap contributors" on the map
   - layOutPieces (RoadPieceLayout.kt) isn't needed for ROAD rows
