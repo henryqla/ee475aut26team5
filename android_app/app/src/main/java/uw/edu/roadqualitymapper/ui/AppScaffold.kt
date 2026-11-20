@@ -1,6 +1,7 @@
 package uw.edu.roadqualitymapper.ui
 
 import androidx.annotation.DrawableRes
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -62,56 +63,59 @@ fun AppScaffold() {
     val keepScreenOn by AppSettings.keepScreenOn.collectAsState()
     KeepScreenOn(keepScreenOn && recording.recording)
 
-    if (showSettings) {
-        SettingsScreen(onBack = { showSettings = false })
-        return
-    }
-
     val currentTab = Tab.entries[pagerState.currentPage]
-    Scaffold(
-        topBar = {
-            // The screen's name for now; the app's name or logo goes here once there is one.
-            TopAppBar(
-                title = { Text(currentTab.label) },
-                actions = {
-                    IconButton(onClick = { showSettings = true }) {
-                        AppIcon(R.drawable.ic_menu_2, contentDescription = "Settings")
+    // Settings opens over the tabs instead of replacing them, so the screens (the map above all,
+    // which is slow to start) stay alive underneath and don't start over when Settings closes.
+    Box(Modifier.fillMaxSize()) {
+        Scaffold(
+            topBar = {
+                // The screen's name for now; the app's name or logo goes here once there is one.
+                TopAppBar(
+                    title = { Text(currentTab.label) },
+                    actions = {
+                        IconButton(onClick = { showSettings = true }) {
+                            AppIcon(R.drawable.ic_menu_2, contentDescription = "Settings")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                )
+            },
+            bottomBar = {
+                NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
+                    Tab.entries.forEach { tab ->
+                        NavigationBarItem(
+                            selected = currentTab == tab,
+                            onClick = { scope.launch { pagerState.animateScrollToPage(tab.ordinal) } },
+                            icon = { AppIcon(tab.icon, contentDescription = null) },
+                            label = { Text(tab.label) },
+                            colors = NavigationBarItemDefaults.colors(
+                                selectedIconColor = MaterialTheme.colorScheme.primary,
+                                selectedTextColor = MaterialTheme.colorScheme.primary,
+                                indicatorColor = MaterialTheme.colorScheme.primaryContainer,
+                            ),
+                        )
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-            )
-        },
-        bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest) {
-                Tab.entries.forEach { tab ->
-                    NavigationBarItem(
-                        selected = currentTab == tab,
-                        onClick = { scope.launch { pagerState.animateScrollToPage(tab.ordinal) } },
-                        icon = { AppIcon(tab.icon, contentDescription = null) },
-                        label = { Text(tab.label) },
-                        colors = NavigationBarItemDefaults.colors(
-                            selectedIconColor = MaterialTheme.colorScheme.primary,
-                            selectedTextColor = MaterialTheme.colorScheme.primary,
-                            indicatorColor = MaterialTheme.colorScheme.primaryContainer,
-                        ),
-                    )
+                }
+            },
+        ) { innerPadding ->
+            HorizontalPager(
+                state = pagerState,
+                modifier = Modifier.padding(innerPadding).fillMaxSize(),
+                // On the map, sideways swipes move the map; leave it with the bottom bar.
+                userScrollEnabled = currentTab != Tab.MAP,
+                // Keep all three screens alive, not only the one showing. Otherwise the map is torn
+                // down when it's swiped away and rebuilt (slowly) every time it comes back.
+                beyondViewportPageCount = Tab.entries.size - 1,
+            ) { page ->
+                val screenModifier = Modifier.fillMaxSize()
+                when (Tab.entries[page]) {
+                    Tab.CONNECT -> ConnectScreen(screenModifier)
+                    Tab.DRIVE -> DriveScreen(screenModifier)
+                    Tab.MAP -> MapScreen(screenModifier)
                 }
             }
-        },
-    ) { innerPadding ->
-        HorizontalPager(
-            state = pagerState,
-            modifier = Modifier.padding(innerPadding).fillMaxSize(),
-            // On the map, sideways swipes move the map; leave it with the bottom bar.
-            userScrollEnabled = currentTab != Tab.MAP,
-        ) { page ->
-            val screenModifier = Modifier.fillMaxSize()
-            when (Tab.entries[page]) {
-                Tab.CONNECT -> ConnectScreen(screenModifier)
-                Tab.DRIVE -> DriveScreen(screenModifier)
-                Tab.MAP -> MapScreen(screenModifier)
-            }
         }
+        if (showSettings) SettingsScreen(onBack = { showSettings = false })
     }
 }
 

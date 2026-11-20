@@ -13,14 +13,25 @@ enum class ColorMode(val label: String, val detail: String?) {
     BLUE_YELLOW("Blue-yellow", "Tritanopia"),
 }
 
+/** Light or dark app and map. Until one is picked, the app follows the phone's dark mode. */
+enum class ThemeChoice(val label: String) {
+    LIGHT("Light"),
+    DARK("Dark"),
+}
+
 /** Choices made on the Settings screen, remembered between launches. */
 object AppSettings {
     private const val PREFS_NAME = "settings"
     private const val KEY_COLOR_MODE = "color_mode"
     private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
+    private const val KEY_THEME = "theme"
 
     private val _colorMode = MutableStateFlow(ColorMode.OFF)
     val colorMode: StateFlow<ColorMode> = _colorMode.asStateFlow()
+
+    /** null until picked in Settings: follow the phone's dark mode. */
+    private val _theme = MutableStateFlow<ThemeChoice?>(null)
+    val theme: StateFlow<ThemeChoice?> = _theme.asStateFlow()
 
     /** Keep the display awake while a trip is recording. */
     private val _keepScreenOn = MutableStateFlow(true)
@@ -36,6 +47,12 @@ object AppSettings {
             else -> ColorMode.entries.firstOrNull { it.name == saved } ?: ColorMode.OFF
         }
         _keepScreenOn.value = prefs.getBoolean(KEY_KEEP_SCREEN_ON, true)
+        _theme.value = prefs.getString(KEY_THEME, null)?.let { saved -> ThemeChoice.entries.firstOrNull { it.name == saved } }
+    }
+
+    fun setTheme(context: Context, choice: ThemeChoice) {
+        prefs(context).edit { putString(KEY_THEME, choice.name) }
+        _theme.value = choice
     }
 
     fun setColorMode(context: Context, mode: ColorMode) {
