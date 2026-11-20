@@ -30,6 +30,8 @@ import androidx.compose.ui.unit.dp
 import uw.edu.roadqualitymapper.R
 import uw.edu.roadqualitymapper.data.AppSettings
 import uw.edu.roadqualitymapper.data.ColorMode
+import uw.edu.roadqualitymapper.data.ThemeChoice
+import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
 import uw.edu.roadqualitymapper.ui.components.AppCard
 import uw.edu.roadqualitymapper.ui.components.AppIcon
 import uw.edu.roadqualitymapper.ui.components.SectionLabel
@@ -41,6 +43,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val colorMode by AppSettings.colorMode.collectAsState()
     val keepScreenOn by AppSettings.keepScreenOn.collectAsState()
+    val dark = LocalDarkTheme.current
     BackHandler(onBack = onBack)
 
     Scaffold(
@@ -63,6 +66,21 @@ fun SettingsScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             SectionLabel("Display", Modifier.padding(start = 4.dp, top = 4.dp))
+            AppCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    SettingText("Theme", null, Modifier.padding(vertical = 10.dp))
+                    // Until one is picked, the phone's dark mode decides, and that one shows as selected.
+                    ThemeChoice.entries.forEach { choice ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        ChoiceRow(
+                            title = choice.label,
+                            detail = null,
+                            selected = (choice == ThemeChoice.DARK) == dark,
+                            onClick = { AppSettings.setTheme(context, choice) },
+                        )
+                    }
+                }
+            }
             AppCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
                     SettingText("Color-blind mode", "Changes road and marker colors", Modifier.padding(vertical = 10.dp))

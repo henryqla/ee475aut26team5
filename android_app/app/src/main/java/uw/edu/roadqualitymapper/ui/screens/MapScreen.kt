@@ -25,6 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -35,9 +36,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -54,6 +55,7 @@ import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.RoundCap
 import com.google.android.gms.maps.model.StrokeStyle
 import com.google.android.gms.maps.model.StyleSpan
+import com.google.maps.android.compose.ComposeMapColorScheme
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.GoogleMapComposable
 import com.google.maps.android.compose.MapUiSettings
@@ -89,7 +91,10 @@ import uw.edu.roadqualitymapper.ui.eventMarkerHue
 import uw.edu.roadqualitymapper.ui.roughnessColor
 import uw.edu.roadqualitymapper.ui.shiftPathRight
 import uw.edu.roadqualitymapper.ui.shiftRight
+import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
+import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.roundToInt
 
 private val UW_CAMPUS = LatLng(47.6553, -122.3035)
 private const val DEFAULT_ZOOM = 14f
@@ -267,14 +272,21 @@ fun MapScreen(modifier: Modifier = Modifier) {
         cameraPositionState.animate(CameraUpdateFactory.newLatLngBounds(bounds, DRIVE_BOUNDS_PADDING_PX))
     }
 
-    // Reading the camera here redraws the lines as you zoom, so they keep a fixed width on the ground.
-    val camera = cameraPositionState.position
+    // Line widths depend on the zoom and, a little, on the latitude. Read through derivedStateOf,
+    // in steps, so the lines are redrawn only when the zoom changes by a step: panning or turning
+    // the map doesn't redraw this whole screen on every frame.
+    val zoom by remember {
+        derivedStateOf { floor(cameraPositionState.position.zoom / ZOOM_STEP) * ZOOM_STEP }
+    }
+    val latitude by remember {
+        derivedStateOf { cameraPositionState.position.target.latitude.roundToInt().toDouble() }
+    }
     val lineWidthPx = max(
-        metersToPixels(ROAD_LINE_WIDTH_M, camera.zoom, camera.target.latitude, density),
+        metersToPixels(ROAD_LINE_WIDTH_M, zoom, latitude, density),
         MIN_ROAD_LINE_WIDTH_DP * density,
     )
     // Road quality lines each have their own width on the ground (see lineWidthM).
-    val pixelsPerMeter = metersToPixels(1.0, camera.zoom, camera.target.latitude, density)
+    val pixelsPerMeter = metersToPixels(1.0, zoom, latitude, density)
     val minLineWidthPx = MIN_ROAD_LINE_WIDTH_DP * density
     Box(modifier.onSizeChanged { mapSize = it }) {
         GoogleMap(
@@ -282,9 +294,11 @@ fun MapScreen(modifier: Modifier = Modifier) {
             cameraPositionState = cameraPositionState,
             // Google's compass can only sit in the top-left; ours (below) sits above the zoom buttons.
             uiSettings = MapUiSettings(compassEnabled = false),
+            // Light or dark map with the app's theme (Settings > Theme), not the phone's.
+            mapColorScheme = if (LocalDarkTheme.current) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT,
             onMapLoaded = { mapLoaded = true },
         ) {
-            if (view == MapView.ROAD_QUALITY && camera.zoom >= MIN_ROAD_QUALITY_ZOOM) {
+            if (view == MapView.ROAD_QUALITY && zoom >= MIN_ROAD_QUALITY_ZOOM) {
                 pieces.forEach { piece ->
                     RoadPieceOnMap(piece, max((piece.lineWidthM() * pixelsPerMeter).toFloat(), minLineWidthPx), colorMode, onClick = {
                         status = "%.3f g · %d drive(s)".format(piece.roughness, piece.drives)
@@ -297,7 +311,7 @@ fun MapScreen(modifier: Modifier = Modifier) {
         }
 
         NorthButton(
-            bearing = camera.bearing,
+            bearing = { cameraPositionState.position.bearing },
             onClick = {
                 scope.launch {
                     val northUp = CameraPosition.Builder(cameraPositionState.position).bearing(0f).build()
@@ -342,11 +356,12 @@ private fun MapOverlayCard(modifier: Modifier = Modifier, content: @Composable (
 /** Smooth to rough, as a small color bar. */
 @Composable
 private fun MapLegend(colorMode: ColorMode, modifier: Modifier = Modifier) {
-    val steps = remember(colorMode) {
+    val dark = LocalDarkTheme.current
+    val steps = remember(colorMode, dark) {
         (0 until LEGEND_STEPS).map { i ->
             val roughness = RoughnessScale.SMOOTH +
                 (RoughnessScale.VERY_ROUGH - RoughnessScale.SMOOTH) * i / (LEGEND_STEPS - 1)
-            roughnessColor(roughness, colorMode)
+            roughnessColor(roughness, colorMode, dark)
         }
     }
     MapOverlayCard(modifier) {
@@ -372,6 +387,9 @@ private fun MapLegend(colorMode: ColorMode, modifier: Modifier = Modifier) {
 
 private const val LEGEND_STEPS = 12
 
+/** Zoom levels are rounded down to this step for line widths (about 7% wider per step). */
+private const val ZOOM_STEP = 0.1f
+
 // Lines the north button up above Google's +/− zoom buttons in the bottom-right corner.
 private val NORTH_BUTTON_END_PADDING = 12.dp
 private val NORTH_BUTTON_BOTTOM_PADDING = 112.dp
@@ -379,10 +397,11 @@ private val NORTH_BUTTON_SIZE = 40.dp
 
 /**
  * Turns the map back to north up. The needle turns with the map so it always points north, like
- * the compass in Google Maps; red is the north end.
+ * the compass in Google Maps; red is the north end. [bearing] is read while drawing, so turning
+ * the map only redraws the needle, not the screen.
  */
 @Composable
-private fun NorthButton(bearing: Float, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun NorthButton(bearing: () -> Float, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         onClick = onClick,
         shape = CircleShape,
@@ -393,7 +412,8 @@ private fun NorthButton(bearing: Float, onClick: () -> Unit, modifier: Modifier 
         Canvas(
             Modifier
                 .padding(8.dp)
-                .rotate(-bearing)   // the map turned clockwise by `bearing`, so north is that far counterclockwise
+                // The map turned clockwise by the bearing, so north is that far counterclockwise.
+                .graphicsLayer { rotationZ = -bearing() }
                 .semantics { contentDescription = "Turn map to north" }
         ) {
             val midX = size.width / 2
@@ -482,7 +502,7 @@ private fun RoadPieceOnMap(piece: RoadPiece, lineWidthPx: Float, colorMode: Colo
     if (points.size < 2) return
     Polyline(
         points = points,
-        color = roughnessColor(piece.roughness, colorMode),
+        color = roughnessColor(piece.roughness, colorMode, LocalDarkTheme.current),
         width = lineWidthPx,
         // Round ends and joints overlap the next piece a little, so the road looks continuous.
         startCap = RoundCap(),
@@ -573,8 +593,9 @@ private fun RoadLine(located: List<Segment>, lineWidthPx: Float, colorMode: Colo
     val shiftedPath = remember(path) { shiftPathRight(path, DIRECTION_OFFSET_M) }
     // Each piece between two points fades from the first point's color to the second's.
     // A span covers one piece by default, so there's one span per piece.
-    val spans = remember(located, colorMode) {
-        val colors = located.map { roughnessColor(it.rmsZ, colorMode).toArgb() }
+    val dark = LocalDarkTheme.current
+    val spans = remember(located, colorMode, dark) {
+        val colors = located.map { roughnessColor(it.rmsZ, colorMode, dark).toArgb() }
         (1 until colors.size).map { i ->
             StyleSpan(StrokeStyle.gradientBuilder(colors[i - 1], colors[i]).build())
         }

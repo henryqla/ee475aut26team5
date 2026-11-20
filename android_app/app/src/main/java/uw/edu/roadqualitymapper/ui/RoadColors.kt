@@ -29,12 +29,41 @@ private val ModerateYellow = HsvColor(hue = 47f, saturation = 0.90f, value = 0.9
 private val I5LightRed = HsvColor(hue = 3f, saturation = 0.74f, value = 0.91f)
 private val VeryRoughDarkRed = HsvColor(hue = 0f, saturation = 0.92f, value = 0.48f)
 
-/** The road color for [roughness] in the chosen color mode. */
-fun roughnessColor(roughness: Double, mode: ColorMode): Color = when (mode) {
-    ColorMode.OFF -> standardColor(roughness)
-    ColorMode.RED_GREEN -> blendStops(roughness, RedGreenSafeStops)
-    ColorMode.BLUE_YELLOW -> blendStops(roughness, BlueYellowSafeStops)
+/**
+ * The road color for [roughness] in the chosen color mode, on a light or [dark] map.
+ * On a light map the rough end gets darker; on a dark map, where dark red would disappear, it
+ * gets brighter and more vivid instead. Same order of colors either way.
+ */
+fun roughnessColor(roughness: Double, mode: ColorMode, dark: Boolean): Color = when (mode) {
+    ColorMode.OFF -> if (dark) blendStops(roughness, StandardDarkMapStops) else standardColor(roughness)
+    ColorMode.RED_GREEN -> blendStops(roughness, if (dark) RedGreenSafeDarkMapStops else RedGreenSafeStops)
+    ColorMode.BLUE_YELLOW -> blendStops(roughness, if (dark) BlueYellowSafeDarkMapStops else BlueYellowSafeStops)
 }
+
+/** Dark map, color-blind mode off: green, yellow, light red, then vivid red. */
+private val StandardDarkMapStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF34C77B),       // green
+    RoughnessScale.MODERATE to Color(0xFFFFD54A),     // yellow
+    RoughnessScale.I5 to Color(0xFFFF7A6B),           // light red
+    RoughnessScale.VERY_ROUGH to Color(0xFFFF2D55),   // vivid red
+)
+
+/** Dark map, red-green: lighter blues than on a light map, ending in a bright red-orange. */
+private val RedGreenSafeDarkMapStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF6FA8F5),       // blue
+    0.045 to Color(0xFFA7D3F0),                       // light blue
+    RoughnessScale.MODERATE to Color(0xFFFFD54A),     // yellow
+    RoughnessScale.I5 to Color(0xFFFF9E40),           // orange
+    RoughnessScale.VERY_ROUGH to Color(0xFFFF5A36),   // red-orange
+)
+
+/** Dark map, blue-yellow: green, salmon, red, then vivid red. */
+private val BlueYellowSafeDarkMapStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF2EC27E),       // green
+    RoughnessScale.MODERATE to Color(0xFFF7B09A),     // salmon
+    RoughnessScale.I5 to Color(0xFFF0605A),           // red
+    RoughnessScale.VERY_ROUGH to Color(0xFFFF2A55),   // vivid red
+)
 
 /**
  * For red-green color blindness (protanopia and deuteranopia both): blue for smooth, through

@@ -5,6 +5,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 // Fixed brand colors in both modes (not the phone's wallpaper colors), so the app looks the same
@@ -62,14 +64,22 @@ private val DarkColorScheme = darkColorScheme(
     onError = Color.Black,
 )
 
+/**
+ * Whether the app is in dark mode (Settings > Theme, or the phone's dark mode until one is picked).
+ * Use this instead of isSystemInDarkTheme(), which only knows the phone's setting.
+ */
+val LocalDarkTheme = staticCompositionLocalOf { false }
+
 @Composable
 fun RoadQualityMapperTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
-    MaterialTheme(
-        colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
-        typography = Typography,
-        content = content
-    )
+    CompositionLocalProvider(LocalDarkTheme provides darkTheme) {
+        MaterialTheme(
+            colorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
+            typography = Typography,
+            content = content
+        )
+    }
 }

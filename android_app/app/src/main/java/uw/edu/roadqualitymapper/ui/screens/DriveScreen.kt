@@ -8,7 +8,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,6 +46,7 @@ import uw.edu.roadqualitymapper.ui.components.StatTile
 import uw.edu.roadqualitymapper.ui.components.StatusChip
 import uw.edu.roadqualitymapper.ui.eventMarkerHue
 import uw.edu.roadqualitymapper.ui.roughnessColor
+import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
 import uw.edu.roadqualitymapper.ui.theme.StatusAmber
 import uw.edu.roadqualitymapper.ui.theme.StatusGray
 import uw.edu.roadqualitymapper.ui.theme.StatusGreen
@@ -232,7 +232,7 @@ private fun TripStats(status: RecordingStatus) {
                 label = "Roughness now",
                 value = roughness?.let { "%.3f".format(it) } ?: "—",
                 unit = roughness?.let { "g" },
-                swatch = roughness?.let { roughnessColor(it, colorMode) },
+                swatch = roughness?.let { roughnessColor(it, colorMode, LocalDarkTheme.current) },
                 modifier = Modifier.weight(1f),
             )
             val accuracy = status.lastFix?.accuracyM
@@ -328,7 +328,7 @@ private fun LabelButton(
     onClick: () -> Unit,
 ) {
     val hue = eventMarkerHue(eventClass, colorMode)
-    val dark = isSystemInDarkTheme()
+    val dark = LocalDarkTheme.current
     val container = if (dark) Color.hsv(hue, 0.45f, 0.30f) else Color.hsv(hue, 0.15f, 0.98f)
     val content = if (dark) Color.hsv(hue, 0.30f, 0.95f) else Color.hsv(hue, 0.70f, 0.50f)
     Surface(
