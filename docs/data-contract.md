@@ -413,31 +413,23 @@ the app can't delete anything.
 
 **Map functions** (Ben writes them). Map logic lives in SQL functions, so the app and the web map
 always show the same thing. The app calls them through the API (supabase-kt `rpc(...)`).
-Both take the same parameters: `south`, `west`, `north`, `east` (the map's visible box, degrees),
-`include_fake` (default `false`: only `REAL` data), and `vehicle_id` (default `null`: all
-vehicles; e.g. `"camry"` for one vehicle only). `road_quality_in_area` also takes `cell_m` (see
-below). Result columns are confirmed with Scott (Oct 2026).
+Both take the same parameters (all but the box are optional):
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `south`, `west`, `north`, `east` | `double precision` | — | The map's visible box, degrees |
+| `include_fake` | `boolean` | `false` | `false`: only `REAL` data |
+| `vehicle_id` | `text` | `null` | `null`: all vehicles; e.g. `"camry"` for one vehicle only |
+| `since_ms` | `bigint` | `null` | Only drives whose trip `start_time` ≥ this (epoch ms); `null`: no lower limit |
+| `until_ms` | `bigint` | `null` | Only drives whose trip `start_time` < this (epoch ms); `null`: no upper limit |
+
+`road_quality_snapped` also takes `piece_m` (see below). The time filter keeps or drops **whole
+trips** by their `start_time`, so a drive crossing the cutoff is never cut in half; e.g. to show
+only test drives from 19 Nov 2026 on (Seattle time), send `since_ms = 1795075200000`. The app
+works out the epoch ms from the date the user picks, in the phone's time zone.
+Result columns are confirmed with Scott (Oct 2026).
 Like table reads, a call returns at most 1000 rows; results come in a fixed order, so the app can
 read further pages with `range(...)`, the same way it pages segments.
-- `road_quality_in_area(...)`: segments combined per small area **and per direction of travel**,
-  with vehicle/speed normalization applied. Each drive counts once per area, then the median over
-  drives, so one odd drive doesn't skew a road. Areas are grid cells fixed to the globe (panning
-  the map doesn't regroup them), `cell_m` metres on a side (default `15`, kept between 5 and
-  1000, so the app can ask for bigger cells when zoomed out), and directions are 8 sectors of 45°.
-  Each segment counts along the **stretch of road it covered**, not only at its midpoint: from
-  halfway to the drive's previous segment to halfway to its next one (speed × duration / 2 along
-  the heading at the ends of a drive and across GPS gaps). So every area a drive crossed gets a
-  row, even at highway speed, where segments are farther apart than a cell.
-  Result, one row per area and direction:
-
-  | Column | Type | Meaning |
-  |---|---|---|
-  | `lat`, `lon` | `double precision` | Middle of the road driven inside the area (average over drives) |
-  | `heading_deg` | `real` | Average direction of travel |
-  | `roughness` | `real` | g; median over drives of the normalized `rms_z` |
-  | `drives` | `integer` | Drives that contributed |
-  | `length_m` | `real` | Length of road driven inside the area (longest over drives, at most the cell's diagonal). Drawn as a line this long centred on `lat`, `lon` along `heading_deg`, the rows of a road meet end to end |
-
 - `events_in_area(...)`: events merged into one when they are within **10 m** of each other, have
   the same class, and headings within ~45° (so potholes on opposite sides of a road stay
   separate). The class is `user_label` if set (except `UNKNOWN`, see General rules), otherwise
@@ -456,24 +448,27 @@ read further pages with `range(...)`, the same way it pages segments.
   The map shows "hit by `hits` of `passes` drives". This is a different shape from `RoadEvent`,
   so the app will need a small model for it.
 
-- `road_quality_snapped(...)` — **proposed by Ben (Nov 2026), waiting for Scott's OK.** Will
-  replace `road_quality_in_area` in the Road quality view; `road_quality_in_area` stays unchanged
-  until the app has switched. Drives are snapped to OpenStreetMap roads on the server (Valhalla
+- `road_quality_snapped(...)`: road quality for the Road quality view (it replaced the old
+  grid-cell function `road_quality_in_area`, removed Nov 2026). Drives are snapped to
+  OpenStreetMap roads on the server (Valhalla
   map matching, run on the laptop once a trip has its `end_time`), so lines lie on the road and
   follow its curves, and every drive over the same piece of road and direction is combined.
-  Takes the same parameters as the other two, plus `piece_m` (default `15`; rounded to a multiple
-  of 15, at most 3000) instead of `cell_m`, so the app can ask for longer pieces when zoomed out.
+  Takes the parameters above plus `piece_m` (default `15`; rounded to a multiple of 15, at most
+  3000), so the app can ask for longer pieces when zoomed out.
   - **ROAD** rows: one per piece of road and **direction of travel** (not per lane). Pieces are
     15 m (or `piece_m`) stretches of an OSM road. Each drive counts once per piece.
   - **CELL** rows: everything not on a matched road (parking lots, roads missing from OSM,
-    trips not matched yet), with the cell method of `road_quality_in_area`, as a straight
-    two-point line. A trip shows as CELL rows right after upload and switches to ROAD rows
+    trips not matched yet), as a straight two-point line. Grouped by grid cells fixed to the
+    globe (`piece_m` on a side, kept between 15 and 1000) and 8 direction sectors of 45°; each
+    segment counts along the stretch of road it covered (halfway to the drive's previous and
+    next segments), so a fast drive leaves no gaps. A trip shows as CELL rows right after
+    upload and switches to ROAD rows
     within seconds of the app setting `end_time` (or 30 min after its last segment if
     `end_time` never arrives).
   - `roughness` is the **age-weighted** median over drives of `rms_z` × `scale_factor`: a drive
     14 days old counts half as much as one from today, 28 days a quarter, so repairs and new
     damage show up.
-  - Events are not affected: `events_in_area` stays as it is.
+  - Events are not snapped to roads: `events_in_area` merges them by distance, as before.
 
   Result, one row per piece, in a fixed order (by `piece_id`) for paging:
 
@@ -501,7 +496,7 @@ read further pages with `range(...)`, the same way it pages segments.
   its lanes, because GPS can't tell which lane a drive was in.
   The map must show "© OpenStreetMap contributors" (ODbL licence).
 - Directions are compared around the circle: 350° and 10° count as the same direction.
-- Rows with no heading (car barely moving) are left out of `road_quality_in_area`; events with no
+- Segments with no heading (car barely moving) are left out of CELL rows; events with no
   heading are merged by distance and class only. Rows with no location are stored but not shown.
 - 10 m is a starting value: GPS is typically off by 3–5 m per fix. Measure the real spread by
   driving over the same speed bump ~10 times, and adjust.
@@ -595,3 +590,4 @@ Earlier v0.3 changes:
 - Column types, primary keys, and app-made UUIDs for the tables (§7).
 - `fw` starting with `fake` marks a test device; its trips are `FAKE_DEVICE` (§4.3).
 - `road_quality_in_area`: each segment counts along the stretch of road it drove, so pieces meet even at highway speed; `length_m` is now the road driven inside the piece (no longer always 15); new optional `cell_m` piece size (default 15, between 5 and 1000) (§7).
+- Map functions: `road_quality_snapped` and `events_in_area` take optional `since_ms` / `until_ms` (epoch ms) to show only drives whose trip started in that range, e.g. recent test drives; old `road_quality_in_area` removed now that the app uses `road_quality_snapped` (§7).

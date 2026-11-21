@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# check_map_functions.sh - do road_quality_in_area and events_in_area (contract §7) return
-# what the contract says? Uploads five FAKE_DEVICE test drives in the middle of the Pacific (so no
-# real data is nearby), calls both functions as the web map would (not signed in), then deletes
-# the drives and the test user with the secret key. Prints PASS/FAIL only; never prints a key.
+# check_map_functions.sh - does events_in_area (contract §7) return what the contract says,
+# including the since_ms / until_ms time filter? Uploads four FAKE_DEVICE test drives in the
+# middle of the Pacific (so no real data is nearby), calls the function as the web map would
+# (not signed in), then deletes the drives and the test user with the secret key. Also checks
+# that the old road_quality_in_area is gone. Prints PASS/FAIL only; never prints a key.
+# road_quality_snapped is checked by check_snapped_map.sh (it needs the road matcher).
 #
 # Run on the laptop, with Supabase started and all migrations applied (supabase migration up):
 #     cd ~/ee475aut26team5/Backend && bash checks/check_map_functions.sh
@@ -30,21 +32,14 @@ req() {
     local out; out=$(curl -s -m 10 -w $'\n%{http_code}' -X "$1" "$API$2" "${headers[@]}")
     CODE=${out##*$'\n'}; BODY=${out%$'\n'*}
 }
-allowed() { [[ $CODE == 2* ]] && pass "$1" || fail "$1 (got $CODE: ${BODY:0:300})"; }
 
 # expect DESCRIPTION PYTHON_EXPRESSION: checks the rows in BODY. In the expression, `rows` is the
-# list of result rows, `dir(h, d)` is true when heading h is within 20° of d, and `gapless(rs)` is
-# true when rows rs (all on one north-south road) drawn as length_m long pieces centred on
-# (lat, lon) meet end to end (3 m slack: pieces are measured in steps of up to cell_m / 4).
+# list of result rows and `dir(h, d)` is true when heading h is within 20° of d.
 expect() {
     local result
     result=$(printf '%s' "$BODY" | python3 -c '
 import json, sys
 def dir(h, d): return h is not None and min(abs(h - d), 360 - abs(h - d)) <= 20
-def gapless(rs):
-    rs = sorted(rs, key=lambda r: r["lat"])
-    return all((b["lat"] - a["lat"]) * 111195 <= (a["length_m"] + b["length_m"]) / 2 + 3
-               for a, b in zip(rs, rs[1:]))
 rows = json.load(sys.stdin)
 print("yes" if eval(sys.argv[1]) else "no")' "$2" 2>/dev/null)
     [[ $result == yes ]] && pass "$1" || fail "$1 (got $CODE: ${BODY:0:300})"
@@ -61,76 +56,48 @@ print(r.get("access_token", ""), (r.get("user") or {}).get("id", ""))' 2>/dev/nu
 
 uuid() { cat /proc/sys/kernel/random/uuid; }
 NOW=$(date +%s%3N)
+OLD=$((NOW - 2 * 86400000))     # two days ago
+CUT=$((NOW - 3600000))          # time-filter cutoff: an hour ago, between OLD and NOW
 read -r PHONE USER_ID <<<"$(sign_in)"
 [[ -z $PHONE ]] && { echo "${RED}Anonymous sign-in failed.${RESET} Check enable_anonymous_sign_ins = true and restart."; exit 1; }
 
 # The test road: due north from (10.0, -150.0), 6 segments of 1 s at 10 m/s, 10 m apart.
-# A, B, D drive north (heading 0) with roughness 0.1, 0.2, 0.9 (median 0.2, average 0.4);
-# C drives the same road south (heading 180).
-# E drives a second road 1.1 km further north at 27 m/s, so its segments are 27 m apart: farther
-# than a 15 m cell, which left gaps when segments only counted at their midpoint.
-A=$(uuid); B=$(uuid); C=$(uuid); D=$(uuid); E=$(uuid)
+# A, B (today) and D (two days ago) drive north (heading 0); C (today) drives it south.
+A=$(uuid); B=$(uuid); C=$(uuid); D=$(uuid)
 BOX='"south":9.999,"west":-150.001,"north":10.001,"east":-149.999'
-FAST_BOX='"south":10.009,"west":-150.001,"north":10.012,"east":-149.999'
 
-trip() {      # $1 = id
-    echo "{\"id\":\"$1\",\"vehicle_id\":\"camry\",\"start_time\":$NOW,\"source\":\"FAKE_DEVICE\"}"
+trip() {      # $1 = id, $2 = start time
+    echo "{\"id\":\"$1\",\"vehicle_id\":\"camry\",\"start_time\":$2,\"source\":\"FAKE_DEVICE\"}"
 }
-segments() {  # $1 = trip id, $2 = heading, $3 = rms_z, $4 = speed (m/s, default 10), $5 = start lat (default 10)
-    local rows=() i speed=${4:-10} lat0=${5:-10}
+segments() {  # $1 = trip id, $2 = start time, $3 = heading
+    local rows=() i
     for i in 0 1 2 3 4 5; do
-        rows+=("{\"trip_id\":\"$1\",\"t_start\":$((NOW + i * 1000)),\"t_end\":$((NOW + i * 1000 + 1000)),\"lat\":$(awk "BEGIN{printf \"%.7f\", $lat0 + $i * $speed / 111195}"),\"lon\":-150.0,\"speed_mps\":$speed,\"gps_accuracy_m\":4,\"heading_deg\":$2,\"rms_z\":$3,\"peak_z\":0.5,\"roll_rms\":1,\"pitch_rms\":1,\"source\":\"FAKE_DEVICE\"}")
+        rows+=("{\"trip_id\":\"$1\",\"t_start\":$(($2 + i * 1000)),\"t_end\":$(($2 + i * 1000 + 1000)),\"lat\":$(awk "BEGIN{printf \"%.7f\", 10 + $i * 10 / 111195}"),\"lon\":-150.0,\"speed_mps\":10,\"gps_accuracy_m\":4,\"heading_deg\":$3,\"rms_z\":0.2,\"peak_z\":0.5,\"roll_rms\":1,\"pitch_rms\":1,\"source\":\"FAKE_DEVICE\"}")
     done
     local IFS=,; echo "[${rows[*]}]"
 }
-event() {     # $1 = trip id, $2 = meters north of the start, $3 = heading, $4 = class, $5 = user_label, $6 = peak_z
-    echo "{\"id\":\"$(uuid)\",\"trip_id\":\"$1\",\"vehicle_id\":\"camry\",\"t\":$((NOW + 2500)),\"lat\":$(awk "BEGIN{printf \"%.7f\", 10 + $2 / 111195}"),\"lon\":-150.0,\"speed_mps\":10,\"gps_accuracy_m\":4,\"heading_deg\":$3,\"event_class\":\"$4\",\"user_label\":$5,\"peak_z\":$6,\"roll_peak\":40,\"pitch_peak\":10,\"conf\":0.7,\"source\":\"FAKE_DEVICE\"}"
+event() {     # $1 = trip id, $2 = start time, $3 = meters north of the start, $4 = heading, $5 = class, $6 = user_label, $7 = peak_z
+    echo "{\"id\":\"$(uuid)\",\"trip_id\":\"$1\",\"vehicle_id\":\"camry\",\"t\":$(($2 + 2500)),\"lat\":$(awk "BEGIN{printf \"%.7f\", 10 + $3 / 111195}"),\"lon\":-150.0,\"speed_mps\":10,\"gps_accuracy_m\":4,\"heading_deg\":$4,\"event_class\":\"$5\",\"user_label\":$6,\"peak_z\":$7,\"roll_peak\":40,\"pitch_peak\":10,\"conf\":0.7,\"source\":\"FAKE_DEVICE\"}"
 }
 
 echo "${BOLD}1. Upload test drives${RESET}"
 ok=1
-for t in "$A 0 0.1" "$B 0 0.2" "$D 0 0.9" "$C 180 0.5" "$E 0 0.3 27 10.01"; do
+for t in "$A $NOW 0" "$B $NOW 0" "$D $OLD 0" "$C $NOW 180"; do
     set -- $t
-    req POST /rest/v1/trips "$PHONE" "$(trip "$1")";             [[ $CODE == 2* ]] || ok=0
+    req POST /rest/v1/trips "$PHONE" "$(trip "$1" "$2")";        [[ $CODE == 2* ]] || ok=0
     req POST /rest/v1/segments "$PHONE" "$(segments "$@")";      [[ $CODE == 2* ]] || ok=0
 done
 # A and B hit the same pothole 4 m apart (B labels it UNKNOWN = not sure, so it stays a POTHOLE);
 # C hits it going the other way; D's POTHOLE 15 m further on is relabelled SPEED_BUMP.
-req POST /rest/v1/events "$PHONE" "[$(event "$A" 25 0 POTHOLE null 1.5),$(event "$B" 29 3 POTHOLE '"UNKNOWN"' 2.5),$(event "$C" 25 180 POTHOLE null 1.8),$(event "$D" 40 0 POTHOLE '"SPEED_BUMP"' 1.2)]"
+req POST /rest/v1/events "$PHONE" "[$(event "$A" "$NOW" 25 0 POTHOLE null 1.5),$(event "$B" "$NOW" 29 3 POTHOLE '"UNKNOWN"' 2.5),$(event "$C" "$NOW" 25 180 POTHOLE null 1.8),$(event "$D" "$OLD" 40 0 POTHOLE '"SPEED_BUMP"' 1.2)]"
 [[ $CODE == 2* ]] || ok=0
-(( ok )) && pass "5 trips, 30 segments, 4 events uploaded" || fail "upload failed (last: $CODE: ${BODY:0:300})"
+(( ok )) && pass "4 trips, 24 segments, 4 events uploaded" || fail "upload failed (last: $CODE: ${BODY:0:300})"
 
-echo "${BOLD}2. road_quality_in_area${RESET}"
-req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX}"
-expect "fake data is hidden by default" 'rows == []'
-req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true}"
-expect "the web map (not signed in) can call it" 'len(rows) > 0'
-expect "north rows: 3 drives, roughness is the median (0.2), not the average" \
-    'any(dir(r["heading_deg"], 0) for r in rows) and all(r["drives"] == 3 and abs(r["roughness"] - 0.2) < 0.01 for r in rows if dir(r["heading_deg"], 0))'
-expect "south rows are kept apart from north: 1 drive each" \
-    'any(dir(r["heading_deg"], 180) for r in rows) and all(r["drives"] == 1 for r in rows if dir(r["heading_deg"], 180))'
-expect "north rows cover the whole 60 m driven, with no gaps (length_m adds up to 60)" \
-    'gapless([r for r in rows if dir(r["heading_deg"], 0)]) and abs(sum(r["length_m"] for r in rows if dir(r["heading_deg"], 0)) - 60) < 1'
-expect "every length_m is between 0 and the cell diagonal (21.2 m)" \
-    'all(0 <= r["length_m"] <= 21.22 for r in rows)'
-req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true,\"vehicle_id\":\"truck\"}"
-expect "vehicle_id filter: truck sees none of the camry rows" 'rows == []'
-req POST /rest/v1/rpc/road_quality_in_area "" "{$FAST_BOX,\"include_fake\":true}"
-expect "27 m/s drive (segments 27 m apart): every 15 m cell gets a row (11+), no gaps, 162 m in all" \
-    'len(rows) >= 11 and gapless(rows) and abs(sum(r["length_m"] for r in rows) - 162) < 1'
-req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true,\"cell_m\":50}"
-expect "cell_m 50: the 60 m north road is 2-3 rows, longer than 15 m" \
-    '2 <= len([r for r in rows if dir(r["heading_deg"], 0)]) <= 3 and max(r["length_m"] for r in rows) > 15'
-req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true,\"cell_m\":5}"
-n5=$(printf '%s' "$BODY" | python3 -c 'import json, sys; print(len(json.load(sys.stdin)))' 2>/dev/null)
-req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true,\"cell_m\":1}"
-expect "cell_m below 5 is treated as 5 (same rows)" "len(rows) == ${n5:--1}"
-
-echo "${BOLD}3. events_in_area${RESET}"
+echo "${BOLD}2. events_in_area${RESET}"
 req POST /rest/v1/rpc/events_in_area "" "{$BOX}"
 expect "fake data is hidden by default" 'rows == []'
 req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true}"
-expect "3 spots: pothole north, pothole south, speed bump" 'len(rows) == 3'
+expect "the web map (not signed in) can call it: 3 spots (pothole north, pothole south, speed bump)" 'len(rows) == 3'
 expect "north pothole: A and B merged (UNKNOWN label = no change), 2 hits of 3 passes, max_peak_z 2.5" \
     'any(r["event_class"] == "POTHOLE" and dir(r["heading_deg"], 0) and r["hits"] == 2 and r["passes"] == 3 and abs(r["max_peak_z"] - 2.5) < 0.01 for r in rows)'
 expect "south pothole is separate: 1 hit of 1 pass" \
@@ -139,10 +106,33 @@ expect "SPEED_BUMP label overrides POTHOLE: 1 hit of 3 passes" \
     'any(r["event_class"] == "SPEED_BUMP" and r["hits"] == 1 and r["passes"] == 3 for r in rows)'
 req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"vehicle_id\":\"camry\"}"
 expect "vehicle_id filter: camry still sees all 3" 'len(rows) == 3'
+req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"vehicle_id\":\"truck\"}"
+expect "vehicle_id filter: truck sees none" 'rows == []'
 
-echo "${BOLD}4. Cleanup${RESET}"
-code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X DELETE "$API/rest/v1/trips?id=in.($A,$B,$C,$D,$E)" -H "apikey: $SECRET")
-[[ $code == 2* ]] && pass "test trips deleted with the secret key" || fail "couldn't delete test trips ($code); delete trips $A $B $C $D $E in Studio"
+echo "${BOLD}3. Time filter (since_ms / until_ms, by trip start_time)${RESET}"
+req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"since_ms\":$CUT}"
+expect "since an hour ago: D's speed bump is gone (2 spots left)" \
+    'len(rows) == 2 and not any(r["event_class"] == "SPEED_BUMP" for r in rows)'
+expect "since an hour ago: north pothole is 2 hits of 2 passes (D's old drive no longer passes)" \
+    'any(r["event_class"] == "POTHOLE" and dir(r["heading_deg"], 0) and r["hits"] == 2 and r["passes"] == 2 for r in rows)'
+req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"until_ms\":$CUT}"
+expect "until an hour ago: only D's speed bump, 1 hit of 1 pass" \
+    'len(rows) == 1 and rows[0]["event_class"] == "SPEED_BUMP" and rows[0]["hits"] == 1 and rows[0]["passes"] == 1'
+req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"since_ms\":$OLD,\"until_ms\":$((OLD + 1))}"
+expect "since_ms is inclusive, until_ms exclusive (a 1 ms window on D's start finds it)" \
+    'len(rows) == 1 and rows[0]["event_class"] == "SPEED_BUMP"'
+req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"since_ms\":$((NOW + 3600000))}"
+expect "since a time after every drive: nothing" 'rows == []'
+req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"since_ms\":null,\"until_ms\":null}"
+expect "since_ms / until_ms sent as null: same as not sent (3 spots)" 'len(rows) == 3'
+
+echo "${BOLD}4. road_quality_in_area is gone${RESET}"
+req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true}"
+[[ $CODE == 404 ]] && pass "calling it returns 404 (function not found)" || fail "expected 404, got $CODE: ${BODY:0:300}"
+
+echo "${BOLD}5. Cleanup${RESET}"
+code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X DELETE "$API/rest/v1/trips?id=in.($A,$B,$C,$D)" -H "apikey: $SECRET")
+[[ $code == 2* ]] && pass "test trips deleted with the secret key" || fail "couldn't delete test trips ($code); delete trips $A $B $C $D in Studio"
 curl -s -m 5 -o /dev/null -X DELETE "$API/auth/v1/admin/users/$USER_ID" -H "apikey: $SECRET"
 
 echo

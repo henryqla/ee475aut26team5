@@ -37,7 +37,7 @@ Pieces:
   - Map function:    road_quality_snapped. 15 m pieces per OSM road and direction, age-weighted
                      median roughness (14-day half-life), longer pieces with piece_m when zoomed
                      out. Unmatched segments come back with the cell method (kind CELL).
-  - Unchanged:       road_quality_in_area (until the app switches), events_in_area, all tables
+  - Unchanged:       events_in_area, all tables
                      the app writes to.
 
 Disk and memory: the Washington extract is a few hundred MB; Valhalla's tiles a few GB.

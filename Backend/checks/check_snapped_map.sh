@@ -190,7 +190,23 @@ expect "vehicle_id filter: truck sees none of the camry rows" 'rows == []'
 req POST /rest/v1/rpc/road_quality_snapped "" "{$PAC_BOX,\"include_fake\":true}"
 expect "Pacific drive (no road): still shown, as CELL rows" 'len(cell) > 0 and road == [] and all(r["drives"] == 1 and r["lanes_dir"] is None for r in cell)'
 
-echo "${BOLD}5. Cleanup${RESET}"
+echo "${BOLD}5. Time filter (since_ms / until_ms, by trip start_time)${RESET}"
+CUT=$((NOW - 86400000))   # a day ago: A, B (28 days old) before it; C, D, P after
+req POST /rest/v1/rpc/road_quality_snapped "" "{$BOX,\"include_fake\":true,\"since_ms\":$CUT}"
+expect "since a day ago, along the road: only D (1 drive, 0.9)" \
+    'fwd(road) and all(r["drives"] == 1 and abs(r["roughness"] - 0.9) < 0.01 for r in fwd(road))'
+expect "since a day ago, against the road: C still there" 'len(back(road)) > 0'
+req POST /rest/v1/rpc/road_quality_snapped "" "{$BOX,\"include_fake\":true,\"until_ms\":$CUT}"
+expect "until a day ago: only A and B along the road (2 drives, median 0.1), nothing against it" \
+    'fwd(road) and back(road) == [] and all(r["drives"] == 2 and abs(r["roughness"] - 0.1) < 0.01 for r in fwd(road))'
+req POST /rest/v1/rpc/road_quality_snapped "" "{$BOX,\"include_fake\":true,\"since_ms\":$((NOW + 3600000))}"
+expect "since a time after every drive: nothing" 'rows == []'
+req POST /rest/v1/rpc/road_quality_snapped "" "{$PAC_BOX,\"include_fake\":true,\"since_ms\":$CUT}"
+expect "CELL rows follow the filter too: Pacific drive shown since a day ago" 'len(cell) > 0'
+req POST /rest/v1/rpc/road_quality_snapped "" "{$PAC_BOX,\"include_fake\":true,\"until_ms\":$CUT}"
+expect "CELL rows follow the filter too: Pacific drive hidden until a day ago" 'rows == []'
+
+echo "${BOLD}6. Cleanup${RESET}"
 code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X DELETE "$API/rest/v1/trips?id=in.($A,$B,$C,$D,$P)" -H "apikey: $SECRET")
 [[ $code == 2* ]] && pass "test trips deleted with the secret key" || fail "couldn't delete test trips ($code); delete trips $A $B $C $D $P in Studio"
 [[ $(q "select count(*) from roads.drive_pieces where trip_id in ($IDS)") == 0 ]] \
