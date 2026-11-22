@@ -19,10 +19,15 @@ interface TripRepository {
     suspend fun eventsForTrip(tripId: String): List<RoadEvent>
 
     // The map: every drive in [area] combined. [includeFake] also counts FAKE_ASSET / FAKE_DEVICE
-    // data; [vehicleId] limits it to one vehicle (null = all of them).
+    // data; [vehicleId] limits it to one vehicle (null = all of them); [sinceMs] to trips that
+    // started at or after that time (epoch ms; null = all of them).
     /** Road pieces snapped to OpenStreetMap roads, [pieceM] meters long (longer when zoomed out). */
-    suspend fun roadQuality(area: BoundingBox, pieceM: Int, includeFake: Boolean, vehicleId: String? = null): List<RoadPiece>
-    suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String? = null): List<EventSpot>
+    suspend fun roadQuality(
+        area: BoundingBox, pieceM: Int, includeFake: Boolean, vehicleId: String? = null, sinceMs: Long? = null,
+    ): List<RoadPiece>
+    suspend fun eventsInArea(
+        area: BoundingBox, includeFake: Boolean, vehicleId: String? = null, sinceMs: Long? = null,
+    ): List<EventSpot>
 
     suspend fun vehicles(): List<Vehicle>
 }

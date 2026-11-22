@@ -64,13 +64,14 @@ import com.google.maps.android.compose.Polyline
 import com.google.maps.android.compose.rememberCameraPositionState
 import com.google.maps.android.compose.rememberUpdatedMarkerState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import uw.edu.roadqualitymapper.BuildConfig
 import uw.edu.roadqualitymapper.data.AppSettings
-import uw.edu.roadqualitymapper.data.BoundingBox
 import uw.edu.roadqualitymapper.data.ColorMode
 import uw.edu.roadqualitymapper.data.Drive
 import uw.edu.roadqualitymapper.data.EventClass
@@ -83,7 +84,10 @@ import uw.edu.roadqualitymapper.data.downloadDrives
 import uw.edu.roadqualitymapper.data.shortMessage
 import uw.edu.roadqualitymapper.data.supabase.SupabaseConnection
 import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
+import uw.edu.roadqualitymapper.ui.RoadQualityTiles
+import uw.edu.roadqualitymapper.ui.RoadTile
 import uw.edu.roadqualitymapper.ui.RoughnessScale
+import uw.edu.roadqualitymapper.ui.TileData
 import uw.edu.roadqualitymapper.ui.boxAround
 import uw.edu.roadqualitymapper.ui.headingDirection
 import uw.edu.roadqualitymapper.ui.metersToPixels
@@ -91,6 +95,8 @@ import uw.edu.roadqualitymapper.ui.eventMarkerHue
 import uw.edu.roadqualitymapper.ui.roughnessColor
 import uw.edu.roadqualitymapper.ui.shiftPathRight
 import uw.edu.roadqualitymapper.ui.shiftRight
+import uw.edu.roadqualitymapper.ui.tilesCovering
+import uw.edu.roadqualitymapper.ui.zoomBand
 import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
 import kotlin.math.floor
 import kotlin.math.max
@@ -101,17 +107,20 @@ private const val DEFAULT_ZOOM = 14f
 private const val DRIVE_BOUNDS_PADDING_PX = 120
 
 /**
- * Zoomed out further than this, the screen covers too much road to load. At zoom 13 a phone
- * screen shows about 5 × 10 km.
+ * Road lines are shown at every zoom, so you can always see where there's data. Pothole and
+ * speed bump pins only from this zoom in: further out they'd pile on top of each other. At zoom
+ * 13 a phone screen shows about 5 × 10 km.
  */
-private const val MIN_ROAD_QUALITY_ZOOM = 13f
+private const val MIN_EVENT_MARKER_ZOOM = 13f
 
 /**
- * Road quality is loaded for more than the screen shows: twice as far from the center as the
- * screen's edge, and at least this far. Panning and zooming within that need no new load.
+ * The map only shows trips that started on or after this (epoch ms): 19 Nov 2026, Seattle time,
+ * the first drive with the board firmly mounted. Older drives stay in the database.
  */
-private const val MIN_LOAD_RADIUS_M = 1_000.0
-private const val LOAD_RADIUS_PER_SCREEN = 2.0
+private const val MAP_DRIVES_SINCE_MS = 1_795_075_200_000L
+
+/** Tiles loading at once (see RoadQualityTiles.kt). The rest wait their turn, the screen's first. */
+private const val MAX_PARALLEL_TILE_LOADS = 4
 
 /** Trips line width on the ground, about one direction's lanes on a city street. */
 private const val ROAD_LINE_WIDTH_M = 5.0
@@ -144,31 +153,10 @@ private const val MIN_ROAD_LINE_WIDTH_DP = 4f
  */
 private const val DIRECTION_OFFSET_M = 0.0
 
-/**
- * Road quality piece length asked for at each zoom level: longer pieces when zoomed out, so a
- * big area loads fewer rows. Below MIN_ROAD_QUALITY_ZOOM nothing is loaded.
- */
-private fun pieceLengthM(zoom: Float): Int = when {
-    zoom >= 15f -> 15
-    zoom >= 14f -> 60
-    else -> 240
-}
-
 /** What the map shows. Release builds always show Road quality. */
 private enum class MapView(val label: String) {
     ROAD_QUALITY("Road quality"),   // every drive combined, from Ben's map functions
     TRIPS("Trips"),                 // each trip drawn on its own, from Supabase
-}
-
-/**
- * The last road quality load, kept while the app is open so switching tabs shows it again at once
- * instead of loading from scratch.
- */
-private object RoadQualityCache {
-    var area: BoundingBox? = null
-    var pieceM = 0
-    var pieces = emptyList<RoadPiece>()
-    var spots = emptyList<EventSpot>()
 }
 
 @Composable
@@ -178,8 +166,8 @@ fun MapScreen(modifier: Modifier = Modifier) {
 
     var view by rememberSaveable { mutableStateOf(MapView.ROAD_QUALITY) }
     var drives by remember { mutableStateOf(emptyList<Drive>()) }                     // Trips
-    var pieces by remember { mutableStateOf(RoadQualityCache.pieces) }                // Road quality
-    var spots by remember { mutableStateOf(RoadQualityCache.spots) }                  // Road quality
+    var pieces by remember { mutableStateOf(emptyList<RoadPiece>()) }                  // Road quality
+    var spots by remember { mutableStateOf(emptyList<EventSpot>()) }                   // Road quality
     var status by remember { mutableStateOf("") }
 
     var mapLoaded by remember { mutableStateOf(false) }
@@ -210,54 +198,84 @@ fun MapScreen(modifier: Modifier = Modifier) {
         }
     }
 
-    // Road quality: each time the map stops moving, load the area around it, unless the last load
-    // already covers the screen. Starts before the map has finished drawing, so both happen at once.
-    // collectLatest drops a load that's still running when the map moves again.
+    // Road quality, in tiles (RoadQualityTiles.kt). Each time the map stops moving: show the tiles
+    // already loaded around the screen, then load the missing ones, the screen's first, then a
+    // ring around it. A tile that has started loading always finishes (it's kept for later);
+    // tiles still waiting their turn are dropped if the map has moved away from them.
+    // Starts before the map has finished drawing, so both happen at once.
     LaunchedEffect(view, mapSize) {
         if (view != MapView.ROAD_QUALITY || mapSize == IntSize.Zero) return@LaunchedEffect
         if (repository == null) {
             status = NOT_CONFIGURED
             return@LaunchedEffect
         }
-        snapshotFlow { cameraPositionState.isMoving }.collectLatest { moving ->
-            if (moving) return@collectLatest
+        val loads = this
+        val requestSlots = Semaphore(MAX_PARALLEL_TILE_LOADS)
+        val queued = HashMap<RoadTile, Job>()    // waiting for a request slot
+        val loading = HashSet<RoadTile>()        // request sent
+        var lastError: String? = null
+
+        /** The screen's tiles, and the ring of tiles around them. */
+        fun wantedTiles(): Pair<List<RoadTile>, List<RoadTile>> {
             val camera = cameraPositionState.position
-            if (camera.zoom < MIN_ROAD_QUALITY_ZOOM) {
-                status = "Zoom in to see roads"
-                return@collectLatest
-            }
+            val band = zoomBand(camera.zoom)
             val screenRadiusM = max(mapSize.width, mapSize.height) / 2.0 /
                 metersToPixels(1.0, camera.zoom, camera.target.latitude, density)
-            val pieceM = pieceLengthM(camera.zoom)
-            val loaded = RoadQualityCache.area
-            if (loaded != null && RoadQualityCache.pieceM == pieceM &&
-                loaded.contains(boxAround(camera.target, screenRadiusM))
-            ) {
-                status = roadQualitySummary(pieces, spots)
-                return@collectLatest
-            }
+            val screen = boxAround(camera.target, screenRadiusM)
+            val visible = tilesCovering(screen, band)
+            return visible to (tilesCovering(screen, band, ring = 1) - visible.toSet())
+        }
 
-            val area = boxAround(camera.target, max(screenRadiusM * LOAD_RADIUS_PER_SCREEN, MIN_LOAD_RADIUS_M))
-            if (pieces.isEmpty() && spots.isEmpty()) status = "Loading…"
-            status = try {
-                // Both requests at once. Debug builds count fake trips too; release builds only real ones.
-                val (newPieces, newSpots) = coroutineScope {
-                    val p = async { repository.roadQuality(area, pieceM, includeFake = BuildConfig.DEBUG) }
-                    val s = async { repository.eventsInArea(area, includeFake = BuildConfig.DEBUG) }
-                    p.await() to s.await()
-                }
-                pieces = newPieces
-                spots = newSpots
-                RoadQualityCache.area = area
-                RoadQualityCache.pieceM = pieceM
-                RoadQualityCache.pieces = newPieces
-                RoadQualityCache.spots = newSpots
-                roadQualitySummary(newPieces, newSpots)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                "Couldn't load: ${e.shortMessage()}"
+        /** Draws what's loaded for the screen and the ring around it (a piece in two tiles once). */
+        fun show() {
+            val (visible, ring) = wantedTiles()
+            val tiles = (visible + ring).mapNotNull { RoadQualityTiles.loaded[it] }
+            pieces = tiles.flatMap { it.pieces }.distinctBy { it.pieceId }
+            spots = tiles.flatMap { it.spots }.distinctBy { Triple(it.lat, it.lon, it.eventClass) }
+            status = when {
+                lastError != null -> "Couldn't load: $lastError"
+                visible.any { it !in RoadQualityTiles.loaded } -> "Loading…"
+                pieces.isEmpty() && spots.isEmpty() -> "No drives here yet"
+                else -> ""
             }
+        }
+
+        fun load(tile: RoadTile) {
+            if (tile in RoadQualityTiles.loaded || tile in queued || tile in loading) return
+            queued[tile] = loads.launch {
+                try {
+                    requestSlots.withPermit {
+                        queued.remove(tile)
+                        loading += tile
+                        try {
+                            RoadQualityTiles.loaded[tile] = loadTile(repository, tile)
+                            lastError = null
+                        } catch (e: CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            // Not kept, so the next time the map stops it's tried again.
+                            lastError = e.shortMessage()
+                        } finally {
+                            loading -= tile
+                        }
+                    }
+                    show()
+                } finally {
+                    queued.remove(tile)
+                }
+            }
+        }
+
+        snapshotFlow { cameraPositionState.isMoving }.collect { moving ->
+            if (moving) return@collect
+            val (visible, ring) = wantedTiles()
+            val wanted = (visible + ring).toSet()
+            // Tiles still waiting their turn that the map has moved away from: drop them, so the
+            // ones needed now go first.
+            queued.filterKeys { it !in wanted }.values.forEach { it.cancel() }
+            visible.forEach(::load)
+            ring.forEach(::load)
+            show()
         }
     }
 
@@ -298,14 +316,16 @@ fun MapScreen(modifier: Modifier = Modifier) {
             mapColorScheme = if (LocalDarkTheme.current) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT,
             onMapLoaded = { mapLoaded = true },
         ) {
-            if (view == MapView.ROAD_QUALITY && zoom >= MIN_ROAD_QUALITY_ZOOM) {
+            if (view == MapView.ROAD_QUALITY) {
                 pieces.forEach { piece ->
                     RoadPieceOnMap(piece, max((piece.lineWidthM() * pixelsPerMeter).toFloat(), minLineWidthPx), colorMode, onClick = {
                         status = "%.3f g · %d drive(s)".format(piece.roughness, piece.drives)
                     })
                 }
                 // Only potholes and speed bumps are shown; unknown bumps stay in the data for tuning.
-                spots.filter { it.eventClass != EventClass.UNKNOWN }.forEach { EventSpotMarker(it, colorMode) }
+                if (zoom >= MIN_EVENT_MARKER_ZOOM) {
+                    spots.filter { it.eventClass != EventClass.UNKNOWN }.forEach { EventSpotMarker(it, colorMode) }
+                }
             }
             if (view == MapView.TRIPS) drives.forEach { drive -> DriveOnMap(drive, lineWidthPx, colorMode) }
         }
@@ -443,14 +463,21 @@ private fun NorthButton(bearing: () -> Float, onClick: () -> Unit, modifier: Mod
 
 private const val NOT_CONFIGURED = "Server not set up"
 
-private fun roadQualitySummary(pieces: List<RoadPiece>, spots: List<EventSpot>): String = when {
-    pieces.isEmpty() && spots.isEmpty() -> "No drives here yet"
-    BuildConfig.DEBUG -> "${pieces.size} road pieces, ${spots.size} bumps"
-    else -> ""
+/** One tile's road pieces and pins, both requests at once. Debug builds count fake trips too. */
+private suspend fun loadTile(repository: SupabaseTripRepository, tile: RoadTile): TileData = coroutineScope {
+    val box = tile.box
+    val pieces = async {
+        repository.roadQuality(box, tile.band.pieceM, includeFake = BuildConfig.DEBUG, sinceMs = MAP_DRIVES_SINCE_MS)
+    }
+    val spots = async {
+        if (tile.band.withEvents) {
+            repository.eventsInArea(box, includeFake = BuildConfig.DEBUG, sinceMs = MAP_DRIVES_SINCE_MS)
+        } else {
+            emptyList()
+        }
+    }
+    TileData(pieces.await(), spots.await())
 }
-
-private fun BoundingBox.contains(other: BoundingBox) =
-    other.south >= south && other.north <= north && other.west >= west && other.east <= east
 
 /** Debug builds only: pick what the map shows. */
 @Composable

@@ -88,6 +88,10 @@ object DeviceConnection {
     private var timeSyncJob: Job? = null
     private var scanStopJob: Job? = null
     private var wantConnected = false   // false after the user taps Disconnect: don't reconnect
+    // True once this connection has been fully set up. Until then a failure means the device
+    // isn't around: say so and stop, instead of waiting for it forever. After that, a lost link
+    // (car turned off, device restarted) is waited for in the background, with no time limit.
+    private var linkWasUp = false
     private var lastSeq: Long? = null
 
     private val _status = MutableStateFlow(DeviceStatus())
@@ -173,13 +177,27 @@ object DeviceConnection {
         connectToRemembered()
     }
 
-    /** Connects to the remembered device, if there is one and it isn't connected already. */
+    /**
+     * Connects to the remembered device, if there is one and it isn't connected or connecting
+     * already. While waiting in the background for a lost device, this starts a fresh try at once.
+     */
     fun connectToRemembered() {
         val address = _status.value.address ?: return
-        if (_status.value.state != DeviceState.NOT_CONNECTED) return
+        when (_status.value.state) {
+            DeviceState.CONNECTED, DeviceState.CONNECTING -> return
+            DeviceState.RECONNECTING -> {
+                // Drop the background wait (it may be for another device) and start over directly.
+                // close() ends it without calling the connection observer.
+                manager?.close()
+                manager = null
+                timeSyncJob?.cancel()
+            }
+            DeviceState.NOT_CONNECTED -> {}
+        }
         val bluetoothDevice = readyAdapter()?.getRemoteDevice(address) ?: return
         stopScan()
         wantConnected = true
+        linkWasUp = false
         lastSeq = null
         _status.update { it.copy(state = DeviceState.CONNECTING, error = null) }
         manager().connect(bluetoothDevice)
@@ -225,6 +243,8 @@ object DeviceConnection {
         override fun onDeviceDisconnecting(device: BluetoothDevice) {}
 
         override fun onDeviceReady(device: BluetoothDevice) {
+            linkWasUp = true
+            _found.value = emptyList()   // connected: the scan results have done their job
             _status.update { it.copy(state = DeviceState.CONNECTED, error = null) }
             timeSyncJob?.cancel()
             timeSyncJob = scope.launch {
@@ -242,8 +262,8 @@ object DeviceConnection {
                     setError("Not a Road Quality device")
                     _status.update { it.copy(state = DeviceState.NOT_CONNECTED) }
                 }
-                // Not around right now: wait for it in the background.
-                else -> reconnectWhenBack(device)
+                // Never connected this time: it isn't around. Say so instead of waiting forever.
+                else -> if (linkWasUp) reconnectWhenBack(device) else gaveUp()
             }
         }
 
@@ -258,10 +278,17 @@ object DeviceConnection {
                     setError("Not a Road Quality device")
                     _status.update { it.copy(state = DeviceState.NOT_CONNECTED) }
                 }
-                // Unplugged, out of range, or the device restarted.
-                else -> reconnectWhenBack(device)
+                // Unplugged, out of range, or the device restarted: wait for it. If it dropped
+                // while still setting up the first time, treat it as not found instead.
+                else -> if (linkWasUp) reconnectWhenBack(device) else gaveUp()
             }
         }
+    }
+
+    /** The first connection didn't work: back to Not connected, with a hint. */
+    private fun gaveUp() {
+        wantConnected = false
+        _status.update { it.copy(state = DeviceState.NOT_CONNECTED, error = "Couldn't connect") }
     }
 
     /**

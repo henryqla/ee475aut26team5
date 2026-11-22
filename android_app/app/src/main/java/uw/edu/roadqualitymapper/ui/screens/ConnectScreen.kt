@@ -103,9 +103,12 @@ private fun DeviceCard() {
         }
     }
 
+    // What a scan found, while not connected. Once connected, the device is shown in the header.
+    val showFound = found.isNotEmpty() && status.state != DeviceState.CONNECTED
+
     AppCard {
         SectionLabel("Device")
-        DeviceHeader(status)
+        DeviceHeader(status, scanning = scanning, foundCount = if (showFound) found.size else 0)
         if (status.state == DeviceState.CONNECTED) DeviceChips(status)
         (permissionMessage ?: status.error)?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
@@ -141,25 +144,33 @@ private fun DeviceCard() {
 
         var scannedOnce by remember { mutableStateOf(false) }
         LaunchedEffect(scanning) { if (scanning) scannedOnce = true }
-        if (found.isNotEmpty()) {
-            SectionLabel("Tap to connect")
-            found.forEach { FoundDeviceRow(it) }
-        } else if (scannedOnce && !scanning) {
-            Text("No device found", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        when {
+            showFound -> found.forEach { FoundDeviceRow(it) }
+            // Only once a scan has finished with nothing, and never next to a found device.
+            scannedOnce && !scanning && status.state == DeviceState.NOT_CONNECTED ->
+                Text("No device found", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
-/** Icon, device name, and a colored dot with the connection state. */
+/**
+ * Icon, device name, and a colored dot with the connection state. While not connected, it also
+ * follows the scan, so it never says nothing was found while a found device is listed below.
+ */
 @Composable
-private fun DeviceHeader(status: DeviceStatus) {
+private fun DeviceHeader(status: DeviceStatus, scanning: Boolean, foundCount: Int) {
     val (stateText, dot) = when (status.state) {
         DeviceState.CONNECTED -> "Connected" to StatusGreen
         DeviceState.CONNECTING -> "Connecting…" to StatusAmber
         DeviceState.RECONNECTING -> "Lost. Waiting for it…" to StatusAmber
-        DeviceState.NOT_CONNECTED ->
-            (if (status.address != null) "Not connected" else "Tap Scan to find your device") to StatusGray
+        DeviceState.NOT_CONNECTED -> when {
+            foundCount > 0 -> "Found. Tap Connect below" to StatusGreen
+            scanning -> "Looking for your device…" to StatusAmber
+            status.address != null -> "Not connected" to StatusGray
+            else -> "Tap Scan to find your device" to StatusGray
+        }
     }
+    val title = status.name ?: if (foundCount > 0) "Device found" else "No device yet"
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Box(
             Modifier
@@ -170,7 +181,7 @@ private fun DeviceHeader(status: DeviceStatus) {
             AppIcon(R.drawable.ic_bluetooth, contentDescription = null, size = 22.dp, tint = MaterialTheme.colorScheme.primary)
         }
         Column {
-            Text(status.name ?: "No device yet", style = MaterialTheme.typography.titleMedium)
+            Text(title, style = MaterialTheme.typography.titleMedium)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 StatusDot(dot)
                 Text(stateText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -214,20 +225,31 @@ private fun ProblemChip(text: String) = StatusChip(
     icon = R.drawable.ic_alert_circle,
 )
 
+/**
+ * A device a scan found: hard to miss, with a thick border, a green "found" dot, and a solid
+ * Connect button. The whole row can be tapped too.
+ */
 @Composable
 private fun FoundDeviceRow(device: FoundDevice) {
+    val connect = { DeviceConnection.connect(device) }
     Surface(
-        onClick = { DeviceConnection.connect(device) },
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        onClick = connect,
+        shape = RoundedCornerShape(14.dp),
+        color = StatusGreen.copy(alpha = 0.12f),
+        border = BorderStroke(2.dp, StatusGreen),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Row(Modifier.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            StatusDot(StatusGreen)
             Column(Modifier.weight(1f)) {
-                Text(device.name, style = MaterialTheme.typography.titleSmall)
+                Text(device.name, style = MaterialTheme.typography.titleMedium)
                 Text(device.address, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text("${device.rssi} dBm", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Button(onClick = connect, shape = BUTTON_SHAPE) { Text("Connect") }
         }
     }
 }

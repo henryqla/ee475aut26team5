@@ -7,15 +7,20 @@ import uw.edu.roadqualitymapper.data.EventClass
 
 /**
  * Roughness anchors, in g (RMS vertical acceleration), like Google Maps traffic colors.
- * Placeholders until the calibration drives: new pavement should come out at SMOOTH (green)
- * and I-5 at I5 (light red). Keep in sync with the data contract so the web map matches.
+ * Set from the first clean drive (Nov 2026, board on the dashboard, no speed normalization):
+ * slow driving read about 0.04 g, and a paved bridge at ~30 mph 0.10-0.25 g, which should be
+ * light red at most. To be retuned after speed normalization and the calibration drives (new
+ * pavement = SMOOTH, I-5 = I5). Keep in sync with data contract §8 so the web map matches.
  */
 object RoughnessScale {
-    const val SMOOTH = 0.03
-    const val MODERATE = 0.06
-    const val I5 = 0.10
-    const val VERY_ROUGH = 0.20
+    const val SMOOTH = 0.05
+    const val MODERATE = 0.12
+    const val I5 = 0.25
+    const val VERY_ROUGH = 0.50
 }
+
+/** Red-green palettes add a light blue halfway between smooth and moderate. */
+private const val SMOOTH_TO_MODERATE_MIDPOINT = (RoughnessScale.SMOOTH + RoughnessScale.MODERATE) / 2
 
 /**
  * A color as hue (degrees), saturation, and value (brightness), all 0–1 except hue.
@@ -51,7 +56,7 @@ private val StandardDarkMapStops = listOf(
 /** Dark map, red-green: lighter blues than on a light map, ending in a bright red-orange. */
 private val RedGreenSafeDarkMapStops = listOf(
     RoughnessScale.SMOOTH to Color(0xFF6FA8F5),       // blue
-    0.045 to Color(0xFFA7D3F0),                       // light blue
+    SMOOTH_TO_MODERATE_MIDPOINT to Color(0xFFA7D3F0),                       // light blue
     RoughnessScale.MODERATE to Color(0xFFFFD54A),     // yellow
     RoughnessScale.I5 to Color(0xFFFF9E40),           // orange
     RoughnessScale.VERY_ROUGH to Color(0xFFFF5A36),   // red-orange
@@ -72,7 +77,7 @@ private val BlueYellowSafeDarkMapStops = listOf(
  */
 private val RedGreenSafeStops = listOf(
     RoughnessScale.SMOOTH to Color(0xFF4575B4),       // blue
-    0.045 to Color(0xFF74ADD1),                       // light blue
+    SMOOTH_TO_MODERATE_MIDPOINT to Color(0xFF74ADD1),                       // light blue
     RoughnessScale.MODERATE to Color(0xFFF5C518),     // yellow
     RoughnessScale.I5 to Color(0xFFF46D43),           // orange-red
     RoughnessScale.VERY_ROUGH to Color(0xFFA50026),   // dark red

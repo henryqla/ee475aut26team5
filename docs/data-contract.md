@@ -511,8 +511,18 @@ read further pages with `range(...)`, the same way it pages segments.
 
 - Segments drawn as lines colored by (normalized) roughness, like Google Maps traffic:
   **green** (new pavement) → **yellow** → **light red** (≈ I-5) → **dark red** (worse).
-- Numeric thresholds are **TBD** from calibration drives (new construction = green baseline,
-  I-5 = light red) and will be listed here once measured, so both maps use identical values.
+- Numeric thresholds (g, the roughness value the map functions return), with colors blended
+  in between. Set Nov 2026 from the first clean drive (slow driving ≈ 0.04 g; a paved bridge at
+  ~30 mph 0.10–0.25 g, which should be light red at most), before speed normalization; to be
+  retuned after normalization and the calibration drives (new construction = green, I-5 = light
+  red). Both maps use these values:
+
+  | Color | Roughness |
+  |---|---|
+  | green | ≤ 0.05 |
+  | yellow | 0.12 |
+  | light red | 0.25 |
+  | dark red | ≥ 0.50 |
 - Each direction of a road is drawn on its own side (offset to the right of travel, as US traffic
   drives on the right). Zoomed out, the two directions overlap.
 - Line width on the ground, so lines widen as you zoom in (at least 4 dp wide when zoomed out):
@@ -596,3 +606,4 @@ Earlier v0.3 changes:
 - `fw` starting with `fake` marks a test device; its trips are `FAKE_DEVICE` (§4.3).
 - `road_quality_in_area`: each segment counts along the stretch of road it drove, so pieces meet even at highway speed; `length_m` is now the road driven inside the piece (no longer always 15); new optional `cell_m` piece size (default 15, between 5 and 1000) (§7).
 - `road_quality_snapped` with `lanes_dir`: OK from Scott; the app's Road quality view switched to it from `road_quality_in_area` (`piece_m` 15 / 60 / 240 m by zoom, "© OpenStreetMap contributors" under the map legend) (§7). Line width and side offset now come from `lanes_dir` instead of a fixed 5 m (§8).
+- First numeric map color thresholds: green 0.05, yellow 0.12, light red 0.25, dark red 0.50 g, from the first clean drive; to be retuned after speed normalization (§8).
