@@ -12,6 +12,7 @@ import io.github.jan.supabase.postgrest.query.PostgrestRequestBuilder
 import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.serializer.KotlinXSerializer
 import kotlinx.serialization.json.Json
+import kotlin.time.Duration.Companion.seconds
 import uw.edu.roadqualitymapper.BuildConfig
 import uw.edu.roadqualitymapper.data.BoundingBox
 import uw.edu.roadqualitymapper.data.DataSource
@@ -43,6 +44,9 @@ object SupabaseConnection {
         createSupabaseClient(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_PUBLISHABLE_KEY) {
             // Query results include columns the app doesn't use (created_by, geog, ...); skip them.
             defaultSerializer = KotlinXSerializer(Json { ignoreUnknownKeys = true })
+            // The default is 10 s. Map loads of a big area can take longer while the server is busy
+            // (e.g. matching new trips to roads); waiting is better than failing.
+            requestTimeout = 30.seconds
             install(Auth)       // keeps the anonymous session on the phone between launches
             install(Postgrest)  // reading and writing tables
         }
@@ -107,13 +111,15 @@ class SupabaseTripRepository(
             order(Columns.T, Order.ASCENDING)
         }.map { it.toEvent() }
 
-    override suspend fun roadQuality(area: BoundingBox, pieceM: Int, includeFake: Boolean, vehicleId: String?): List<RoadPiece> =
+    override suspend fun roadQuality(
+        area: BoundingBox, pieceM: Int, includeFake: Boolean, vehicleId: String?, sinceMs: Long?,
+    ): List<RoadPiece> =
         rpcAllPages<RoadPieceRow, SnappedAreaParams>(
-            Functions.ROAD_QUALITY_SNAPPED, area.toSnappedParams(pieceM, includeFake, vehicleId),
+            Functions.ROAD_QUALITY_SNAPPED, area.toSnappedParams(pieceM, includeFake, vehicleId, sinceMs),
         ).map { it.toRoadPiece() }
 
-    override suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String?): List<EventSpot> =
-        rpcAllPages<EventSpotRow, AreaParams>(Functions.EVENTS_IN_AREA, area.toParams(includeFake, vehicleId))
+    override suspend fun eventsInArea(area: BoundingBox, includeFake: Boolean, vehicleId: String?, sinceMs: Long?): List<EventSpot> =
+        rpcAllPages<EventSpotRow, AreaParams>(Functions.EVENTS_IN_AREA, area.toParams(includeFake, vehicleId, sinceMs))
             .map { it.toEventSpot() }
 
     override suspend fun vehicles(): List<Vehicle> =
