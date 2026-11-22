@@ -1,8 +1,8 @@
 """
 File:        record_widget.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-22
+Version:     0.2.0
 Adapted from: Python/record_data_widget.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
              codegen-classroom, commit 47092aa), itself a fork of
@@ -18,9 +18,13 @@ Adapted from: Python/record_data_widget.py in ml-on-device-playground,
              real_time_graph.py); counters; P / B / F quick labels; and
              runtime problems go to a status line and the log, never to
              popups, so a car session is never blocked by a dialog.
+             Restyled (request 7): rows regrouped, styles from app_styles.py;
+             the status lines became the Last take card (status_card.py), a
+             connection line, the device info strip and an error line.
 Description: The "Record" panel. Owns the SerialHandler (reader thread) and
              the RecordController (record_core), connects one to the other,
-             and shows connection, device settings, arm state and counters.
+             shows the connection and the device's settings, and tells the
+             Last take card the arm state, counters and each take event.
              Also passes the reader's S lines to the live IMU view (display
              only; they never reach the RecordController).
 """
@@ -30,23 +34,26 @@ Description: The "Record" panel. Owns the SerialHandler (reader thread) and
 # ============================================================================
 
 import datetime
+import html
 import logging
 import time
 from pathlib import Path
 from typing import Optional
 
-from PyQt5.QtCore import QSettings, QTimer, pyqtSignal
+from PyQt5.QtCore import QSettings, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QGridLayout, QGroupBox, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QShortcut, QVBoxLayout)
 
 import cnn_config as cfg
-from app_styles import AppStyles
+from app_styles import AppStyles, set_flag, set_role, set_state
+from elided_label import ElidedLabel
 from live_plot import LivePlot
 from record_core import Claim, RecordController
 from serial_handler import SerialHandler, list_ports
 from snapshot_plot import SnapshotPlot
-from take_store import TakeStore, parse_take_name
+from status_card import ARMED, IDLE, OK, WARN, StatusCard
+from take_store import TakeStore, load_take, parse_take_name
 
 # ============================================================================
 # Constants
@@ -70,18 +77,19 @@ class RecordWidget(QGroupBox):
     session_changed = pyqtSignal(str)     # A new valid session name
 
     def __init__(self, store: TakeStore, gui_commit: str, last_plot: SnapshotPlot,
-                 live_plot: LivePlot) -> None:
+                 live_plot: LivePlot, card: StatusCard) -> None:
         """
         @param store       Where takes are written.
         @param gui_commit  Commit of this checkout (into every take).
         @param last_plot   Where each arriving snapshot is drawn.
         @param live_plot   Where the S lines (live IMU samples) are drawn.
+        @param card        The Last take card (arm state, counters, take events).
         """
         super().__init__("Record")
-        self.setStyleSheet(AppStyles.get_group_box_style())
         self.store = store
         self.last_plot = last_plot
         self.live_plot = live_plot
+        self.card = card
         self.settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
         self.ctrl = RecordController(store, gui_commit, on_saved=self._on_saved,
                                      on_error=self._on_error, on_info=self._on_info)
@@ -90,77 +98,92 @@ class RecordWidget(QGroupBox):
         self._last_drops = None  # Last device snap_drops logged
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(AppStyles.PANEL_SPACING)
+
+        # Connection line (dot and message), device info strip and error
+        # line; arm state, counters and take events go to the card.
+        self.conn_dot = set_role(QLabel("\u25cf"), "dot")
+        self.conn_label = ElidedLabel("")
+        self.strip = set_role(QLabel(""), "strip")
+        self.strip.setTextFormat(Qt.RichText)
+        self.strip.setWordWrap(True)   # A second line in a narrow window, never cut off
+        self.msg_label = set_role(QLabel(""), "error")
+        self.msg_label.setWordWrap(True)
+        self.msg_label.hide()          # Until the first problem
+        self._connected = False        # Port (or simulated device) open right now
+        self._conn_message = "Not connected"
+        self._boot_info = ""           # Strip text from BOOT (rich text, escaped)
+        self._health_info = ""         # Strip text from HLT
+
         grid = QGridLayout()
+        grid.setHorizontalSpacing(AppStyles.PANEL_SPACING)
+        grid.setVerticalSpacing(AppStyles.PANEL_SPACING)
+        grid.setColumnStretch(1, 1)
         layout.addLayout(grid)
 
-        # Row 0: port
-        grid.addWidget(self._label("Port"), 0, 0)
+        # Row 0: port and Refresh
+        grid.addWidget(QLabel("Port"), 0, 0)
         self.port_combo = QComboBox()
-        self.port_combo.setStyleSheet(AppStyles.get_combo_box_style())
         grid.addWidget(self.port_combo, 0, 1)
         self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setStyleSheet(AppStyles.get_button_style())
         self.refresh_button.clicked.connect(self._refresh_ports)
         grid.addWidget(self.refresh_button, 0, 2)
 
-        # Row 1: simulated + connect
+        # Row 1: simulated device, and Connect across the rest of the row
+        connect_row = QHBoxLayout()
         self.sim_check = QCheckBox("Simulated device (no hardware)")
-        self.sim_check.setStyleSheet(AppStyles.get_label_style())
         self.sim_check.toggled.connect(lambda on: self.port_combo.setEnabled(not on))
-        grid.addWidget(self.sim_check, 1, 1)
+        connect_row.addWidget(self.sim_check)
         self.connect_button = QPushButton("Connect")
-        self.connect_button.setStyleSheet(AppStyles.get_button_style())
         self.connect_button.clicked.connect(self._toggle_connection)
-        grid.addWidget(self.connect_button, 1, 2)
+        connect_row.addWidget(self.connect_button, 1)
+        grid.addLayout(connect_row, 1, 0, 1, 3)
 
-        # Row 2: session
-        grid.addWidget(self._label("Session"), 2, 0)
+        # Rows 2-3: connection line, device info strip
+        conn_row = QHBoxLayout()
+        conn_row.setSpacing(6)
+        conn_row.addWidget(self.conn_dot)
+        conn_row.addWidget(self.conn_label, 1)
+        grid.addLayout(conn_row, 2, 0, 1, 3)
+        grid.addWidget(self.strip, 3, 0, 1, 3)
+
+        # Row 4: session
+        grid.addWidget(QLabel("Session"), 4, 0)
         self.session_edit = QLineEdit(self.settings.value(
             "session", datetime.date.today().isoformat() + "_bench"))
-        self.session_edit.setStyleSheet(AppStyles.get_line_edit_style())
         self.session_edit.editingFinished.connect(self._apply_session)
-        grid.addWidget(self.session_edit, 2, 1, 1, 2)
+        grid.addWidget(self.session_edit, 4, 1, 1, 2)
 
-        # Row 3: label
-        grid.addWidget(self._label("Label"), 3, 0)
+        # Row 5: label
+        grid.addWidget(QLabel("Label"), 5, 0)
         self.label_combo = QComboBox()
-        self.label_combo.setStyleSheet(AppStyles.get_combo_box_style())
         self.label_combo.addItems(cfg.LABELS)
         self.label_combo.setCurrentText(cfg.UNLABELED)
         self.label_combo.currentTextChanged.connect(self._apply_label)
-        grid.addWidget(self.label_combo, 3, 1, 1, 2)
+        grid.addWidget(self.label_combo, 5, 1, 1, 2)
 
-        # Row 4: arm
+        # Arm across the row, Keep armed beside it; each note sits under
+        # what it explains.
         arm_row = QHBoxLayout()
         self.arm_button = QPushButton("Arm")
-        self.arm_button.setStyleSheet(AppStyles.get_button_style())
         self.arm_button.clicked.connect(self._toggle_arm)
         self.keep_check = QCheckBox("Keep armed")
-        self.keep_check.setStyleSheet(AppStyles.get_label_style())
         self.keep_check.toggled.connect(self._apply_keep_armed)
         arm_row.addWidget(self.arm_button, 1)
         arm_row.addWidget(self.keep_check)
         layout.addLayout(arm_row)
+        notes = QVBoxLayout()
+        notes.setSpacing(AppStyles.NOTE_SPACING)
+        notes.addWidget(self._note("Arm saves the next valid snapshot from the device under "
+                                   "the label, then disarms. Keep armed saves every one."))
+        notes.addWidget(self._note(
+            "Car sessions: Keep armed with label UNLABELED; press %s to label the latest take."
+            % ", ".join("%s = %s" % kv for kv in cfg.QUICK_LABEL_KEYS.items())))
+        layout.addLayout(notes)
+        # Request 5 adds its Log and Record buttons here.
 
-        for text in ("Arm saves the next valid snapshot from the device under the label, "
-                     "then disarms. Keep armed saves every one.",
-                     "Car sessions: Keep armed with label UNLABELED; press %s to label the "
-                     "latest take." % ", ".join("%s = %s" % kv for kv in
-                                                cfg.QUICK_LABEL_KEYS.items()),
-                     "Firmware: firmware-bench built with RECORD_MODE 1."):
-            note = QLabel(text)
-            note.setWordWrap(True)
-            note.setStyleSheet(AppStyles.get_note_label_style())
-            layout.addWidget(note)
-
-        # Status lines
-        self.status = {}
-        for key in ("conn", "device", "arm", "counters", "last", "reject", "fault", "msg"):
-            lab = QLabel("")
-            lab.setWordWrap(True)
-            lab.setStyleSheet(AppStyles.get_status_label_style())
-            layout.addWidget(lab)
-            self.status[key] = lab
+        layout.addWidget(self.msg_label)
+        layout.addWidget(self._note("Firmware: firmware-bench built with RECORD_MODE 1."))
 
         # Quick labels: active while this panel's window is active and the
         # panel is visible. A focused text box keeps its own typing.
@@ -175,46 +198,87 @@ class RecordWidget(QGroupBox):
 
         self._refresh_ports()
         self._apply_session()
-        self._set_status("conn", "Not connected")
+        self._set_conn(IDLE, "Not connected")
+        self._show_strip()
         self._refresh()
 
     # ------------------------------------------------------------ UI helpers
 
     @staticmethod
-    def _label(text: str) -> QLabel:
+    def _note(text: str) -> QLabel:
         """
-        @param text  Label text.
-        @return A styled QLabel.
+        @param text  Note text.
+        @return A gray italic note that wraps.
         """
-        lab = QLabel(text)
-        lab.setStyleSheet(AppStyles.get_label_style())
-        return lab
+        note = set_role(QLabel(text), "note")
+        note.setWordWrap(True)
+        return note
 
-    def _set_status(self, key: str, text: str) -> None:
+    def _set_conn(self, state: str, message: str) -> None:
         """
-        @param key   Status line name.
-        @param text  New text.
+        @param state    Dot color: OK (open), WARN (lost, retrying) or IDLE.
+        @param message  The connection message.
         """
-        self.status[key].setText(text)
+        self._conn_message = message
+        set_state(self.conn_dot, state)
+        self.conn_label.setText(message)
+
+    def _show_strip(self) -> None:
+        """Device info strip: the BOOT settings, then the HLT rates and drops."""
+        parts = [text for text in (self._boot_info, self._health_info) if text]
+        self.strip.setText(" | ".join(parts) if parts else "No device info yet.")
+
+    @staticmethod
+    def _warn_html(text: str) -> str:
+        """
+        @param text  Plain text.
+        @return The text, escaped, in the warning color (for the strip).
+        """
+        return '<span style="color:%s">%s</span>' % (AppStyles.ACCENT_WARN, html.escape(text))
+
+    @staticmethod
+    def _take_summary(path: Path) -> str:
+        """
+        @param path  A take just written.
+        @return Its card subline: seq, rule class, rows and time received.
+        """
+        try:
+            header, _values = load_take(path)
+        except (OSError, ValueError):
+            return path.name
+        when = header.get("pc_received", "")
+        try:
+            when = datetime.datetime.fromisoformat(when).strftime("%H:%M:%S")
+        except ValueError:
+            pass  # Shown as written
+        return " \u00b7 ".join(("seq %s" % header.get("seq", "?"),
+                                 "rule %s" % header.get("rule_class", "?"),
+                                 "%s rows" % header.get("n_rows", "?"), when))
 
     def _refresh(self) -> None:
-        """Redraws arm state and counters from the controller."""
+        """Redraws the card's base state, the counters and the Arm button."""
         c = self.ctrl.counters
-        if self.ctrl.keep_armed:
-            arm = "KEEP ARMED: every snapshot is saved as %s" % self.ctrl.label
+        label = self.ctrl.label
+        running = self.handler is not None and self.handler.isRunning()
+        if not self._connected:
+            self.card.set_base(IDLE, "NOT CONNECTED", self._conn_message if running else
+                               "Pick a port or Simulated device, then Connect")
+        elif self.ctrl.keep_armed:
+            self.card.set_base(ARMED, "KEEP ARMED",
+                               "Waiting for a snapshot \u00b7 label %s" % label)
         elif self.ctrl.armed:
-            arm = "ARMED: next snapshot is saved as %s" % self.ctrl.label
+            self.card.set_base(ARMED, "ARMED", "Waiting for a snapshot \u00b7 label %s" % label)
         else:
-            arm = "Disarmed: snapshots are shown, not saved"
-        self._set_status("arm", arm)
+            self.card.set_base(IDLE, "READY", "Snapshots are shown, not saved \u00b7 press Arm "
+                               "to save the next one", keeps_take=True)
         self.arm_button.setText("Cancel arm" if self.ctrl.armed else "Arm")
         self.arm_button.setEnabled(not self.ctrl.keep_armed)
+        set_flag(self.arm_button, "armed", self.ctrl.armed or self.ctrl.keep_armed)
         drops = "-" if c.device_snap_drops is None else str(c.device_snap_drops)
-        self._set_status("counters",
-                         "saved %d | rejected %d | device drops %s | EVT w/o snapshot %d\n"
-                         "not armed %d | saved w/o EVT %d | save errors %d | snapshots %d"
-                         % (c.saved, c.rejected, drops, c.evt_without_snap, c.not_armed,
-                            c.saved_without_evt, c.save_errors, c.snapshots))
+        self.card.set_counters("saved %d | rejected %d | device drops %s | EVT w/o snapshot %d\n"
+                               "not armed %d | saved w/o EVT %d | save errors %d | snapshots %d"
+                               % (c.saved, c.rejected, drops, c.evt_without_snap, c.not_armed,
+                                  c.saved_without_evt, c.save_errors, c.snapshots))
 
     # ----------------------------------------------------------- user actions
 
@@ -263,6 +327,11 @@ class RecordWidget(QGroupBox):
         self.handler.finished.connect(self._on_reader_finished)
         self.handler.configure(port, simulated)
         self.live_plot.reset()
+        self.card.clear_fault()          # A fault stays up until the next Connect
+        self.card.set_simulated(False)
+        self._boot_info = ""
+        self._health_info = ""
+        self._show_strip()
         self.handler.start()
         _LOG.info("Connect: %s", "simulated device" if simulated else port.label())
         self.connect_button.setText("Disconnect")
@@ -286,6 +355,7 @@ class RecordWidget(QGroupBox):
             self.settings.setValue("session", name)
             _LOG.info("Session: %s", name)
             self.session_changed.emit(name)
+            self.card.clear_recent()
 
     def _apply_label(self, label: str) -> None:
         """
@@ -331,12 +401,16 @@ class RecordWidget(QGroupBox):
         new = self.ctrl.quick_label(label)
         if new is not None:
             _LOG.info("Quick label: %s -> %s", old.name if old else "?", new.name)
-            self._set_status("last", "Latest take is now %s" % new.name)
+            if old is not None and old != new:
+                self.card.rename_recent(old.stem, new.stem)
+                self.card.show_take(OK, new.stem, "Relabeled (was %s)" % old.stem)
+            else:
+                self.card.show_take(OK, new.stem, "Already labeled %s" % label)
             self.take_saved.emit(new)
         elif claim.path is None:
             _LOG.info("Quick label: pending take will be saved as %s", label)
-            self._set_status("last", "Latest take (waiting for its EVT) will be saved as %s"
-                             % label)
+            self.card.show_take(ARMED, label, "Pending: the latest take is waiting for its EVT "
+                                "and will be saved as %s" % label)
 
     def take_moved(self, old: Path, new: Optional[Path]) -> None:
         """
@@ -355,6 +429,7 @@ class RecordWidget(QGroupBox):
                 if parsed is not None:
                     claim.label = parsed[0]
         _LOG.info("Take %s -> %s", old.name, new.name if new else "deleted")
+        self.card.rename_recent(old.stem, new.stem if new else None)
 
     def shutdown(self) -> None:
         """Stops the reader thread (window closing)."""
@@ -373,11 +448,11 @@ class RecordWidget(QGroupBox):
         self.ctrl.on_snapshot(snap, wall, time.monotonic())
         self.last_plot.show_values(
             snap.values, snap.n_pre, snap.rate_hz,
-            "seq %d  trig_idx %d  %d rows  fw %s  %s" % (
-                snap.seq, snap.trig_idx, snap.n_rows, snap.fw,
-                "saving" if will_save else "not armed: not saved"))
-        if snap.fw.startswith("sim-"):
-            self._set_status("last", "Snapshot seq %d from the SIMULATED device" % snap.seq)
+            # Saved or not first: the line is cut off with "..." when too long.
+            "%s  seq %d  trig_idx %d  %d rows  fw %s" % (
+                "saving" if will_save else "not armed: not saved",
+                snap.seq, snap.trig_idx, snap.n_rows, snap.fw))
+        self.card.set_simulated(snap.fw.startswith("sim-"))
         self._refresh()
 
     def _on_event(self, evt) -> None:
@@ -398,7 +473,8 @@ class RecordWidget(QGroupBox):
         """
         self.ctrl.on_rejected(rej)
         seq = "" if rej.seq is None else " seq %d" % rej.seq
-        self._set_status("reject", "Last rejected%s: %s" % (seq, rej.reason))
+        self.card.show_take(WARN, "REJECTED", ("" if rej.seq is None else "seq %d: " % rej.seq)
+                            + rej.reason)
         _LOG.warning("Snapshot rejected%s: %s", seq, rej.reason)
         self._refresh()
 
@@ -407,15 +483,18 @@ class RecordWidget(QGroupBox):
         @param boot  A BootLine.
         """
         self.ctrl.on_boot(boot)
-        s = boot.settings
+        s = {k: html.escape(v) for k, v in boot.settings.items()}
         rec = s.get("rec", "?")
-        self._set_status("device", "fw %s | rec=%s | thr z %s g, roll %s, pitch %s dps | "
-                         "rearm %s, hold %s ms | snapshot %s+%s rows%s" % (
-                             s.get("fw", "?"), rec, s.get("thr_z", "?"), s.get("thr_roll", "?"),
-                             s.get("thr_pitch", "?"), s.get("rearm_frac", "?"),
-                             s.get("rearm_hold_ms", "?"), s.get("snap_pre", "?"),
-                             s.get("snap_post", "?"),
-                             "" if rec == "1" else "  (NOT a record build: no snapshots)"))
+        self._boot_info = " | ".join((
+            "fw %s" % s.get("fw", "?"),
+            "record build" if rec == "1" else
+            self._warn_html("rec=%s: NOT a record build, no snapshots" % rec),
+            "thr z %s g, roll %s, pitch %s dps" % (s.get("thr_z", "?"), s.get("thr_roll", "?"),
+                                                  s.get("thr_pitch", "?")),
+            "rearm %s, hold %s ms" % (s.get("rearm_frac", "?"), s.get("rearm_hold_ms", "?")),
+            "snapshot %s+%s rows at %s Hz" % (s.get("snap_pre", "?"), s.get("snap_post", "?"),
+                                              s.get("snap_rate", s.get("odr", "?")))))
+        self._show_strip()
         _LOG.info("BOOT: %s", boot.raw)
         self._refresh()
 
@@ -429,14 +508,24 @@ class RecordWidget(QGroupBox):
             if self._last_drops is not None or drops:
                 _LOG.warning("Device snap_drops now %d", drops)
             self._last_drops = drops
-        self._set_status("fault", "")
+        rate = self.live_plot.lines_per_second()
+        counts = [(name, hlt.fields[key]) for name, key in
+                  (("sample q", "sample_q_drops"), ("out q", "out_q_drops"),
+                   ("serial", "serial_drops"), ("snap", "snap_drops")) if key in hlt.fields]
+        drop_text = "drops: " + ", ".join("%s %d" % nc for nc in counts)
+        if any(n for _name, n in counts):
+            drop_text = self._warn_html(drop_text)
+        self._health_info = "%s lines/s | %s" % ("-" if rate is None else "%.1f" % rate,
+                                                 drop_text)
+        self._show_strip()
         self._refresh()
 
     def _on_fault(self, flt) -> None:
         """
         @param flt  A FaultLine.
         """
-        self._set_status("fault", "DEVICE FAULT: %s %s" % (flt.code, flt.name))
+        self.card.show_fault("FAULT %s" % flt.code, "DEVICE FAULT: %s %s \u00b7 stays until the "
+                             "next Connect" % (flt.code, flt.name))
         _LOG.warning("FLT %s %s", flt.code, flt.name)
 
     def _on_connection(self, ok: bool, message: str) -> None:
@@ -444,9 +533,11 @@ class RecordWidget(QGroupBox):
         @param ok       Connected? (The message says it; kept for the log.)
         @param message  What happened.
         """
-        self._set_status("conn", message)
+        self._connected = ok
+        self._set_conn(OK if ok else WARN, message)
         self.live_plot.set_connected(ok)
         _LOG.info("Connection (%s): %s", "up" if ok else "down", message)
+        self._refresh()
 
     def _on_reader_finished(self) -> None:
         """The reader thread ended (Disconnect, or an error): back to Connect."""
@@ -455,11 +546,15 @@ class RecordWidget(QGroupBox):
         self.sim_check.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.port_combo.setEnabled(not self.sim_check.isChecked())
+        self._connected = False
+        set_state(self.conn_dot, IDLE)
+        self._refresh()
 
     def _on_reconnected(self) -> None:
         """The port came back: nothing waiting can be paired any more."""
         self.ctrl.on_reconnect()
-        self._set_status("device", "Device settings: waiting for BOOT (lost on reconnect)")
+        self._boot_info = "Device settings: waiting for BOOT (lost on reconnect)"
+        self._show_strip()
         _LOG.info("Reconnected: unmatched items cleared")
         self._refresh()
 
@@ -470,7 +565,8 @@ class RecordWidget(QGroupBox):
         @param path   The take just written.
         @param claim  Its label and session.
         """
-        self._set_status("last", "Saved %s/%s" % (claim.session, path.name))
+        self.card.add_recent(path.stem)
+        self.card.show_take(OK, path.stem, self._take_summary(path))
         _LOG.info("Saved %s/%s", claim.session, path.name)
         self.take_saved.emit(path)
 
@@ -478,7 +574,8 @@ class RecordWidget(QGroupBox):
         """
         @param message  Shown on the status line and logged; never a popup.
         """
-        self._set_status("msg", message)
+        self.msg_label.setText(message)
+        self.msg_label.show()
         _LOG.error(message)
 
     def _on_info(self, message: str) -> None:

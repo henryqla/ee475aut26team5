@@ -1,15 +1,16 @@
 """
 File:        main.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-21
+Version:     0.2.0
 Adapted from: Python/main.py in ml-on-device-playground (created by
              Anandghan), https://github.com/jake-g/ml-on-device-playground
              (branch codegen-classroom, commit 47092aa), itself a fork of
              https://github.com/anandghanw/ml-on-device-playground.
              MIT License, Copyright (c) 2025 Anandghan; see
              LICENSE-ml-on-device-playground.txt in this folder. Added: the
-             import path for cnn_config, the log file, and an exception hook.
+             import path for cnn_config, the log file, an exception hook, and
+             (request 7) the dark theme from app_styles.py.
 Description: Starts the CNN record GUI: python main.py (from this folder).
              Logs to firmware/cnn/logs/record_gui_<date>.log. Unexpected
              errors are logged instead of closing the window (PyQt5 aborts on
@@ -32,6 +33,7 @@ sys.path.insert(0, str(HERE.parent))  # firmware/cnn, for cnn_config
 
 import cnn_config as cfg  # noqa: E402  (needs the path above)
 from PyQt5.QtWidgets import QApplication  # noqa: E402
+from app_styles import apply_dark_title_bar, apply_theme  # noqa: E402
 from main_window import MainWindow  # noqa: E402
 from take_store import checkout_commit  # noqa: E402
 
@@ -65,7 +67,9 @@ def main() -> None:
                                      commit, cfg.DATA_DIR, log_file)
 
     app = QApplication(sys.argv)
+    apply_theme(app)  # Before any window, so every widget starts dark
     window = MainWindow(commit)
+    apply_dark_title_bar(window)
     window.show()
     sys.exit(app.exec_())
 

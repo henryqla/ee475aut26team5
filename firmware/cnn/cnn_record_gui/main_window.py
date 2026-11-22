@@ -1,23 +1,28 @@
 """
 File:        main_window.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-21
+Version:     0.2.0
 Adapted from: Python/main_window.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
              codegen-classroom, commit 47092aa), itself a fork of
              https://github.com/anandghanw/ml-on-device-playground.
              MIT License, Copyright (c) 2025 Anandghan; see
              LICENSE-ml-on-device-playground.txt in this folder. Kept: the
-             window, its column layout and spacing. Changed: two tabs only,
-             Record and Training; the Codegen and Live Inference tabs and the
-             inference widget are removed (handoff); a log panel and a live
-             IMU view are added.
-Description: Main window of the CNN record GUI. Record tab: the record panel
-             and collected takes on the left; on the right, the live IMU view
-             on top, then the last snapshot and the selected take (a splitter:
-             drag the bars between them to resize); the log below. Training
-             tab: a placeholder until request 3 (training and export).
+             window, the Playground tab's layout (controls and takes in a
+             left column, a big live plot top right, the take plot below it)
+             and its spacing. Changed: two tabs only, Record and Training;
+             the Codegen and Live Inference tabs and the inference widget
+             are removed (handoff); a live IMU view, a status card and a
+             serial monitor (from the Live Inference tab) are added, and the
+             parts can be resized with splitters (request 7).
+Description: Main window of the CNN record GUI. Record tab: on the left, the
+             Record panel, the Last take card and Collected takes, the full
+             window height (the column scrolls if the window is too short);
+             on the right, Live IMU on top, Last snapshot and Selected take
+             side by side below it, and the serial monitor at the bottom.
+             Drag the gaps between them to resize. Training tab: a
+             placeholder until request 3 (training and export).
 """
 
 # ============================================================================
@@ -26,39 +31,23 @@ Description: Main window of the CNN record GUI. Record tab: the record panel
 
 import logging
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (QHBoxLayout, QLabel, QMainWindow, QPlainTextEdit, QSplitter,
-                             QTabWidget, QVBoxLayout, QWidget)
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (QFrame, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QScrollArea,
+                             QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 import cnn_config as cfg
-from app_styles import AppStyles
+from app_styles import AppStyles, set_role
 from collected_data_widget import CollectedDataWidget
 from live_plot import LivePlot
 from record_widget import RecordWidget
+from serial_monitor import SerialMonitor
 from snapshot_plot import SnapshotPlot
+from status_card import StatusCard
 from take_store import TakeStore
 
 # ============================================================================
 # Classes
 # ============================================================================
-
-
-class QtLogHandler(logging.Handler):
-    """Copies log records into a text panel. Records come from the GUI thread
-    only (the reader thread reports through Qt signals, never the log)."""
-
-    def __init__(self, panel: QPlainTextEdit) -> None:
-        """
-        @param panel  Where the lines go.
-        """
-        super().__init__()
-        self.panel = panel
-
-    def emit(self, record: logging.LogRecord) -> None:
-        """
-        @param record  One log record.
-        """
-        self.panel.appendPlainText(self.format(record))
 
 
 class MainWindow(QMainWindow):
@@ -70,62 +59,90 @@ class MainWindow(QMainWindow):
         """
         super().__init__()
         self.setWindowTitle("CNN Record (firmware-bench record mode)")
-        self.resize(1400, 900)
+        self.resize(AppStyles.WINDOW_START_WIDTH, AppStyles.WINDOW_START_HEIGHT)
 
         tabs = QTabWidget()
         self.setCentralWidget(tabs)
         store = TakeStore(cfg.DATA_DIR)
 
-        # ---- Record tab
-        record_tab = QWidget()
-        outer = QVBoxLayout(record_tab)
-        main_layout = QHBoxLayout()
-        main_layout.setSpacing(AppStyles.WIDGET_SPACING)
-        outer.addLayout(main_layout, 1)
-
         self.live_plot = LivePlot("Live IMU")
         self.last_plot = SnapshotPlot("Last snapshot")
         self.take_plot = SnapshotPlot("Selected take")
-        self.record_widget = RecordWidget(store, gui_commit, self.last_plot, self.live_plot)
+        self.card = StatusCard("Last take")
+        self.record_widget = RecordWidget(store, gui_commit, self.last_plot, self.live_plot,
+                                          self.card)
         self.collected_widget = CollectedDataWidget(store, self.take_plot)
+        self.serial_monitor = SerialMonitor("Serial Monitor")
 
-        left = QVBoxLayout()
-        left.setSpacing(AppStyles.WIDGET_SPACING)
-        left.addWidget(self.record_widget, 3)
-        left.addWidget(self.collected_widget, 2)
-        main_layout.addLayout(left, 2)
+        # ---- Record tab
+        # Left column, full height: it scrolls (vertically only) when the
+        # window is too short for all three panels.
+        left = set_role(QWidget(), "column")
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(AppStyles.WIDGET_SPACING)
+        left_layout.addWidget(self.record_widget)
+        left_layout.addWidget(self.card)
+        left_layout.addWidget(self.collected_widget, 1)  # The take list gets the spare height
+        left_scroll = set_role(QScrollArea(), "column")
+        left_scroll.setWidget(left)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QFrame.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setMinimumWidth(AppStyles.LEFT_COLUMN_MIN_WIDTH)
 
-        right = QSplitter(Qt.Vertical)
-        right.setChildrenCollapsible(False)  # A dragged bar never hides a plot entirely
+        # Right column: Live IMU, then the two snapshot plots side by side,
+        # then the serial monitor.
+        snapshot_row = QWidget()
+        row_layout = QHBoxLayout(snapshot_row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(AppStyles.WIDGET_SPACING)
+        row_layout.addWidget(self.last_plot)
+        row_layout.addWidget(self.take_plot)
         for plot in (self.live_plot, self.last_plot, self.take_plot):
-            plot.setMinimumHeight(160)
-            right.addWidget(plot)
-        right.setSizes([1000, 1000, 1000])   # Equal thirds to start
-        main_layout.addWidget(right, 3)
+            plot.setMinimumHeight(AppStyles.PLOT_MIN_HEIGHT)
 
-        self.log_panel = QPlainTextEdit()
-        self.log_panel.setReadOnly(True)
-        self.log_panel.setMaximumBlockCount(500)   # Recent lines; the file keeps all
-        self.log_panel.setFixedHeight(130)
-        self.log_panel.setStyleSheet(AppStyles.STATUS_STYLE)
-        outer.addWidget(self.log_panel)
-        handler = QtLogHandler(self.log_panel)
-        handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s",
-                                               "%H:%M:%S"))
-        logging.getLogger().addHandler(handler)
+        self.right = QSplitter(Qt.Vertical)
+        self.right.setChildrenCollapsible(False)  # A dragged bar never hides a panel entirely
+        self.right.setHandleWidth(AppStyles.WIDGET_SPACING)
+        self.right.addWidget(self.live_plot)
+        self.right.addWidget(snapshot_row)
+        self.right.addWidget(self.serial_monitor)
+        self.right.setStretchFactor(0, 1)
+        self.right.setStretchFactor(1, 1)
+        self.right.setStretchFactor(2, 0)         # Window resizes go to the plots
+        self._sized = False                       # Start sizes set on first show
 
+        columns = QSplitter(Qt.Horizontal)
+        columns.setChildrenCollapsible(False)
+        columns.setHandleWidth(AppStyles.WIDGET_SPACING)
+        columns.addWidget(left_scroll)
+        columns.addWidget(self.right)
+        columns.setStretchFactor(0, 1)       # About a third and two thirds
+        columns.setStretchFactor(1, 2)
+        columns.setSizes([1000, 2000])
+
+        record_tab = QWidget()
+        outer = QVBoxLayout(record_tab)
+        outer.setContentsMargins(12, 8, 12, 12)
+        outer.addWidget(columns)
         tabs.addTab(record_tab, "Record")
+
+        logging.getLogger().addHandler(self.serial_monitor.handler)
 
         # ---- Training tab (request 3)
         training_tab = QWidget()
         t_layout = QVBoxLayout(training_tab)
+        t_layout.setContentsMargins(12, 8, 12, 12)
+        t_box = QGroupBox("Training")
+        t_box_layout = QVBoxLayout(t_box)
         placeholder = QLabel("Training and export come in request 3 (firmware/cnn/training/), "
                              "after decisions C10 (normalization), C11 (split and minimum "
                              "takes) and C12 (Python and package versions).\n\nTakes "
                              "recorded here are saved under:\n%s" % cfg.DATA_DIR)
         placeholder.setWordWrap(True)
-        placeholder.setStyleSheet(AppStyles.get_label_style())
-        t_layout.addWidget(placeholder)
+        t_box_layout.addWidget(placeholder)
+        t_layout.addWidget(t_box)
         t_layout.addStretch(1)
         tabs.addTab(training_tab, "Training")
 
@@ -135,6 +152,30 @@ class MainWindow(QMainWindow):
             lambda path: self.collected_widget.refresh(select=path))
         self.collected_widget.take_moved.connect(self.record_widget.take_moved)
         self.collected_widget.set_session(self.record_widget.ctrl.session)
+
+    def showEvent(self, event) -> None:
+        """
+        First show: sets the right column's start sizes once the real window
+        height is known (QSplitter.setSizes only keeps proportions).
+        @param event  The show event.
+        """
+        super().showEvent(event)
+        if not self._sized:
+            self._sized = True
+            QTimer.singleShot(0, self._set_start_sizes)
+
+    def _set_start_sizes(self) -> None:
+        """Serial monitor text box MONITOR_START_HEIGHT tall (less in a short
+        window, so the plots keep their room); Live IMU gets a little more
+        of the rest than the snapshot row."""
+        total = sum(self.right.sizes())
+        text = int(total * AppStyles.MONITOR_START_SHARE)
+        text = max(AppStyles.MONITOR_MIN_HEIGHT, min(AppStyles.MONITOR_START_HEIGHT, text))
+        overhead = self.serial_monitor.height() - self.serial_monitor.text.height()
+        monitor = text + overhead
+        plots = max(0, total - monitor)
+        live = int(plots * AppStyles.LIVE_PLOT_SHARE)
+        self.right.setSizes([live, plots - live, monitor])
 
     def closeEvent(self, event) -> None:
         """

@@ -1,8 +1,8 @@
 """
 File:        collected_data_widget.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-21
+Version:     0.2.0
 Adapted from: Python/collected_data_widget.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
              codegen-classroom, commit 47092aa), itself a fork of
@@ -13,6 +13,7 @@ Adapted from: Python/collected_data_widget.py in ml-on-device-playground,
              take files (TakeStore) instead of data/*.txt; adds Relabel;
              Delete asks first and moves the take to <session>/_deleted/;
              "Delete All" is removed (too easy to lose a session).
+             Restyled (request 7): styles from app_styles.py.
 Description: The "Collected takes" panel: the current session's takes,
              oldest first. Selecting one plots it; Delete and Relabel act on
              the selected take.
@@ -27,10 +28,11 @@ from typing import Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (QComboBox, QGroupBox, QHBoxLayout, QLabel, QListWidget,
-                             QListWidgetItem, QMessageBox, QPushButton, QVBoxLayout)
+                             QListWidgetItem, QMessageBox, QPushButton, QSizePolicy,
+                             QVBoxLayout)
 
 import cnn_config as cfg
-from app_styles import AppStyles
+from app_styles import AppStyles, set_role
 from snapshot_plot import SnapshotPlot
 from take_store import TakeStore, load_take
 
@@ -52,28 +54,29 @@ class CollectedDataWidget(QGroupBox):
         @param plot   Where the selected take is drawn.
         """
         super().__init__("Collected takes")
-        self.setStyleSheet(AppStyles.get_group_box_style())
         self.store = store
         self.plot = plot
         self.session = ""
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(AppStyles.PANEL_SPACING)
 
         self.count_label = QLabel("")
-        self.count_label.setStyleSheet(AppStyles.get_label_style())
+        self.count_label.setWordWrap(True)
         layout.addWidget(self.count_label)
 
         self.take_list = QListWidget()
-        self.take_list.setStyleSheet(AppStyles.get_list_widget_style())
+        self.take_list.setMinimumHeight(AppStyles.TAKE_LIST_MIN_HEIGHT)
+        # Takes the spare height only: it never makes the left column scroll
+        # while it could still shrink to its minimum.
+        self.take_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.take_list.currentItemChanged.connect(self._on_selected)
         layout.addWidget(self.take_list, 1)
 
         relabel_row = QHBoxLayout()
         self.relabel_combo = QComboBox()
-        self.relabel_combo.setStyleSheet(AppStyles.get_combo_box_style())
         self.relabel_combo.addItems(cfg.LABELS)
         self.relabel_button = QPushButton("Relabel")
-        self.relabel_button.setStyleSheet(AppStyles.get_button_style())
         self.relabel_button.clicked.connect(self._relabel_selected)
         relabel_row.addWidget(self.relabel_combo, 1)
         relabel_row.addWidget(self.relabel_button)
@@ -81,17 +84,16 @@ class CollectedDataWidget(QGroupBox):
 
         buttons = QHBoxLayout()
         self.delete_button = QPushButton("Delete take")
-        self.delete_button.setStyleSheet(AppStyles.get_button_style())
         self.delete_button.clicked.connect(self._delete_selected)
         self.refresh_button = QPushButton("Refresh")
-        self.refresh_button.setStyleSheet(AppStyles.get_button_style())
         self.refresh_button.clicked.connect(lambda: self.refresh())
         buttons.addWidget(self.delete_button)
         buttons.addWidget(self.refresh_button)
         layout.addLayout(buttons)
 
-        note = QLabel("Delete moves the take to the session's _deleted folder.")
-        note.setStyleSheet(AppStyles.get_note_label_style())
+        note = set_role(QLabel("Delete moves the take to the session's _deleted folder."),
+                        "note")
+        note.setWordWrap(True)
         layout.addWidget(note)
 
     def set_session(self, session: str) -> None:
@@ -156,11 +158,12 @@ class CollectedDataWidget(QGroupBox):
         except (OSError, ValueError) as exc:
             self.plot.clear("Cannot read %s: %s" % (path.name, exc))
             return
+        # The time received early: the line is cut off with "..." when too long.
         self.plot.show_values(values, n_pre, rate,
-                              "%s  label %s  seq %s  rule %s  fw %s  %s" % (
-                                  path.name, header.get("label", "?"), header.get("seq", "?"),
-                                  header.get("rule_class", "?"), header.get("fw", "?"),
-                                  header.get("pc_received", "")))
+                              "%s  %s  label %s  seq %s  rule %s  fw %s" % (
+                                  path.name, header.get("pc_received", ""),
+                                  header.get("label", "?"), header.get("seq", "?"),
+                                  header.get("rule_class", "?"), header.get("fw", "?")))
 
     def _relabel_selected(self) -> None:
         """Moves the selected take under the label chosen in the dropdown."""
