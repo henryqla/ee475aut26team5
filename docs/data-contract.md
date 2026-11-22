@@ -399,6 +399,12 @@ the same millisecond, so a re-sent segment is recognized and skipped.
 | `geog` | generated `geography(Point, 4326)` | Computed from `lon`/`lat` |
 | `received_at` | `timestamptz` | Filled in by the database |
 
+A label tap is matched to the device's event closest in time from 5 s before to 2 s after the
+tap. With no device event there, the app saves the tap as its own event: `event_class` =
+`UNKNOWN`, `conf` = 0, `roll_peak` = `pitch_peak` = 0, and `peak_z` = the largest segment
+`peak_z` in that window (0 only if no segments arrived). Events saved before Nov 22 2026 have
+`peak_z` = 0 for such taps.
+
 Deleting a trip deletes its segments and events too. Only Ben does this (e.g. to clear fake data);
 the app can't delete anything.
 
@@ -607,3 +613,4 @@ Earlier v0.3 changes:
 - `road_quality_in_area`: each segment counts along the stretch of road it drove, so pieces meet even at highway speed; `length_m` is now the road driven inside the piece (no longer always 15); new optional `cell_m` piece size (default 15, between 5 and 1000) (§7).
 - `road_quality_snapped` with `lanes_dir`: OK from Scott; the app's Road quality view switched to it from `road_quality_in_area` (`piece_m` 15 / 60 / 240 m by zoom, "© OpenStreetMap contributors" under the map legend) (§7). Line width and side offset now come from `lanes_dir` instead of a fixed 5 m (§8).
 - First numeric map color thresholds: green 0.05, yellow 0.12, light red 0.25, dark red 0.50 g, from the first clean drive; to be retuned after speed normalization (§8).
+- Label taps match device events from 5 s before to 2 s after the tap (was: only before); a tap with no device event gets `peak_z` from the segments around it instead of 0 (§7).

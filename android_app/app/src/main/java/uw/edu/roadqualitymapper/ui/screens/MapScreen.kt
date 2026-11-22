@@ -557,7 +557,9 @@ private fun EventSpotMarker(spot: EventSpot, colorMode: ColorMode) {
         colorMode = colorMode,
         eventClass = spot.eventClass,
         position = position,
-        snippet = "Hit by %d of %d drives · %.1f g".format(spot.hits, spot.passes, spot.maxPeakZ),
+        // 0 g means no device reading (an older hand label), so no g is shown then.
+        snippet = "Hit by %d of %d drives".format(spot.hits, spot.passes) +
+            (if (spot.maxPeakZ > 0) " · %.1f g".format(spot.maxPeakZ) else ""),
     )
 }
 
@@ -589,7 +591,8 @@ private fun DriveOnMap(drive: Drive, lineWidthPx: Float, colorMode: ColorMode) {
             colorMode = colorMode,
             eventClass = eventClass,
             position = position,
-            snippet = "%.1f g · %d%% sure".format(event.peakZ, (event.conf * 100).toInt()),
+            snippet = (if (event.peakZ > 0) "%.1f g · ".format(event.peakZ) else "") +
+                "%d%% sure".format((event.conf * 100).toInt()),
         )
     }
 }

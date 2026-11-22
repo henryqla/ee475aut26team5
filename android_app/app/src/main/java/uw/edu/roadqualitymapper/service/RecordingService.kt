@@ -54,6 +54,7 @@ import uw.edu.roadqualitymapper.data.local.RoadDatabase
 import uw.edu.roadqualitymapper.data.local.SegmentEntity
 import uw.edu.roadqualitymapper.data.local.toEntity
 import java.util.UUID
+import kotlin.math.abs
 
 /** GPS once a second (contract §6). */
 private const val GPS_INTERVAL_MS = 1_000L
@@ -71,10 +72,22 @@ private const val FINAL_UPLOAD_TIMEOUT_MS = 30_000L
 private const val WAIT_FOR_FIX_MS = MAX_FIX_GAP_MS + 500
 
 /**
- * A label tap applies to the device's event from up to this long before it: the passenger
- * reacts after feeling the bump. With no such event, the tap is saved as its own event.
+ * A label tap applies to the device's event from this long before it (the passenger reacted
+ * after feeling the bump) to this long after it (tapped while going over it, or just before).
+ * With no such event, the tap is saved as its own event.
  */
 private const val LABEL_LOOKBACK_MS = 5_000L
+private const val LABEL_LOOKAHEAD_MS = 2_000L
+
+/**
+ * How long a tap waits before it's matched. The device sends an event up to 1.25 s after its
+ * peak (once the bump is over), so an event from up to LABEL_LOOKAHEAD_MS after the tap needs this
+ * long to arrive, plus a little for Bluetooth.
+ */
+private const val LABEL_WAIT_MS = 4_000L
+
+/** Segments kept in memory for a tap with no device event to take its peak from: ~30 s. */
+private const val RECENT_SEGMENTS = 30
 
 private const val CHANNEL_ID = "recording"
 private const val NOTIFICATION_ID = 1
@@ -138,6 +151,15 @@ class RecordingService : Service() {
     /** The device's events saved in the last few seconds, which a label tap can still apply to. */
     private data class RecentEvent(val id: String, val t: Long)
     private val recentEvents = ArrayDeque<RecentEvent>()
+
+    /** Taps still waiting LABEL_WAIT_MS to be matched. Stop applies them at once. */
+    private class PendingLabel(val trip: Trip, val label: EventClass, val tapTime: Long) {
+        var job: Job? = null
+    }
+    private val pendingLabels = mutableListOf<PendingLabel>()
+
+    /** The last few segments as they arrived, for the peak of a tap with no device event. */
+    private val recentSegments = ArrayDeque<SegMessage>()
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -204,6 +226,7 @@ class RecordingService : Service() {
         waiting.clear()
         waitingLabels.clear()
         recentEvents.clear()
+        recentSegments.clear()
         RecordingState.update { RecordingStatus(recording = true, trip = newTrip) }
 
         // Save the trip before anything that belongs to it.
@@ -243,7 +266,13 @@ class RecordingService : Service() {
         RecordingState.update { it.copy(recording = false, trip = it.trip?.copy(endTime = endTime)) }
         updateNotification("Uploading the trip…")
 
+        // Taps from the last few seconds: match them now, with what has arrived, before the upload.
+        val labels = pendingLabels.toList()
+        pendingLabels.clear()
+        labels.forEach { it.job?.cancel() }
+
         finishJob = scope.launch {
+            labels.forEach { applyLabel(it.trip, it.label, it.tapTime) }
             dao.setEndTime(currentTrip.id, endTime)
             withTimeoutOrNull(FINAL_UPLOAD_TIMEOUT_MS) { TripUploader.uploadPending(applicationContext) }
             finishJob = null
@@ -293,6 +322,10 @@ class RecordingService : Service() {
             val message = received.message
             // Unsynced messages carry device time, not phone time, so they can't be placed (contract §2).
             if ((message is SegMessage || message is EvtMessage) && message.synced) {
+                if (message is SegMessage) {
+                    recentSegments.addLast(message)
+                    while (recentSegments.size > RECENT_SEGMENTS) recentSegments.removeFirst()
+                }
                 waiting += message
                 saveReadyMessages()
             }
@@ -375,53 +408,69 @@ class RecordingService : Service() {
     }
 
     /**
-     * A Pothole!/Speed bump! tap. Labels the device's event from the last few seconds if there is
-     * one, so we learn whether the detector got it right; otherwise saves the tap as its own event
-     * (class UNKNOWN, labeled), so we learn what the detector missed.
+     * A Pothole!/Speed bump! tap. Labels the device's event from around the tap if there is one
+     * (the one closest in time), so we learn whether the detector got it right; otherwise saves the
+     * tap as its own event (class UNKNOWN, labeled), so we learn what the detector missed.
+     * Waits LABEL_WAIT_MS first, so an event from just after the tap has arrived.
      */
     private fun label(label: EventClass, tapTime: Long) {
         val currentTrip = trip ?: return
-        val inWindow = { t: Long -> tapTime - t in 0..LABEL_LOOKBACK_MS }
-        val saved = "Saved"
+        RecordingState.update { it.copy(lastLabel = "Saved") }   // it will be, one way or the other
+        val pending = PendingLabel(currentTrip, label, tapTime)
+        pendingLabels += pending
+        pending.job = scope.launch {
+            delay(LABEL_WAIT_MS)
+            pendingLabels.remove(pending)
+            applyLabel(pending.trip, pending.label, pending.tapTime)
+        }
+    }
+
+    private suspend fun applyLabel(currentTrip: Trip, label: EventClass, tapTime: Long) {
+        val inWindow = { t: Long -> t in (tapTime - LABEL_LOOKBACK_MS)..(tapTime + LABEL_LOOKAHEAD_MS) }
+        val closest = { t: Long -> abs(t - tapTime) }
 
         // A device event still waiting for its GPS fix: label it when it's saved.
-        val waitingEvent = waiting.filterIsInstance<EvtMessage>().lastOrNull { inWindow(it.t) && it !in waitingLabels }
+        val waitingEvent = waiting.filterIsInstance<EvtMessage>()
+            .filter { inWindow(it.t) && it !in waitingLabels }
+            .minByOrNull { closest(it.t) }
         if (waitingEvent != null) {
             waitingLabels[waitingEvent] = label
-            RecordingState.update { it.copy(lastLabel = saved) }
             return
         }
 
-        val recent = recentEvents.lastOrNull { inWindow(it.t) }
-        scope.launch {
-            // Fails if that event was already uploaded; then the tap gets its own event instead.
-            if (recent != null && dao.labelEvent(recent.id, label.name) > 0) {
-                recentEvents.remove(recent)   // one label per event
-                RecordingState.update { it.copy(lastLabel = saved) }
-                return@launch
-            }
-            val fix = fixes.at(tapTime)
-            dao.insertEvent(
-                EventEntity(
-                    id = UUID.randomUUID().toString(),
-                    tripId = currentTrip.id,
-                    vehicleId = currentTrip.vehicleId,
-                    t = tapTime,
-                    lat = fix?.lat,
-                    lon = fix?.lon,
-                    speedMps = fix?.speedMps,
-                    gpsAccuracyM = fix?.accuracyM,
-                    headingDeg = fix?.headingDeg,
-                    eventClass = EventClass.UNKNOWN,   // the device didn't detect anything
-                    peakZ = 0.0,
-                    rollPeak = 0.0,
-                    pitchPeak = 0.0,
-                    conf = 0.0,
-                    userLabel = label,
-                )
-            )
-            RecordingState.update { it.copy(events = it.events + 1, lastLabel = saved) }
+        // A device event already saved. Fails if it was already uploaded; then the tap gets its own event.
+        val recent = recentEvents.filter { inWindow(it.t) }.minByOrNull { closest(it.t) }
+        if (recent != null && dao.labelEvent(recent.id, label.name) > 0) {
+            recentEvents.remove(recent)   // one label per event
+            return
         }
+
+        // No device event: the tap's own event, with the biggest jolt the device measured around
+        // it (each segment's peak_z), so it isn't 0 g. 0 only if no segments came in at all.
+        val peakZ = recentSegments
+            .filter { it.tEnd >= tapTime - LABEL_LOOKBACK_MS && it.tStart <= tapTime + LABEL_LOOKAHEAD_MS }
+            .maxOfOrNull { it.peakZ } ?: 0.0
+        val fix = fixes.at(tapTime)
+        dao.insertEvent(
+            EventEntity(
+                id = UUID.randomUUID().toString(),
+                tripId = currentTrip.id,
+                vehicleId = currentTrip.vehicleId,
+                t = tapTime,
+                lat = fix?.lat,
+                lon = fix?.lon,
+                speedMps = fix?.speedMps,
+                gpsAccuracyM = fix?.accuracyM,
+                headingDeg = fix?.headingDeg,
+                eventClass = EventClass.UNKNOWN,   // the device didn't detect anything
+                peakZ = peakZ,
+                rollPeak = 0.0,
+                pitchPeak = 0.0,
+                conf = 0.0,
+                userLabel = label,
+            )
+        )
+        RecordingState.update { it.copy(events = it.events + 1) }
     }
 
     /** The phone time a message's location is taken at: a segment's middle, an event's peak. */
