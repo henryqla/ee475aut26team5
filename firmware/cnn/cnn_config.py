@@ -1,10 +1,12 @@
 """
 File:        cnn_config.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
-Description: Every tunable value for the CNN record GUI (and, from request 3,
-             the training pipeline), per cnn-record-train-handoff.md v0.4,
+Date:        2026-11-22
+Version:     0.2.0
+Change:      0.2.0: training and export settings (request 3; C10, C11, C12
+             decided by the owner 2026-11-22).
+Description: Every tunable value for the CNN record GUI and the training
+             pipeline, per cnn-record-train-handoff.md v0.4,
              "DRAFT values": one Python config location, each value with its
              status and reason. Firmware values live in
              firmware/firmware-bench/config.h, not here; the few repeated here
@@ -140,3 +142,79 @@ SIM_DISCONNECT_S = 2.0
 
 # DRAFT (handoff). Fixed seed, so a simulated run is the same every time.
 SIM_SEED = 475
+
+# ============================================================================
+# Constants: training and export (request 3)
+# ============================================================================
+
+# The training code's folder (firmware/cnn/training/).
+TRAINING_DIR = Path(__file__).resolve().parent / "training"
+
+# Owner (2026-11-22). Each run saves its log, model, model_data.h, report and
+# frozen test set in TRAIN_RUNS_DIR/<YYYY-MM-DD_HHMMSS>/. Git-ignored: keep the
+# runs worth keeping elsewhere.
+TRAIN_RUNS_DIR = TRAINING_DIR / "runs"
+
+# Where make_sample_set.py writes the made-up take sets for TRN-1, TRN-3 and
+# TRN-4. Rebuilt from a fixed seed on demand, so it is git-ignored.
+SAMPLE_DATA_DIR = TRAINING_DIR / "sample_data"
+
+# DRAFT (handoff). Fixed seed: two runs on the same data give the same numbers
+# (TRN-1). Seeds the session choice, the oversampling and TensorFlow.
+TRAIN_SEED = 475
+
+# DRAFT (handoff, "DRAFT values": "ordinary small-CNN defaults").
+TRAIN_BATCH_SIZE = 16
+TRAIN_MAX_EPOCHS = 100
+TRAIN_PATIENCE = 10            # Early stopping: epochs without a lower validation loss
+TRAIN_LEARNING_RATE = 0.001    # Adam's default
+
+# DECIDED (C11, owner 2026-11-22): split by whole sessions. One session in
+# SPLIT_HOLDOUT_EVERY (at least one) is held out as the test set, then one in
+# SPLIT_HOLDOUT_EVERY of the rest (at least one) as the validation set for
+# early stopping; the rest train. Below 10 sessions that is "leave one session
+# out". The sessions are picked with TRAIN_SEED unless the run names them.
+SPLIT_HOLDOUT_EVERY = 5
+
+# A run needs at least one session each to train, validate and test.
+SPLIT_MIN_SESSIONS = 3
+
+# DECIDED (C11): takes per class per session type before a model is reported.
+# A run below it still trains and exports, but its report says NOT REPORTABLE.
+MIN_TAKES_PER_CLASS = 30
+
+# Session types, read from the session name: a "_"-separated word, as in
+# 2026-11-12_bench or 2026-11-14_car_route1. Anything else is "other". The
+# minimum above is counted per type.
+SESSION_TYPES = ("bench", "car")
+
+# DRAFT (handoff, "Base model", from the framework). Kernel and pooling get
+# tuned once there is data. At 416 Hz a kernel of 3 spans about 7 ms.
+CNN_CONV_FILTERS = (32, 32)    # One Conv1D + MaxPooling1D pair per entry
+CNN_KERNEL_SIZE = 3
+CNN_POOL_SIZE = 2
+CNN_DENSE_UNITS = 16
+
+# Unit of each model channel (C3: accel in g, gyro in dps), for model_data.h.
+CHANNEL_UNITS = {"az_hp": "g", "gx": "dps", "gy": "dps"}
+
+# Take header fields that every take in one run must share; the loader refuses
+# a mixed set and names the files (C7, handoff "Loader checks"). fw stands in
+# for the preprocessing settings, which the SNB line does not carry: any change
+# to the HPF, full scales or axis mapping must also bump FW_VERSION.
+RUN_SETTINGS_KEYS = ("rate_hz", "n_pre", "n_post", "n_rows", "channels", "fw")
+
+# BOOT fields compared as well, among the takes whose header holds the BOOT
+# line (a native USB reset often loses it).
+BOOT_SETTINGS_KEYS = ("odr", "acc_fs", "gyr_fs", "hpf_hz", "settle_ms")
+
+# Rule class as saved in the take header (Serial EVT names) -> training class.
+# Only the training code maps BUMP to SPEED_BUMP (handoff). UNKNOWN and
+# "missing" have no entry: owner (2026-11-22), they count as wrong for every
+# class. The rule never answers FALSE_TRIGGER.
+RULE_TO_CLASS = {"POTHOLE": "POTHOLE", "BUMP": "SPEED_BUMP"}
+
+# Owner sets (TRN-2): the largest allowed difference between the Keras and the
+# TFLite output probabilities on the frozen test set. None = not set yet: the
+# report shows the difference without judging it.
+TFLITE_MATCH_TOL = None

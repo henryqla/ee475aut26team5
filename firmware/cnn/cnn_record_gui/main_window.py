@@ -1,8 +1,10 @@
 """
 File:        main_window.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-21
-Version:     0.2.0
+Date:        2026-11-22
+Version:     0.3.0
+Change:      0.3.0: the Training tab runs training (request 3,
+             training_widget.py) instead of showing a placeholder.
 Adapted from: Python/main_window.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
              codegen-classroom, commit 47092aa), itself a fork of
@@ -21,8 +23,8 @@ Description: Main window of the CNN record GUI. Record tab: on the left, the
              window height (the column scrolls if the window is too short);
              on the right, Live IMU on top, Last snapshot and Selected take
              side by side below it, and the serial monitor at the bottom.
-             Drag the gaps between them to resize. Training tab: a
-             placeholder until request 3 (training and export).
+             Drag the gaps between them to resize. Training tab: picks
+             sessions and runs training and export (training_widget.py).
 """
 
 # ============================================================================
@@ -32,8 +34,8 @@ Description: Main window of the CNN record GUI. Record tab: on the left, the
 import logging
 
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtWidgets import (QFrame, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QScrollArea,
-                             QSplitter, QTabWidget, QVBoxLayout, QWidget)
+from PyQt5.QtWidgets import (QFrame, QHBoxLayout, QMainWindow, QScrollArea, QSplitter,
+                             QTabWidget, QVBoxLayout, QWidget)
 
 import cnn_config as cfg
 from app_styles import AppStyles, set_role
@@ -44,6 +46,7 @@ from serial_monitor import SerialMonitor
 from snapshot_plot import SnapshotPlot
 from status_card import StatusCard
 from take_store import TakeStore
+from training_widget import TrainingWidget
 
 # ============================================================================
 # Classes
@@ -130,21 +133,9 @@ class MainWindow(QMainWindow):
 
         logging.getLogger().addHandler(self.serial_monitor.handler)
 
-        # ---- Training tab (request 3)
-        training_tab = QWidget()
-        t_layout = QVBoxLayout(training_tab)
-        t_layout.setContentsMargins(12, 8, 12, 12)
-        t_box = QGroupBox("Training")
-        t_box_layout = QVBoxLayout(t_box)
-        placeholder = QLabel("Training and export come in request 3 (firmware/cnn/training/), "
-                             "after decisions C10 (normalization), C11 (split and minimum "
-                             "takes) and C12 (Python and package versions).\n\nTakes "
-                             "recorded here are saved under:\n%s" % cfg.DATA_DIR)
-        placeholder.setWordWrap(True)
-        t_box_layout.addWidget(placeholder)
-        t_layout.addWidget(t_box)
-        t_layout.addStretch(1)
-        tabs.addTab(training_tab, "Training")
+        # ---- Training tab (request 3): runs firmware/cnn/training/train.py
+        self.training_widget = TrainingWidget()
+        tabs.addTab(self.training_widget, "Training")
 
         # ---- Wiring
         self.record_widget.session_changed.connect(self.collected_widget.set_session)
@@ -179,9 +170,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         """
-        Stops the reader thread before the window closes.
+        Stops the reader thread, and a training run after its current
+        epoch, before the window closes.
         @param event  The close event.
         """
         self.record_widget.shutdown()
         self.live_plot.shutdown()
+        self.training_widget.shutdown()
         super().closeEvent(event)

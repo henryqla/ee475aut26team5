@@ -1,10 +1,17 @@
 # Local only, never committed:
-# - .venv: each computer builds its own from cnn_record_gui/requirements.txt
+# - .venv: an old venv inside the repo. The shared venv now lives at
+#   %USERPROFILE%\venvs\ee475-cnn (TensorFlow's paths are too long in here);
+#   each computer builds its own from the requirements.txt files
 # - __pycache__ / *.pyc: written by Python automatically
 # - data: recorded takes are shared outside git (team decision, 2026-11-18)
 # - logs: GUI logs; attach a specific log as test evidence when one is asked for
+# - training/runs: training run folders (owner, 2026-11-22); keep the ones
+#   worth keeping elsewhere
+# - training/sample_data: rebuilt from a fixed seed by training/make_sample_set.py
 .venv/
 __pycache__/
 *.pyc
 data/
 logs/
+training/runs/
+training/sample_data/

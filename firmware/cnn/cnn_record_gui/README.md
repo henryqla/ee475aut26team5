@@ -42,8 +42,12 @@ You need:
 
 Two words used below:
 
-- **Command Prompt** is a black window where you type commands. Type each
-  command exactly as shown, then press Enter.
+- **Command Prompt** and **PowerShell** are the two kinds of window where you
+  type commands. Type each command exactly as shown, then press Enter. Where
+  the two need different commands, this guide shows both, first for
+  **Command Prompt**, then for **PowerShell**. Use the one that matches your
+  window: in PowerShell, each line starts with `PS`. The terminal inside VS Code
+  is PowerShell unless you changed it.
 - A **folder path** is the address of a folder, for example
   `C:\Users\you\Documents\GitHub\ee475aut26team5`.
 
@@ -51,11 +55,15 @@ Two words used below:
 
 ## Part 1: Install the program (once per computer)
 
-1. **Open Command Prompt.** Click the Start button, type `cmd`, and press Enter.
-   A black window opens. Use Command Prompt, not PowerShell, because the
-   commands in this guide are written for Command Prompt.
+1. **Open a command window.** Click the Start button, type `cmd`, and press
+   Enter: Command Prompt opens. PowerShell works too, for example VS Code's
+   terminal (**Terminal > New Terminal**); then use the PowerShell commands.
+   Don't mix them up: PowerShell doesn't understand `%USERPROFILE%`, so a
+   Command Prompt command typed into PowerShell fails, or creates a folder
+   literally named `%USERPROFILE%` in the wrong place.
 
-2. **Check that Python 3.11 is installed.** Type this and press Enter:
+2. **Check that Python 3.11 is installed.** Type this (the same in both windows)
+   and press Enter:
 
    ```
    python --version
@@ -68,8 +76,8 @@ Two words used below:
      the last 3.11 version with a Windows installer. Click
      **Windows installer (64-bit)** and run the file you downloaded. On the
      installer's first screen, tick **Add python.exe to PATH**, then click
-     **Install Now**. When it finishes, close Command Prompt, open a new one, and
-     check again.
+     **Install Now**. When it finishes, close the command window, open a new
+     one, and check again.
    - If it shows a different version, such as 3.12 or 3.13, install 3.11.9 the
      same way. In step 5, type `py -3.11` instead of `python`.
 
@@ -78,31 +86,66 @@ Two words used below:
    the address bar at the top of the window. The address turns into text that
    is already selected. Press Ctrl+C to copy it.
 
-4. **Go to that folder in Command Prompt.** Type `cd /d "`, paste the address
-   with Ctrl+V, type a closing `"`, and press Enter. With your own address it
-   looks like this:
+4. **Go to that folder.** In Command Prompt, type `cd /d "`; in PowerShell,
+   type `cd "`. Then paste the address with Ctrl+V, type a closing `"`, and press
+   Enter. With your own address it looks like this:
+
+   Command Prompt:
 
    ```
    cd /d "C:\Users\you\Documents\GitHub\ee475aut26team5\firmware\cnn\cnn_record_gui"
+   ```
+
+   PowerShell:
+
+   ```
+   cd "C:\Users\you\Documents\GitHub\ee475aut26team5\firmware\cnn\cnn_record_gui"
    ```
 
    The text in front of the blinking cursor now ends with `cnn_record_gui>`.
 
 5. **Create the program's private add-on folder.** Type:
 
+   Command Prompt:
+
    ```
-   python -m venv .venv
+   python -m venv "%USERPROFILE%\venvs\ee475-cnn"
    ```
 
-   Nothing is printed when it works. After a few seconds a new folder called
-   `.venv` appears inside `cnn_record_gui`. The program's add-ons go into that
-   folder, so they don't change anything else on the computer.
+   PowerShell:
+
+   ```
+   python -m venv "$env:USERPROFILE\venvs\ee475-cnn"
+   ```
+
+   Nothing is printed when it works. After a few seconds a new folder
+   `venvs\ee475-cnn` appears in your user folder (`C:\Users\` followed by your
+   name). The program's add-ons go into that folder, so they don't change
+   anything else on the computer. The training program (`..\training\`) uses the
+   same folder.
+
+   The folder sits there, not inside the project folder, on purpose. TensorFlow,
+   the add-on the training program needs, has very long file names. Inside the
+   project folder they would go over Windows' 260-character limit for file
+   paths, and the install would fail halfway. It also keeps OneDrive from
+   syncing thousands of add-on files.
 
 6. **Install the add-ons.** Get the project owner's OK first, then type:
 
+   Command Prompt:
+
    ```
-   .venv\Scripts\python.exe -m pip install -r requirements.txt
+   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" -m pip install -r requirements.txt
    ```
+
+   PowerShell:
+
+   ```
+   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -m pip install -r requirements.txt
+   ```
+
+   In PowerShell, the `&` at the start is needed to run a program whose name
+   is in quotes.
 
    This downloads four add-ons and takes a few minutes:
    - PyQt5 draws the window.
@@ -115,15 +158,25 @@ Two words used below:
 
 7. **Save the list of installed versions.** Type:
 
+   Command Prompt:
+
    ```
-   .venv\Scripts\python.exe -m pip freeze > pip-freeze.txt
+   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" -m pip freeze > pip-freeze.txt
+   ```
+
+   PowerShell:
+
+   ```
+   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -m pip freeze | Out-File -Encoding utf8 pip-freeze.txt
    ```
 
    This creates a file called `pip-freeze.txt` that lists exactly what was
-   installed. Test GUI-1 asks for this file.
+   installed. Test GUI-1 asks for this file. In PowerShell, don't use `>` here:
+   it saves the file as UTF-16, which many editors show with a space between
+   every letter.
 
-Part 1 is done. You don't need to repeat it unless you delete the `.venv`
-folder.
+Part 1 is done. You don't need to repeat it unless you delete the
+`venvs\ee475-cnn` folder.
 
 ---
 
@@ -170,19 +223,27 @@ the board goes back to its normal firmware.
 
 Do this every time you want to use the program.
 
-1. Open Command Prompt (Part 1, step 1).
+1. Open Command Prompt or PowerShell (Part 1, step 1).
 2. Go to the program's folder (Part 1, steps 3 and 4).
 3. Type:
 
+   Command Prompt:
+
    ```
-   .venv\Scripts\python.exe main.py
+   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" main.py
+   ```
+
+   PowerShell:
+
+   ```
+   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" main.py
    ```
 
    After a few seconds, a window titled
    **CNN Record (firmware-bench record mode)** opens.
 
-Leave the black Command Prompt window open while you work. Closing it also
-closes the program.
+Leave the command window open while you work. Closing it also closes the
+program.
 
 ---
 
@@ -191,9 +252,11 @@ closes the program.
 ![The Record tab with the simulated device, just after a take was saved](record-gui-screenshot.png)
 
 The window is always dark, whatever your computer's own theme. It has two tabs
-at the top: **Record** and **Training**. All the work happens in the Record
-tab. The Training tab only has a note saying that training comes in a later
-version.
+at the top: **Record** and **Training**. Recording happens in the Record tab.
+The Training tab teaches the computer model from the saved takes; it is
+described in `../training/README.md`, Part 2, and needs TensorFlow, which is
+installed separately (`../training/README.md`, Part 1). Without TensorFlow the
+tab still opens, but a run stops with a message saying it is missing.
 
 The Record tab has a column of controls on the left and the graphs on the right.
 
@@ -447,8 +510,8 @@ out briefly. Takes that are already saved are never lost.
   delete.
 - **Deleted takes** go to the `_deleted` folder inside their session folder.
 - **Takes and logs stay on this computer.** `firmware\cnn\.gitignore` keeps
-  `data\`, `logs\`, `.venv\` and `__pycache__\` out of Git, so nothing you
-  record goes to GitHub. Share takes with the team another way.
+  `data\`, `logs\` and `__pycache__\` out of Git, so nothing you record goes to
+  GitHub. Share takes with the team another way.
 - **The log** is saved in `firmware\cnn\logs\`, one file per day, named
   `record_gui_` followed by the date. Each line has the time and what happened:
   - connections and disconnections;
@@ -494,8 +557,9 @@ They don't open the window, and they need neither the board nor the add-ons.
 
 **What to do:**
 
-1. Open Command Prompt and go to the program's folder (Part 1, steps 1, 3 and 4).
-2. Type:
+1. Open Command Prompt or PowerShell and go to the program's folder (Part 1,
+   steps 1, 3 and 4).
+2. Type (the same in both windows):
 
    ```
    python -m unittest discover -s tests
@@ -514,15 +578,18 @@ and opens with only the Record and Training tabs.
 
 **What to do:**
 
-1. If a `.venv` folder already exists inside `cnn_record_gui`, delete it in File
-   Explorer, so the installation starts from nothing.
+1. If the folder `venvs\ee475-cnn` already exists in your user folder
+   (`C:\Users\` followed by your name), delete it in File Explorer, so the
+   installation starts from nothing. This also removes TensorFlow, if the
+   training program was installed; install it again afterwards
+   (`..\training\README.md`, Part 1).
 2. Do all of Part 1, then Part 3.
 
 **What you should see:**
 
 - Part 1, step 6 ends with a line starting with `Successfully installed`.
 - The file `pip-freeze.txt` now exists in `cnn_record_gui`.
-- When the program starts, Command Prompt shows a line containing
+- When the program starts, the command window shows a line containing
   `Record GUI start, commit`. The line goes on with a long code of letters and
   numbers (or the word `unknown` if Git isn't installed), then says where takes
   and the log are saved.
@@ -534,7 +601,7 @@ it), the window doesn't open, or the window has other tabs.
 
 **Proof to save:**
 
-- a screenshot of the Command Prompt window;
+- a screenshot of the command window;
 - the `pip-freeze.txt` file;
 - a screenshot of the program window.
 
@@ -726,17 +793,28 @@ won't reappear, and that's fine.
 
 ## If something goes wrong
 
-- **Command Prompt says `'python' is not recognized` or `Python was not found`.**
+- **It says `'python' is not recognized` or `Python was not found`.**
   Python isn't installed, or it wasn't added to PATH. See Part 1, step 2.
 
+- **PowerShell says `Unexpected token '-m'` (or `'main.py'`).** The `&` at the
+  start of the command is missing. Use the PowerShell version of the command.
+
 - **It says `The system cannot find the path specified`, or
-  `.venv\Scripts\python.exe` is not recognized.** Command Prompt isn't in the
-  program's folder, or Part 1 isn't done. Repeat Part 1, steps 3 and 4, and check
-  that the `.venv` folder exists.
+  `...\ee475-cnn\Scripts\python.exe` is not recognized.** Part 1 isn't done, or
+  a Command Prompt command (with `%USERPROFILE%`) was typed into PowerShell.
+  Use the version for your window, and check that the folder `venvs\ee475-cnn`
+  exists in your user folder. If it says it can't open `main.py`, the window
+  isn't in the program's folder: repeat Part 1, steps 3 and 4.
+
+- **A folder named `%USERPROFILE%` appeared** (usually in your user folder or
+  the project folder). Part 1, step 5 was typed into PowerShell in its Command
+  Prompt form, so the add-on folder was made in the wrong place. Delete the
+  `%USERPROFILE%` folder in File Explorer and do step 5 again with the
+  PowerShell command.
 
 - **It says `No module named PyQt5` (or pyqtgraph, or serial).** The add-ons
   aren't installed in the program's private folder. Repeat Part 1, step 6. Start
-  the program with `.venv\Scripts\python.exe main.py`, not with `python main.py`.
+  the program with the command in Part 3, not with `python main.py`.
 
 - **The board isn't in the Port list.**
   1. Click **Refresh**.
@@ -827,6 +905,7 @@ bar is dark too.
 | `main.py` | Starts the program; sets up the log, the error hook and the dark theme |
 | `app_styles.py` | The look: color, font and size tokens, the style sheet, the dark palette and title bar |
 | `main_window.py` | The window, the tabs, the layout and its splitters |
+| `training_widget.py` | The Training tab: picks sessions, runs `../training/train.py` in the background, shows its log |
 | `record_widget.py` | The Record panel; connects the USB reader to the record logic and drives the Last take card |
 | `status_card.py` | The Last take card (display only) |
 | `collected_data_widget.py` | The Collected takes panel |
