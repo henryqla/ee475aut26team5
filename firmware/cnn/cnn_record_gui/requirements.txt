@@ -1,0 +1,9 @@
+# CNN record GUI, Python 3.11. Pins taken from ml-on-device-playground's
+# requirements.txt, GUI packages only: tensorflow, scikit-learn, seaborn and
+# matplotlib belong to training (request 3, decision C12), and
+# codegen-classroom is dropped (no Codegen tab, no Gemini key).
+# Installing needs owner approval (cnn-record-train-handoff.md v0.4).
+PyQt5~=5.15.11
+pyqtgraph~=0.13.7
+numpy~=1.26.4
+pyserial~=3.5
