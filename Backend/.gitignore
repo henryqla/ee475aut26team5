@@ -7,3 +7,6 @@ matcher/matcher.env
 valhalla/custom_files/
 matcher/.venv/
 __pycache__/
+
+# Data exports (GPS traces): stay on the laptop
+exports/out/
