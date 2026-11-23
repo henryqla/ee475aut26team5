@@ -1,8 +1,15 @@
 """
 File:        collected_data_widget.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-21
-Version:     0.2.0
+Date:        2026-11-22
+Version:     0.3.0
+Change:      0.3.0 (drive-log-manual-record-handoff.md v0.2, request 5;
+             one-press-manual-takes-handoff.md v0.1, request 8): takes saved
+             by manual Record are marked "manual" in the list, and takes cut
+             from a drive log "log"; the plot's info line shows the source and
+             falls back to pc_time_est for takes that have no pc_received.
+             Relabel and Delete work on them as on any take (the raw
+             recording in manual/ is left alone; owner, 2026-11-22).
 Adapted from: Python/collected_data_widget.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
              codegen-classroom, commit 47092aa), itself a fork of
@@ -34,7 +41,15 @@ from PyQt5.QtWidgets import (QComboBox, QGroupBox, QHBoxLayout, QLabel, QListWid
 import cnn_config as cfg
 from app_styles import AppStyles, set_role
 from snapshot_plot import SnapshotPlot
-from take_store import TakeStore, load_take
+from take_store import TakeStore, load_take, read_header
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# Take header source -> tag shown after the file name. Snapshot takes (no
+# source field) have no tag.
+_SOURCE_TAGS = {"manual": "manual", "evt": "log", "marker_only": "log"}
 
 # ============================================================================
 # Classes
@@ -121,7 +136,11 @@ class CollectedDataWidget(QGroupBox):
                 self.count_label.setText("Cannot list takes: %s" % exc)
         counts = {}
         for path in takes:
-            item = QListWidgetItem(path.name)
+            try:
+                tag = _SOURCE_TAGS.get(read_header(path).get("source", ""))
+            except OSError:
+                tag = None
+            item = QListWidgetItem("%s  (%s)" % (path.name, tag) if tag else path.name)
             item.setData(Qt.UserRole, str(path))
             self.take_list.addItem(item)
             label = path.stem.rpartition("-")[0]
@@ -159,10 +178,15 @@ class CollectedDataWidget(QGroupBox):
             self.plot.clear("Cannot read %s: %s" % (path.name, exc))
             return
         # The time received early: the line is cut off with "..." when too long.
+        source = header.get("source", "snapshot")
         self.plot.show_values(values, n_pre, rate,
-                              "%s  %s  label %s  seq %s  rule %s  fw %s" % (
-                                  path.name, header.get("pc_received", ""),
-                                  header.get("label", "?"), header.get("seq", "?"),
+                              "%s  %s  label %s  %s  seq %s  rule %s  fw %s" % (
+                                  path.name,
+                                  header.get("pc_received") or header.get("pc_time_est", ""),
+                                  header.get("label", "?"),
+                                  source if source == "snapshot" else
+                                  "%s (align %s)" % (source, header.get("align", "?")),
+                                  header.get("seq", "?"),
                                   header.get("rule_class", "?"), header.get("fw", "?")))
 
     def _relabel_selected(self) -> None:

@@ -1,8 +1,12 @@
 """
 File:        record_core.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-22
+Version:     0.2.0
+Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5;
+             one-press-manual-takes-handoff.md v0.1, request 8): counters for
+             the log build's manual Record outcomes and marks
+             (count_manual(), count_mark()).
 Description: The record logic behind the GUI, with no Qt dependency so it is
              unit-tested: arming and labels, pairing each snapshot with its
              EVT line, timeouts, resets, quick labels for car sessions, and
@@ -151,6 +155,12 @@ class Counters:
     saved_without_evt: int = 0  # Takes saved with the rule fields missing
     save_errors: int = 0        # Takes that could not be written
     device_snap_drops: Optional[int] = None  # snap_drops from the latest HLT (record build)
+    # Log build (manual Record, request 8; marks, request 5)
+    manual_takes: int = 0       # Takes saved to the session folder
+    manual_weak: int = 0        # Weak takes saved to weak/
+    manual_no_take: int = 0     # Raw recording kept, but no take (nothing found, edge)
+    manual_not_saved: int = 0   # Nothing saved (gap, reset, ok=0, lost port, write error)
+    marks: int = 0              # MARK lines sent to the drive log
 
 
 class RecordController:
@@ -290,6 +300,24 @@ class RecordController:
         @param now  Monotonic time.
         """
         self._handle(self.matcher.expire(now))
+
+    def count_manual(self, state: str) -> None:
+        """
+        Counts one manual Record outcome (log build).
+        @param state  manual_record.SAVED, WEAK, NO_TAKE or NOT_SAVED.
+        """
+        if state == "saved":
+            self.counters.manual_takes += 1
+        elif state == "weak":
+            self.counters.manual_weak += 1
+        elif state == "no_take":
+            self.counters.manual_no_take += 1
+        else:
+            self.counters.manual_not_saved += 1
+
+    def count_mark(self) -> None:
+        """Counts one MARK line sent to the drive log."""
+        self.counters.marks += 1
 
     # ---------------------------------------------------------------- helpers
 

@@ -1,15 +1,23 @@
 """
 File:        snapshot_protocol.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
-Description: Parses the record-mode Serial lines from firmware-bench 0.1.2-bench
-             (cnn-record-train-handoff.md v0.4, "Serial snapshot protocol").
+Date:        2026-11-22
+Version:     0.2.0
+Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5):
+             parses the log build's L lines (every sample, text kept so it
+             can be copied into takes unchanged) and counts malformed ones;
+             EVT gains n_trig, its 13th field (firmware-bench 0.1.3-bench,
+             every build); an L line inside a snapshot block interrupts it,
+             like any other known line.
+Description: Parses the Serial lines from firmware-bench 0.1.3-bench
+             (cnn-record-train-handoff.md v0.4, "Serial snapshot protocol";
+             drive-log-manual-record-handoff.md v0.2, request 4).
              SnapshotAssembler turns SNB / SNR / SNE lines into one validated
              Snapshot, or one Rejected with the reason, and parses BOOT, EVT,
-             HLT, FLT and the S sample lines (live IMU view) for display.
-             Standard library only (no Qt, numpy or pyserial), so it runs in
-             the unit tests on any Python 3.11.
+             HLT, FLT, the S sample lines (live IMU view) and the log build's
+             L lines. parse_other_line() and parse_l_fields() are also used by
+             the window cutter. Standard library only (no Qt, numpy or
+             pyserial), so it runs in the unit tests on any Python 3.11.
 
              Rules (handoff): lines starting with '#' and unknown tags are
              ignored. A snapshot missing its SNE, with a gap in i, with the
@@ -36,10 +44,11 @@ from typing import Optional, Union
 # ============================================================================
 
 # Column names of the positional lines, in firmware order (serial_out.cpp,
-# print_boot() headers). HLT has 10 fields in product builds and 11 (with
-# snap_drops) in record builds.
+# print_boot() headers). HLT has 10 fields in product and log builds and 11
+# (with snap_drops) in record builds. EVT's n_trig (the trigger's sample
+# count) is last, so older lines without it still parse.
 EVT_FIELDS = ("seq", "n_peak", "t_us_peak", "class", "peak_z_g", "peak_roll_dps",
-              "peak_pitch_dps", "t_ms", "synced", "pitch_seq", "basis")
+              "peak_pitch_dps", "t_ms", "synced", "pitch_seq", "basis", "n_trig")
 HLT_FIELDS = ("t_ms", "samples", "sample_q_drops", "out_q_drops", "drdy_timeouts",
               "ble_q_drops", "ble_sent", "ble_fails", "serial_drops", "imu_recoveries",
               "snap_drops")
@@ -47,9 +56,16 @@ HLT_FIELDS = ("t_ms", "samples", "sample_q_drops", "out_q_drops", "drdy_timeouts
 # dps (settle-time bias NOT removed), then the high-passed vertical accel in g.
 S_CHANNELS = ("ax", "ay", "az", "gx", "gy", "gz", "z_hp")
 
+# The L line's fields after the tag (log build, serial_out.cpp print_msg):
+# n, t_us, the six raw chip-axis values (accel g, gyro dps, bias NOT
+# removed), the three model channels exactly as snapshot rows carry them
+# (z_hp g, roll and pitch dps, bias removed), and ok (1 once the gyro bias is
+# ready). Raw manual recordings use the same columns.
+L_FIELDS = ("n", "t_us", "ax", "ay", "az", "gx", "gy", "gz", "z_hp", "roll", "pitch", "ok")
+
 # Known tags that are not part of a snapshot. Seeing one between SNB and SNE
 # means the block was interrupted.
-OTHER_KNOWN_TAGS = ("BOOT", "S", "SEG", "EVT", "HLT", "FLT", "BLE")
+OTHER_KNOWN_TAGS = ("BOOT", "S", "L", "SEG", "EVT", "HLT", "FLT", "BLE")
 
 # ============================================================================
 # Functions
@@ -164,7 +180,93 @@ class SampleLine:
     values: tuple            # Floats in S_CHANNELS order
 
 
-Item = Union[Snapshot, Rejected, EventLine, BootLine, HealthLine, FaultLine, SampleLine]
+@dataclass
+class LogSample:
+    """An L line (log build): one IMU sample, every sample. Also one row of a
+    raw manual recording. text keeps every field exactly as sent, so takes
+    cut from it copy the model channels without re-formatting them."""
+    n: int                   # Device sample count since boot
+    t_us: int                # Device time since boot, us
+    ok: bool                 # Gyro bias ready (rows with ok False never go into takes)
+    raw: tuple               # ax, ay, az (g), gx, gy, gz (dps, bias in) as floats
+    model: tuple             # z_hp (g), roll, pitch (dps, bias removed) as floats
+    text: tuple              # The 12 L_FIELDS as text, exactly as sent
+
+    def model_text(self) -> tuple:
+        """
+        @return z_hp, roll, pitch as text, exactly as sent (a take row).
+        """
+        return self.text[8:11]
+
+
+Item = Union[Snapshot, Rejected, EventLine, BootLine, HealthLine, FaultLine, SampleLine,
+             LogSample]
+
+# ============================================================================
+# Functions: line parsers (also used by the window cutter)
+# ============================================================================
+
+
+def parse_l_fields(fields: list) -> Optional[LogSample]:
+    """
+    Parses the 12 fields of an L line after its tag, or one row of a raw
+    manual recording.
+    @param fields  The fields as text, in L_FIELDS order.
+    @return The sample, or None if it is malformed (wrong count, a number
+            that does not parse or is not finite, ok not 0 or 1).
+    """
+    if len(fields) != len(L_FIELDS):
+        return None
+    n, t_us = _to_int(fields[0]), _to_int(fields[1])
+    vals = [_to_finite_float(x) for x in fields[2:11]]
+    if n is None or t_us is None or any(v is None for v in vals) or fields[11] not in ("0", "1"):
+        return None
+    return LogSample(n, t_us, fields[11] == "1", tuple(vals[:6]), tuple(vals[6:9]),
+                     tuple(fields))
+
+
+def parse_other_line(line: str) -> Optional[Item]:
+    """
+    Parses one line that is not part of a snapshot block.
+    @param line  The line, line ending already removed.
+    @return An EventLine, BootLine, HealthLine, FaultLine, SampleLine or
+            LogSample, or None (malformed, a comment, or a tag the GUI does
+            not use: SEG, BLE, snapshot lines).
+    """
+    f = line.split(",")
+    tag = f[0]
+    if tag == "L":
+        # L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok (serial_out.cpp, print_msg)
+        return parse_l_fields(f[1:])
+    if tag == "S":
+        # S,n,t_us,ax,ay,az,gx,gy,gz,z_hp (serial_out.cpp, print_msg)
+        if len(f) != 3 + len(S_CHANNELS):
+            return None
+        n, t_us = _to_int(f[1]), _to_int(f[2])
+        vals = tuple(_to_finite_float(x) for x in f[3:])
+        if n is None or t_us is None or any(v is None for v in vals):
+            return None
+        return SampleLine(n, t_us, vals)
+    if tag == "EVT":
+        seq = _to_int(f[1]) if len(f) > 1 else None
+        if seq is None:
+            return None
+        return EventLine(seq, dict(zip(EVT_FIELDS, f[1:])), line)
+    if tag == "BOOT":
+        settings = {}
+        for part in f[1:]:
+            key, sep, value = part.partition("=")
+            if sep:
+                settings[key] = value
+        return BootLine(settings, line)
+    if tag == "HLT":
+        nums = [_to_int(x) for x in f[1:]]
+        if not nums or any(n is None for n in nums):
+            return None
+        return HealthLine(dict(zip(HLT_FIELDS, nums)), line)
+    if tag == "FLT":
+        return FaultLine(f[1] if len(f) > 1 else "", f[2] if len(f) > 2 else "", line)
+    return None  # SEG, BLE: not used by the GUI
 
 # ============================================================================
 # Classes: assembler
@@ -190,6 +292,7 @@ class SnapshotAssembler:
         self._state = "idle"
         self._cur: Optional[dict] = None   # The snapshot being assembled
         self._last_line_t = 0.0            # Time of its last SNB / SNR line
+        self.malformed_l = 0               # L lines ignored because they did not parse
 
     def feed(self, line: str, now: float) -> list:
         """
@@ -197,7 +300,8 @@ class SnapshotAssembler:
         @param line  One Serial line; a trailing line ending is removed.
         @param now   Monotonic time in seconds (for the stall timeout).
         @return Items completed by this line: Snapshot, Rejected, EventLine,
-                BootLine, HealthLine, FaultLine, SampleLine. Usually empty.
+                BootLine, HealthLine, FaultLine, SampleLine, LogSample.
+                Usually empty or one item.
         """
         line = line.rstrip("\r\n")
         if not line or line.startswith("#"):
@@ -216,10 +320,13 @@ class SnapshotAssembler:
             # The firmware never interleaves lines with a snapshot, so this
             # one means the snapshot was abandoned on the device, or the
             # device reset (BOOT).
-            out = self._close_open("missing SNE (interrupted by %s)" % tag)
-            item = self._parse_other(tag, line)
+            out = self._close_open("missing SNE (interrupted by %s)" % tag) \
+                if self._state != "idle" else []
+            item = parse_other_line(line)
             if item is not None:
                 out.append(item)
+            elif tag == "L":
+                self.malformed_l += 1   # Counted and ignored (handoff, request 5)
             return out
         return []  # Unknown tag: ignored, and does not interrupt a snapshot
 
@@ -364,43 +471,3 @@ class SnapshotAssembler:
                          n_pre=cur["n_pre"], n_post=cur["n_post"], n_rows=cur["n_rows"],
                          channels=cur["channels"], fw=cur["fw"], crc16="%04X" % crc,
                          rows=cur["rows"], values=cur["values"])]
-
-    @staticmethod
-    def _parse_other(tag: str, line: str) -> Optional[Item]:
-        """
-        Parses the display-only lines. Malformed ones are ignored.
-        @param tag   The line's tag.
-        @param line  The line.
-        @return An EventLine, BootLine, HealthLine, FaultLine or SampleLine,
-                or None.
-        """
-        f = line.split(",")
-        if tag == "S":
-            # S,n,t_us,ax,ay,az,gx,gy,gz,z_hp (serial_out.cpp, print_msg)
-            if len(f) != 3 + len(S_CHANNELS):
-                return None
-            n, t_us = _to_int(f[1]), _to_int(f[2])
-            vals = tuple(_to_finite_float(x) for x in f[3:])
-            if n is None or t_us is None or any(v is None for v in vals):
-                return None
-            return SampleLine(n, t_us, vals)
-        if tag == "EVT":
-            seq = _to_int(f[1]) if len(f) > 1 else None
-            if seq is None:
-                return None
-            return EventLine(seq, dict(zip(EVT_FIELDS, f[1:])), line)
-        if tag == "BOOT":
-            settings = {}
-            for part in f[1:]:
-                key, sep, value = part.partition("=")
-                if sep:
-                    settings[key] = value
-            return BootLine(settings, line)
-        if tag == "HLT":
-            nums = [_to_int(x) for x in f[1:]]
-            if not nums or any(n is None for n in nums):
-                return None
-            return HealthLine(dict(zip(HLT_FIELDS, nums)), line)
-        if tag == "FLT":
-            return FaultLine(f[1] if len(f) > 1 else "", f[2] if len(f) > 2 else "", line)
-        return None  # SEG, BLE: not used by the GUI

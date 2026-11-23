@@ -15,9 +15,14 @@ You can also run the program without the board. It then uses a pretend board
 (the **simulated device**) that sends made-up snapshots. This is useful for
 learning the program and for one of the tests.
 
+The board can also run a **log build** of its firmware, which sends every
+reading instead of snapshots. The program can then save a whole drive to a
+**drive log**, and save a take whenever you press **Record**, even when the
+board detected nothing (Part 11).
+
 The guide has three parts:
 
-- **How to use the program:** Parts 1 to 10.
+- **How to use the program:** Parts 1 to 11.
 - **Tests:** what to do and what you should see.
 - **If something goes wrong.**
 
@@ -217,6 +222,10 @@ firmware. You switch that on with one setting.
 When you've finished recording, change the `1` back to `0` and upload again, so
 the board goes back to its normal firmware.
 
+For a drive log or the **Record** button you need the log build instead: in
+step 2, leave `RECORD_MODE` at `0` and set `LOG_MODE` to `1` (Part 11). The two
+can't both be `1`: the upload then stops with an error that says so.
+
 ---
 
 ## Part 3: Start the program
@@ -262,8 +271,10 @@ The Record tab has a column of controls on the left and the graphs on the right.
 
 **On the left, from top to bottom:**
 
-- **Record** holds the controls: Port, Refresh, Simulated device, Connect,
-  Session, Label, Arm and Keep armed.
+- **Record** holds the controls: Port, Refresh, Simulated device (with its
+  record build or log build choice), Connect, Session, Label, Arm and Keep
+  armed, then **Start log** and **Record** for the log build (Part 11). Buttons
+  that don't fit the connected board are grayed out; point at one to see why.
   - Under Connect, a line with a colored dot says whether you are connected,
     and to what. The dot is green when connected, amber while the program is
     trying to get the board back, and gray when not connected.
@@ -286,7 +297,10 @@ The Record tab has a column of controls on the left and the graphs on the right.
   - amber: **REJECTED**, a snapshot arrived damaged and was thrown away. The
     reason is underneath;
   - red: **FAULT**, the board reported a problem. It stays until you click
-    Connect again.
+    Connect again;
+  - with the log build: gray **LOG BUILD**, blue **LOGGING** or **RECORDING**,
+    green for a take saved by Record, amber **NO TAKE** or **NOT SAVED**
+    (Part 11).
 
   A saved or rejected snapshot stays on the card for at least 2 seconds. If
   you are armed, the card then goes back to ARMED or KEEP ARMED; if not, the
@@ -365,10 +379,12 @@ The counters mean:
 1. Start the program (Part 3).
 2. In **Session**, type a name such as `practice_sim` and press Enter. Session
    names may use letters, numbers, `_` and `-`, but no spaces.
-3. Tick **Simulated device (no hardware)**, then click **Connect**. The
-   connection line says **Simulated device (fw sim-0.1.2-bench)** next to a
-   green dot, and the **Last take** card says **READY**. **Live IMU** starts
-   scrolling, and the numbers above it show about **52.0 lines/s**.
+3. Tick **Simulated device**, leave **record build** chosen in the box next to
+   it, then click **Connect**. The connection line says **Simulated device,
+   record build (fw sim-0.1.3-bench)** next to a green dot, and the **Last
+   take** card says **READY**. **Live IMU** starts scrolling, and the numbers
+   above it show about **52.0 lines/s**. (Choose **log build** instead to try
+   Part 11 without the board.)
 4. A new snapshot appears in **Last snapshot** about every 3 seconds. Each
    pretend event shows up in **Live IMU** first, as a swing in the lines, and
    its snapshot arrives about 1.5 seconds later. You
@@ -509,6 +525,18 @@ out briefly. Takes that are already saved are never lost.
   `POTHOLE-3.csv`. A number is never reused within a session, even after a
   delete.
 - **Deleted takes** go to the `_deleted` folder inside their session folder.
+- **Log build files** (Part 11) go in folders inside the session folder. The
+  training program only reads the takes directly in the session folder, so
+  none of these is used for training by default:
+  - `drives\`: the drive logs, `drive-1.log`, `drive-2.log` and so on, one per
+    Start log. Never delete them: takes can always be made again from a log,
+    but a log can't be made again from takes.
+  - `manual\`: the full 6 seconds around every Record press, under the label
+    it had when you pressed. Keep these too; they are the copy a take can be
+    cut from again.
+  - `weak\`: takes of weak events (Part 11).
+  - `background\`: "nothing happening" pieces of drive logs, made by the
+    cutter (`..\training\README.md`, Part 6).
 - **Takes and logs stay on this computer.** `firmware\cnn\.gitignore` keeps
   `data\`, `logs\` and `__pycache__\` out of Git, so nothing you record goes to
   GitHub. Share takes with the team another way.
@@ -528,12 +556,112 @@ corner. Next time, the program remembers the last port and session name.
 
 ---
 
+## Part 11: Log a drive and record takes by hand (log build)
+
+With the **log build**, the board sends all 416 readings per second instead of
+snapshots. The program can then:
+
+- save everything the board sends during a drive in a **drive log** (Start log);
+- save a take whenever you press **Record** or **R**, even if the board
+  detected nothing;
+- mark events during a drive with **P**, **B** or **F**.
+
+Takes are cut from drive logs afterwards by the cutter
+(`..\training\README.md`, Part 6).
+
+### Get ready
+
+1. Put the log build on the board: Part 2, with `LOG_MODE` set to `1` and
+   `RECORD_MODE` left at `0`.
+2. Start the program and connect (Part 6, steps 2 to 4). The board's settings
+   line says **log build (L lines, no snapshots)**, and the card says **LOG
+   BUILD**. **Arm** and **Keep armed** are grayed out; **Start log** and
+   **Record** can be clicked. Live IMU scrolls as usual.
+3. Type a session name and press Enter.
+
+The program needs the board's settings line (it holds the thresholds) to find
+a bump in a recording and to cut takes from a log. If it says **No device info
+yet**, press **RST** on the board.
+
+To try all this without the board, tick **Simulated device**, choose **log
+build** in the box next to it, and click **Connect**. Its pretend events come
+every 3 seconds.
+
+### Record a take by hand
+
+1. Choose the label in **Label**.
+2. Press **Record** (or the **R** key) just before or just after the tap or
+   bump. The program always keeps the last 3 seconds, and collects 3 more after
+   your press. The button counts down (**Recording… 2.4 s**) and the card says
+   **RECORDING** in blue. Pressing again during the countdown does nothing.
+3. Then the program looks for the bump in those 6 seconds, the same way the
+   cutter does:
+   - the first moment the movement reaches the board's threshold;
+   - if nothing does, the first moment it reaches half of it;
+   - if nothing does, the biggest movement, if it reaches at least a fifth of
+     the threshold. This is called a **weak** event.
+
+   It saves the 1.5-second take around that moment.
+4. The card shows what happened:
+   - **green, with the take's name**, such as **POTHOLE-4**: the take is in the
+     session and in **Collected takes**, marked **(manual)**. **Last snapshot**
+     shows it.
+   - **green, with weak/ in front**, such as **weak/POTHOLE-2**: a weak event.
+     It's saved in the session's `weak` folder, which training doesn't read by
+     default, and it isn't listed in Collected takes.
+   - **amber NO TAKE**: **Nothing found near the press**, or **Event too close
+     to the edge of the recording** (the bump came in the first or last quarter
+     second of the 6). The 6 seconds are still kept in `manual\`.
+   - **amber NOT SAVED**: the board dropped readings, restarted, or was still
+     settling after a start, or the cable came out. Nothing is saved. Press
+     Record again.
+   - If two bumps happened in the 6 seconds, the first is saved, and the card
+     says a second event was not saved.
+
+Every press also keeps the full 6 seconds in the session's `manual` folder.
+**Relabel** and **Delete take** in Collected takes work on manual takes as on
+any take; the 6-second copy in `manual\` keeps its first label.
+
+### Log a drive
+
+1. Before the drive, do Part 7, step 1, with the log build. Also turn off the
+   laptop's sleep and USB power saving: either one ends the log.
+2. Connect, type the session name and press Enter (see Get ready).
+3. Click **Start log**. The button becomes **Stop log** with a blue border, and
+   the card says **LOGGING**. The line under the buttons shows the file name,
+   time, size, readings per second (about 416), **missing samples**, **timing
+   gaps**, marks, and free disk space. Missing samples and **LOW DISK** turn
+   amber. You can't change the session while a log runs.
+4. During the drive, the passenger presses a key right after the car goes over
+   something:
+   - **P** for a pothole, **B** for a speed bump, **F** for anything else. Each
+     key writes a mark into the log **and** records a take with that label, as
+     if you had chosen that label and pressed Record. If a recording is already
+     counting down, the key gives that recording its label instead.
+   - **R** records a take with the label chosen in **Label**.
+5. At the end, click **Stop log** (Disconnect also stops it). The line then
+   starts with **Saved** and the file name.
+
+The log keeps going through a board restart or a brief cable drop-out. Each
+Start log makes a new file in the session's `drives` folder, about 160 MB per
+hour.
+
+Afterwards, cut takes from the log (`..\training\README.md`, Part 6). The cutter
+doesn't make a second take of a bump you already recorded with Record or a key.
+
+---
+
 ## Tests
 
 There are two kinds of tests:
 
 - the **automatic checks**, which the computer runs by itself in a few seconds;
-- tests **GUI-1 to GUI-4**, which you do by hand with the program open.
+- tests **GUI-1 to GUI-4**, which you do by hand with the program open;
+- for the log build (Part 11), tests **DRV-1 to DRV-4** and **MR-1 to MR-3**,
+  also by hand. MR-4 and the cutter's tests (CUT-1 to CUT-4) are in
+  `..\training\README.md`.
+
+All of DRV-1 to DRV-4 and MR-1 to MR-3 are **NOT TESTED** so far.
 
 Each test says what it checks, what to do, what you should see, when it counts
 as failed, and what to save as proof. Only the project owner marks a test as
@@ -551,7 +679,11 @@ it.
 - the program reads the board's messages correctly;
 - it throws away every kind of damaged snapshot;
 - it matches each snapshot with the board's event message;
-- it saves, renames and deletes take files correctly.
+- it saves, renames and deletes take files correctly;
+- the log build: drive logs keep every line in order and count missing
+  readings correctly, and Record saves the right take (or the right reason)
+  for every case in Part 11;
+- the simulated log build sends what the real one does.
 
 They don't open the window, and they need neither the board nor the add-ons.
 
@@ -566,7 +698,7 @@ They don't open the window, and they need neither the board nor the add-ons.
    ```
 
 **What you should see:** a row of dots, then a line starting with
-`Ran 59 tests in`, and `OK` on the last line.
+`Ran 100 tests in`, and `OK` on the last line.
 
 **It fails if** the last line says `FAILED`. Copy all of the text from the
 window and send it to the project owner.
@@ -789,6 +921,173 @@ won't reappear, and that's fine.
 - the log file (Part 9);
 - a screenshot of the program after step 6.
 
+### DRV-1: Drive log from the simulated device
+
+**What it checks:** a 5-minute drive log keeps every line, has a PC line every
+second, and counts exactly the readings the simulated board leaves out.
+
+**What to do:**
+
+1. Start the program, type the session name `drv1_sim` and press Enter.
+2. Tick **Simulated device**, choose **log build**, click **Connect**.
+3. Click **Start log**. Wait 5 minutes, then click **Stop log**.
+4. Run the automatic checks (above).
+
+**What you should see:**
+
+- While logging, the log line shows about 416 per second. **missing samples**
+  goes up by 20 about every 15 seconds (the simulated board leaves out 20
+  readings before every 5th event); **timing gaps** stays 0. The pretend board
+  also restarts and drops its cable now and then; the log keeps going.
+- After Stop log, the line starts with **Saved drive-1.log**.
+- Open `data\drv1_sim\drives\drive-1.log` in Notepad: it starts with `#` lines
+  (session, commit, BOOT line), then a `PC,…,start` line; `PC,…,tick` lines
+  come about every 416 readings, `PC,…,lost` and `PC,…,reconnect` around each
+  drop-out, and `PC,…,stop` is the last line.
+- The automatic checks pass (one of them checks the missing count against
+  what the simulated board left out).
+
+**It fails if** the log has no PC lines, the line stops updating, or
+**timing gaps** goes above 0.
+
+**Proof to save:** the drive log, the GUI log (Part 9), and the automatic
+checks' output.
+
+### DRV-2: Drive log and marks on the bench
+
+**What it checks:** marks land within 3 seconds after their event.
+
+**What to do:**
+
+1. Put the log build on the board, connect, and type the session name
+   `drv2_bench` (Part 11, Get ready).
+2. Click **Start log**. For 10 minutes, tap the board 10 times, at least 10
+   seconds apart. After each tap, press **P**, **B** or **F** within 2 seconds.
+3. Click **Stop log**.
+
+**What you should see:**
+
+- After each key, the Serial Monitor shows `MARK` and the label, and a take
+  appears (the key also records one, Part 11). There is no `Quick label` line.
+- In `data\drv2_bench\drives\drive-1.log`, search for `MARK,`: 10 lines end in
+  POTHOLE, SPEED_BUMP or FALSE_TRIGGER, and 10 in `manual_` and a label. In
+  each tap's `EVT` line, the last number is the trigger reading. In the MARK
+  line after it, the second number (the one after the laptop time) is at most
+  1248 (3 seconds) larger.
+
+**It fails if** a key gives no MARK line, or a MARK is more than 1248 readings
+after its tap.
+
+**Proof to save:** the drive log and a screenshot of the program.
+
+### DRV-3: Record by hand
+
+**What it checks:** a press saves the 6 seconds around it, before or after the
+tap, and Record can't be used with the record build.
+
+**What to do:**
+
+1. With the log build connected and the session `drv3_manual` (Part 11, Get
+   ready), choose the label POTHOLE.
+2. (a) Press **Record**, then tap the board within 2 seconds.
+3. (b) Tap the board, then press **Record** within 2 seconds.
+4. (c) Press **Record** five times, each time right after the countdown ends.
+5. (d) Upload the record build (Part 2), connect, and point at **Record**.
+
+**What you should see:**
+
+- (a) and (b): each press gives a new file in `data\drv3_manual\manual\` and a
+  green take on the card. Open one file in `manual\` in Notepad: its `#` lines
+  include `press_n`, `first_n`, `last_n` and `boot`, and it has about 2496 data
+  rows.
+- (c): five more files in `manual\`, numbered one after another with no number
+  used twice.
+- (d): **Record** and **Start log** are grayed out, and pointing at Record says
+  **Record needs the log build (LOG_MODE 1)**.
+
+**It fails if** a press with a tap gives no take, numbers repeat, or Record can
+be clicked with the record build.
+
+**Proof to save:** a listing of the `manual` folder (a screenshot of File
+Explorer), the top of one file, and screenshots of (a) and (d).
+
+### DRV-4: Unplugging during a log and during a recording
+
+**What it checks:** the log survives an unplug, and a recording cut short is
+not saved.
+
+**What to do:**
+
+1. With the log build, session `drv4_unplug`, click **Start log**.
+2. (a) After a minute, pull the USB cable. Wait 10 seconds and plug it back in.
+3. (b) Press **Record**, and during the countdown pull the cable. Plug it back in.
+4. Click **Stop log**.
+
+**What you should see:**
+
+- The program stays open in both cases.
+- (a) In the drive log, the lines before the unplug are complete, followed by
+  `PC,…,lost`, then `PC,…,reconnect` and the board's new BOOT line.
+- (b) The card says **NOT SAVED** with **USB lost during the recording**, and
+  no new file appears in `manual\`.
+
+**It fails if** the program closes, the log stops for good, or a file is
+saved for (b).
+
+**Proof to save:** the drive log, the GUI log (Part 9), and a screenshot of
+(b).
+
+### MR-1: Build
+
+**What it checks:** all automatic checks pass, and the program starts.
+
+**What to do:** run the automatic checks here and in `..\training\README.md`,
+then start the program (Part 3).
+
+**What you should see:** `OK` from both, and the window opens.
+
+**Proof to save:** both outputs. The cutter is new, so there is no "before"
+output of it to compare with.
+
+### MR-2: One press, one take
+
+**What it checks:** each press gives one 624-row take in the session, aligned
+on the bump.
+
+**What to do:** with the simulated log build, then with the board (session
+`mr2`): press Record and tap within 3 seconds; then tap and press within 3
+seconds. (The simulated board makes its own bump every 3 seconds.)
+
+**What you should see:** each press puts one take in `data\mr2\` (not in a
+subfolder), listed in Collected takes with **(manual)**, on a green card. In
+**Selected take**, the dashed amber line sits where the bump starts; in the
+file, `align_n` equals `trig_idx`.
+
+**It fails if** a press gives no take or two, or the bump isn't at the dashed
+line.
+
+**Proof to save:** the take files and screenshots.
+
+### MR-3: Weak, empty, early and double recordings
+
+**What to do** (board, session `mr3`):
+
+1. Tap gently, so the tap is between a fifth and half as strong as needed to
+   trigger, then press Record.
+2. Press Record with no tap.
+3. Tap, wait about 2.8 seconds, then press Record (the tap is then in the
+   first 0.2 seconds of the recording).
+4. Press Record and tap twice, 2 seconds apart.
+
+**What you should see:** (1) a take in `data\mr3\weak\` and a green
+**weak/…** card; (2) **NO TAKE**, **Nothing found near the press**; (3) **NO
+TAKE**, **Event too close to the edge of the recording**; (4) one take, of the
+first tap, and the card says a second event was not saved.
+
+**It fails if** any of the four does something else.
+
+**Proof to save:** a listing of `data\mr3\` and `weak\`, and screenshots.
+
 ---
 
 ## If something goes wrong
@@ -850,6 +1149,23 @@ won't reappear, and that's fine.
 - **Pressing P, B or F typed a letter into the Session box.** Click in the
   Session box, delete the letter, press Enter, then press the key again.
 
+- **Start log and Record are grayed out.** Point at the button to see why. The
+  board must run the log build (Part 11) and be connected, and the session name
+  must be valid (press Enter after typing it).
+
+- **Record says no BOOT line, or a red message says takes can't be cut from
+  this log.** The program missed the board's settings line (it is sent when the
+  board starts). Press **RST** on the board once.
+
+- **NO TAKE, Nothing found near the press.** The movement in the 6 seconds was
+  under a fifth of the board's threshold, or the press came more than 3 seconds
+  before or after the bump. The 6 seconds are kept in `manual\` anyway.
+
+- **missing samples keeps going up during a log.** The laptop isn't reading
+  fast enough, or the cable is poor. Close other programs, use another USB
+  socket, and tell the project owner (it may mean the board's buffers need to
+  be bigger).
+
 - **The window closed unexpectedly.** Start it again (Part 3). Takes that were
   already saved are safe, and the log file says what happened.
 
@@ -874,8 +1190,9 @@ won't reappear, and that's fine.
   the trigger sample. `np.loadtxt(path, delimiter=",")` reads the rows, since `#`
   lines count as comments.
 
-**Live IMU.** Both firmware builds send an S line every `PRINT_EVERY_N` (8)
-samples, ~52 per second: `S,n,t_us,ax,ay,az,gx,gy,gz,z_hp`, chip axes, accel in
+**Live IMU.** The record and product builds send an S line every
+`PRINT_EVERY_N` (8) samples, ~52 per second (the log build sends L lines
+instead; see Log build below): `S,n,t_us,ax,ay,az,gx,gy,gz,z_hp`, chip axes, accel in
 g, gyro in dps with the settle-time bias still in, `z_hp` in g. The reader
 parses them into `SampleLine` and sends them only to `LivePlot`; they never
 reach `record_core`, so they cannot end up in a take. The firmware never puts
@@ -884,6 +1201,37 @@ gap of more than `LIVE_GAP_S` in device time is drawn as a break, and device
 time going backwards (a reset) clears the trace. The simulated device sends S
 lines too, including each event's shape while the event happens. Settings:
 `LIVE_*` in `../cnn_config.py`.
+
+**Log build** (drive-log-manual-record-handoff.md v0.2, requests 5 and 6;
+one-press-manual-takes-handoff.md v0.1, request 8). With `LOG_MODE 1` the
+board sends `L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok` for every sample
+(4 decimals), `EVT` gains `n_trig` as its 13th field in every build, and BOOT
+says `log=1`. The panel tells the build from BOOT, or from the first S, L or
+snapshot lines until BOOT arrives.
+
+- *Reader.* L samples reach the GUI thread in batches every `SAMPLE_BATCH_S`;
+  a batch is flushed before any other item, so order is kept. The live view
+  gets every `LIVE_DECIMATE`-th sample, as an S line would look.
+- *Drive log* (`drive_log.py`, written only by the reader thread):
+  `#key=value` header (format, session, `gui_commit`, port, PC start, and the
+  connection's latest `boot` line, because a log usually starts after BOOT went
+  by), then every board line byte for byte, plus `PC,<epoch_ms>,<last_n>,<note>`
+  (start, tick each second, lost, reconnect, stop) and
+  `MARK,<epoch_ms>,<last_n>,<label>`. A Record press writes
+  `manual_<LABEL>` with the same time and n as its raw recording, so the cutter
+  can tell which samples a manual take covers. Flushed every `LOG_FLUSH_S`.
+- *Manual Record* (`manual_record.py`): `<session>/manual/<LABEL>-<n>.csv` holds
+  the raw 6 s (`# key=value` header with `src_key=manual:<press_epoch_ms>:<press_n>`,
+  `press_n`, `first_n`, `last_n`, `boot`; rows are the L fields as sent). The take
+  is then cut from that file by `take_cut.cut_manual_file()`, the cutter's own
+  function, so re-cutting gives the same bytes.
+- *Takes cut from L rows* (`take_cut.py`) have the snapshot take's header keys
+  (`trig_idx` is the aligned sample; `crc16` is what the SNE line would carry)
+  plus `source` (manual, evt, marker_only, background), `source_file`,
+  `src_key`, `align` (trigger, threshold, miss_frac, peak, random), `align_n`,
+  `n_peak`, `peak_frac`, `peak_gap` (weak only), `label_from`, and
+  `pc_time_est` instead of `pc_received`. Rows are copied as printed, never
+  re-formatted. A take holds no cut time or cutter commit.
 
 **Look.** The window copies the dark look of Jake's ml-on-device-playground
 (https://github.com/jake-g/ml-on-device-playground, branch codegen-classroom:
@@ -914,11 +1262,14 @@ bar is dark too.
 | `serial_monitor.py` | The Serial Monitor panel: the GUI's log lines, colored by level |
 | `elided_label.py` | A one-line label that cuts long text with "…" and shows it in full in a tooltip |
 | `live_buffer.py` | The last 10 s of S lines for Live IMU, with breaks where lines are missing (standard library only) |
-| `serial_handler.py` | Reads USB in the background and reconnects; never sends anything to the board |
-| `snapshot_protocol.py` | Checks and assembles snapshots; reads the other lines, S included (standard library only) |
-| `record_core.py` | Arm, labels, matching snapshots with EVT lines, timeouts (standard library only) |
-| `take_store.py` | Writes, renames and deletes take files (standard library only) |
-| `sim_source.py` | The simulated device (standard library only) |
+| `serial_handler.py` | Reads USB in the background and reconnects; writes the drive log; never sends anything to the board |
+| `snapshot_protocol.py` | Checks and assembles snapshots; reads the other lines, S and L included (standard library only) |
+| `record_core.py` | Arm, labels, matching snapshots with EVT lines, timeouts, the counters (standard library only) |
+| `take_store.py` | Writes, renames and deletes take files; the one writer for every take file (standard library only) |
+| `take_cut.py` | The one alignment shared by manual Record and `../training/cut_windows.py` (standard library only) |
+| `drive_log.py` | The drive log file and its missing-sample count (standard library only) |
+| `manual_record.py` | Manual Record: the 3 s buffer, the recording, saving the raw file and its take (standard library only) |
+| `sim_source.py` | The simulated device, record or log build (standard library only) |
 | `../cnn_config.py` | Every adjustable setting (DRAFT values) |
 | `tests/` | The automatic checks |
 

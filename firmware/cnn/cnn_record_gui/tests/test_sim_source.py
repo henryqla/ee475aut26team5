@@ -1,8 +1,12 @@
 """
 File:        test_sim_source.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-22
+Version:     0.2.0
+Change:      0.2.0: the log build (request 5): L lines every sample, ok=0
+             during settle, EVT n_trig at the crossing, the missing-sample
+             count equal to the injected jumps (DRV-1), and the test mode's
+             snapshot equal to the L lines' model channels as text.
 Description: Runs the simulated device through the parser and record logic
              (as GUI-3 / GUI-4 do on screen) and checks that every good
              snapshot is accepted and every injected fault is rejected or
@@ -18,10 +22,12 @@ import unittest
 from pathlib import Path
 
 import helpers  # Sets sys.path; must come before the GUI imports
+import cnn_config as cfg
+from drive_log import StreamStats
 from record_core import RecordController
 from sim_source import SimDevice, SimDisconnect
-from snapshot_protocol import (BootLine, EventLine, HealthLine, Rejected, SampleLine,
-                               Snapshot, SnapshotAssembler)
+from snapshot_protocol import (BootLine, EventLine, HealthLine, LogSample, Rejected,
+                               SampleLine, Snapshot, SnapshotAssembler)
 from take_store import TakeStore, load_take
 
 # ============================================================================
@@ -129,6 +135,91 @@ class TestSimDevice(unittest.TestCase):
         self.assertAlmostEqual(sum(x.values[2] for _, x in samples) / len(samples), 1.0,
                                delta=0.05)
         self.assertGreater(max(abs(x.values[6]) for _, x in samples), 0.5)
+
+    def test_record_build_evt_has_n_trig(self):
+        dev = SimDevice(bad_every=0, reset_every=0, disconnect_every=0)
+        asm = SnapshotAssembler(3.0, 20000)
+        evts, snaps = {}, {}
+        for _delay, item in dev.stream():
+            if len(dev.plan) > 3:
+                break
+            for x in asm.feed(item, 0.0):
+                if isinstance(x, EventLine):
+                    evts[x.seq] = x
+                elif isinstance(x, Snapshot):
+                    snaps[x.seq] = x
+        self.assertEqual(set(evts), set(snaps))
+        for seq, evt in evts.items():
+            self.assertEqual(int(evt.fields["n_trig"]), snaps[seq].trig_idx)
+
+
+class TestSimLogBuild(unittest.TestCase):
+    def run_log(self, n_events, **kwargs):
+        """
+        Feeds the log build's stream through the parser and StreamStats, as
+        the reader thread does.
+        @return (device, items, stats).
+        """
+        dev = SimDevice(seed=475, event_period_s=3.0, build="log", **kwargs)
+        asm = SnapshotAssembler(3.0, 20000)
+        stats = StreamStats()
+        items = []
+        for _delay, item in dev.stream():
+            if len(dev.plan) > n_events:
+                break
+            if isinstance(item, SimDisconnect):
+                items.append(item)
+                continue
+            for x in asm.feed(item, 0.0):
+                items.append(x)
+                if isinstance(x, LogSample):
+                    stats.add(x.n, x.t_us)
+                elif isinstance(x, BootLine):
+                    stats.new_run()
+                elif isinstance(x, Rejected):
+                    self.fail(x.reason)
+        return dev, items, stats
+
+    def test_l_lines_settle_and_n_trig(self):
+        dev, items, stats = self.run_log(8, reset_every=0, disconnect_every=0, gap_every=0)
+        boot = [x for x in items if isinstance(x, BootLine)]
+        self.assertEqual(boot[0].settings["log"], "1")
+        self.assertEqual(boot[0].settings["rec"], "0")
+        self.assertFalse([x for x in items if isinstance(x, (SampleLine, Snapshot))])
+        hlt = [x for x in items if isinstance(x, HealthLine)]
+        self.assertNotIn("snap_drops", hlt[0].fields)
+        rows = [x for x in items if isinstance(x, LogSample)]
+        self.assertEqual([s.n for s in rows], list(range(1, len(rows) + 1)))   # Every sample
+        settle = int(cfg.SIM_SETTLE_S * 416)
+        self.assertEqual([s.ok for s in rows[:settle + 1]], [False] * settle + [True])
+        by_n = {s.n: s for s in rows}
+        evts = [x for x in items if isinstance(x, EventLine)]
+        self.assertEqual(len(evts), 8)
+        for evt in evts:
+            n_trig = int(evt.fields["n_trig"])
+            self.assertGreaterEqual(abs(by_n[n_trig].model[0]), 1.0)        # Crosses there
+            self.assertTrue(all(abs(by_n[n].model[0]) < 0.5 for n in range(n_trig - 104,
+                                                                          n_trig)))
+        self.assertEqual((stats.missing, stats.runs), (0, 1))
+
+    def test_missing_count_equals_injected_gaps(self):
+        # DRV-1: the count the status line shows equals the injected jumps.
+        dev, items, stats = self.run_log(20, reset_every=7, disconnect_every=9, gap_every=3)
+        self.assertGreater(len(dev.gaps), 3)
+        self.assertEqual(stats.missing, sum(count for _n, count in dev.gaps))
+        boots = len([x for x in items if isinstance(x, BootLine)])
+        self.assertEqual(stats.runs, boots)            # Resets are new runs, never gaps
+        self.assertGreater(len([x for x in items if isinstance(x, SimDisconnect)]), 0)
+
+    def test_test_mode_snapshot_equals_l_lines(self):
+        dev, items, _stats = self.run_log(4, reset_every=0, disconnect_every=0, gap_every=0,
+                                          with_snapshots=True)
+        by_n = {x.n: x for x in items if isinstance(x, LogSample)}
+        snaps = [x for x in items if isinstance(x, Snapshot)]
+        self.assertEqual(len(snaps), 4)
+        for snap in snaps:
+            cut = [by_n[n].model_text() for n in range(snap.trig_idx - 104, snap.trig_idx + 520)]
+            self.assertEqual(cut, snap.rows)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,11 @@
 """
 File:        test_snapshot_protocol.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-22
+Version:     0.2.0
+Change:      0.2.0: the log build's L lines (text kept, malformed ones
+             counted), EVT's n_trig, and an L line interrupting a snapshot
+             (request 5).
 Description: Unit tests for snapshot_protocol.py: the CRC variant, a valid
              firmware-format snapshot, every rejection rule in the handoff
              (missing SNE, gap in i, wrong row count, bad CRC), each lost
@@ -19,7 +22,7 @@ import unittest
 
 import helpers  # Sets sys.path; must come before the GUI imports
 from snapshot_protocol import (S_CHANNELS, BootLine, EventLine, FaultLine, HealthLine,
-                               Rejected, SampleLine, Snapshot, SnapshotAssembler,
+                               LogSample, Rejected, SampleLine, Snapshot, SnapshotAssembler,
                                crc16_ccitt_false)
 
 # ============================================================================
@@ -251,8 +254,54 @@ class TestOtherLines(unittest.TestCase):
     def test_ignored(self):
         asm = new_asm()
         for line in ("SEG,1,2,0,416,0.1,0.2,0.3,0.4", "BLE,connected,0", "#EVT,seq",
-                     "#S,n,t_us,ax,ay,az,gx,gy,gz,z_hp", "", "garbage"):
+                     "#S,n,t_us,ax,ay,az,gx,gy,gz,z_hp", "", "garbage",
+                     "#L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok",
+                     "#LPERF,10000,4160,180,950,123456"):
             self.assertEqual(asm.feed(line, 0.0), [])
+
+
+class TestLogLines(unittest.TestCase):
+    def test_l_line(self):
+        line = helpers.l_line(5000, z=-0.1234, roll=12.5, pitch=-61.25, ok=1)
+        out = new_asm().feed(line + "\n", 0.0)
+        self.assertEqual(len(out), 1)
+        s = out[0]
+        self.assertIsInstance(s, LogSample)
+        self.assertEqual((s.n, s.t_us, s.ok), (5000, 12019231, True))
+        self.assertEqual(s.model_text(), ("-0.1234", "12.5000", "-61.2500"))  # Text as sent
+        self.assertAlmostEqual(s.model[2], -61.25)
+        self.assertAlmostEqual(s.raw[2], 0.8766)          # az = 1 g + z_hp
+        self.assertEqual(s.text, tuple(line.split(",")[1:]))
+
+    def test_ok_zero(self):
+        s = new_asm().feed(helpers.l_line(3, ok=0), 0.0)[0]
+        self.assertFalse(s.ok)
+
+    def test_malformed_l_counted_and_ignored(self):
+        asm = new_asm()
+        good = helpers.l_line(1).split(",")
+        bad = [",".join(good[:-1]),                      # ok missing
+               ",".join(good + ["1"]),                   # One too many
+               ",".join(good[:-1] + ["2"]),              # ok not 0 or 1
+               ",".join(good[:5] + ["nan"] + good[6:]),  # Not finite
+               ",".join(good[:1] + ["x"] + good[2:])]    # n not an integer
+        for line in bad:
+            self.assertEqual(asm.feed(line, 0.0), [], line)
+        self.assertEqual(asm.malformed_l, len(bad))
+
+    def test_l_line_inside_snapshot_interrupts_it(self):
+        lines, _ = helpers.firmware_snapshot_lines()
+        out = feed_all(new_asm(), lines[:200] + [helpers.l_line(9)] + lines[200:])
+        self.assertEqual(type(out[0]), Rejected)
+        self.assertIn("interrupted by L", out[0].reason)
+        self.assertIsInstance(out[1], LogSample)
+
+    def test_evt_n_trig(self):
+        evt = new_asm().feed(helpers.evt_line(seq=4, n_trig=12360), 0.0)[0]
+        self.assertEqual(evt.fields["n_trig"], "12360")
+        self.assertEqual(evt.fields["basis"], "pitch")
+        old = new_asm().feed(helpers.evt_line(seq=4), 0.0)[0]   # 0.1.2-bench: 12 fields
+        self.assertNotIn("n_trig", old.fields)
 
 
 if __name__ == "__main__":

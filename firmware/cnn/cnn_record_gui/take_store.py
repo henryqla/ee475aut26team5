@@ -1,8 +1,15 @@
 """
 File:        take_store.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-22
+Version:     0.2.0
+Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, requests 5 and
+             6; one-press-manual-takes-handoff.md v0.1, request 8): one
+             shared writer, write_take(), for snapshot takes, manual takes,
+             raw manual recordings and cut takes, into the session folder or
+             its manual/, weak/ or background/ subfolder; header_text() and
+             read_header(); src_keys() lists the source windows a session
+             already has a take for, so nothing is cut twice.
 Adapted from: the save / load / delete logic of Python/collected_data_widget.py
              in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
@@ -53,8 +60,8 @@ _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {"COM%d" % i for i in range(1
     | {"LPT%d" % i for i in range(1, 10)}
 
 # EVT fields copied into the take header as rule_<name> (the rule baseline).
-_RULE_FIELDS = ("class", "peak_z_g", "peak_roll_dps", "peak_pitch_dps", "pitch_seq",
-                "basis", "n_peak", "t_us_peak")
+RULE_FIELDS = ("class", "peak_z_g", "peak_roll_dps", "peak_pitch_dps", "pitch_seq",
+               "basis", "n_peak", "t_us_peak")
 
 # ============================================================================
 # Functions
@@ -81,7 +88,7 @@ def checkout_commit(path: Path) -> str:
     return head + ("-dirty" if dirty else "")
 
 
-def _iso(wall: float) -> str:
+def iso_time(wall: float) -> str:
     """
     @param wall  Seconds since the epoch (time.time()).
     @return Local time with its UTC offset, ms resolution, ISO 8601; or the
@@ -102,6 +109,37 @@ def _clean(value) -> str:
     @return Its text on one line (a header value must not contain a newline).
     """
     return str(value).replace("\r", " ").replace("\n", " ")
+
+
+def header_text(pairs: list) -> str:
+    """
+    The "# key=value" header of a take or recording file.
+    @param pairs  (key, value) in file order.
+    @return The header lines, each ending in a newline.
+    """
+    return "".join("# %s=%s\n" % (k, _clean(v)) for k, v in pairs)
+
+
+def read_header(path: Path) -> dict:
+    """
+    Reads only the "# key=value" lines at the top of a take or recording
+    file, stopping at the first data row (cheap for listing many files).
+    @param path  The file.
+    @return Each header key mapped to its value.
+    @raise OSError if the file cannot be read.
+    """
+    header = {}
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\r\n")
+            if not line:
+                continue
+            if not line.startswith("#"):
+                break
+            key, sep, value = line[1:].strip().partition("=")
+            if sep:
+                header[key] = value
+    return header
 
 
 def parse_take_name(path: Path) -> Optional[tuple]:
@@ -169,11 +207,19 @@ class TakeStore:
                              "(e.g. 2026-11-14_car_route1)" % name)
 
     @staticmethod
-    def validate_label(label: str) -> None:
+    def validate_label(label: str, subdir: str = "") -> None:
         """
-        @param label  Take label.
-        @raise ValueError if it is not one of cfg.LABELS.
+        @param label   Take label.
+        @param subdir  The session subfolder it goes to ("" for the session
+                       folder itself).
+        @raise ValueError if it is not one of cfg.LABELS, or, in background/,
+               not cfg.BACKGROUND_LABEL.
         """
+        if subdir == cfg.BACKGROUND_DIR_NAME:
+            if label != cfg.BACKGROUND_LABEL:
+                raise ValueError("Background windows are labeled %s, not %r"
+                                 % (cfg.BACKGROUND_LABEL, label))
+            return
         if label not in cfg.LABELS:
             raise ValueError("Label %r is not one of %s" % (label, ", ".join(cfg.LABELS)))
 
@@ -237,10 +283,64 @@ class TakeStore:
             os.fsync(fh.fileno())
         os.replace(tmp, path)
 
+    def write_take(self, session: str, label: str, text: str, subdir: str = "") -> Path:
+        """
+        Writes one finished take or recording under the next free number:
+        <session>/<subdir>/<LABEL>-<n>.csv. The one writer for every take
+        file (snapshot takes, manual takes and recordings, cut takes).
+        @param session  Session name.
+        @param label    Its label (cfg.LABELS; cfg.BACKGROUND_LABEL in background/).
+        @param text     Full file contents (header and rows).
+        @param subdir   "" for the session folder, or cfg.MANUAL_DIR_NAME,
+                        cfg.WEAK_DIR_NAME or cfg.BACKGROUND_DIR_NAME.
+        @return The new file's path.
+        @raise ValueError for a bad session, label or subfolder; OSError if
+               writing fails.
+        """
+        if subdir not in ("", cfg.MANUAL_DIR_NAME, cfg.WEAK_DIR_NAME, cfg.BACKGROUND_DIR_NAME):
+            raise ValueError("Not a take subfolder: %r" % subdir)
+        self.validate_label(label, subdir)
+        folder = self.session_dir(session)
+        if subdir:
+            folder = folder / subdir
+        folder.mkdir(parents=True, exist_ok=True)
+        n = self._next_number(folder, label)
+        path = folder / ("%s-%d.csv" % (label, n))
+        while path.exists():  # Only if a file appeared since the scan
+            n += 1
+            path = folder / ("%s-%d.csv" % (label, n))
+        self._write_atomic(path, text)
+        return path
+
+    def src_keys(self, session: str) -> set:
+        """
+        The source windows the session already has a take for: the src_key
+        of every take in the session folder, weak/ and background/, and in
+        their _deleted/ folders (owner, 2026-11-22: a deleted take is never
+        cut again). Raw recordings in manual/ are sources, not takes.
+        @param session  A valid session name.
+        @return The set of src_key values.
+        """
+        base = self.session_dir(session)
+        keys = set()
+        for sub in ("", cfg.WEAK_DIR_NAME, cfg.BACKGROUND_DIR_NAME):
+            folder = base / sub if sub else base
+            for f in (folder, folder / cfg.DELETED_DIR_NAME):
+                if not f.is_dir():
+                    continue
+                for p in f.glob("*.csv"):
+                    try:
+                        key = read_header(p).get("src_key")
+                    except OSError:
+                        continue
+                    if key:
+                        keys.add(key)
+        return keys
+
     def save_take(self, session: str, label: str, snap, evt, boot_raw: Optional[str],
                   gui_commit: str, received_wall: float, evt_missing_reason: str = "") -> Path:
         """
-        Writes one take.
+        Writes one take from a snapshot.
         @param session             Session name.
         @param label               Take label.
         @param snap                snapshot_protocol.Snapshot.
@@ -253,8 +353,7 @@ class TakeStore:
         @raise ValueError for a bad session or label; OSError if writing fails.
         """
         self.validate_label(label)
-        folder = self.session_dir(session)
-        folder.mkdir(parents=True, exist_ok=True)
+        self.session_dir(session)  # Checks the name before anything is built
 
         # The trigger came about n_post samples before the snapshot finished
         # filling; the send time is not subtracted, so this is an estimate.
@@ -263,8 +362,8 @@ class TakeStore:
             ("take_format", cfg.TAKE_FORMAT_VERSION),
             ("label", label),
             ("session", session),
-            ("pc_received", _iso(received_wall)),
-            ("pc_trigger_est", _iso(trigger_wall)),
+            ("pc_received", iso_time(received_wall)),
+            ("pc_trigger_est", iso_time(trigger_wall)),
             ("gui_commit", gui_commit),
             ("fw", snap.fw),
             ("seq", snap.seq),
@@ -276,7 +375,7 @@ class TakeStore:
             ("channels", snap.channels),
             ("crc16", snap.crc16),
         ]
-        for name in _RULE_FIELDS:
+        for name in RULE_FIELDS:
             value = evt.fields.get(name, "missing") if evt is not None else "missing"
             lines.append(("rule_" + name, value))
         lines.append(("evt", evt.raw if evt is not None
@@ -284,16 +383,9 @@ class TakeStore:
         lines.append(("boot", boot_raw if boot_raw else "missing (not seen on this connection)"))
         lines.append(("columns", snap.channels.replace("/", ",")))
 
-        text = "".join("# %s=%s\n" % (k, _clean(v)) for k, v in lines)
+        text = header_text(lines)
         text += "".join("%s,%s,%s\n" % row for row in snap.rows)
-
-        n = self._next_number(folder, label)
-        path = folder / ("%s-%d.csv" % (label, n))
-        while path.exists():  # Only if a file appeared since the scan
-            n += 1
-            path = folder / ("%s-%d.csv" % (label, n))
-        self._write_atomic(path, text)
-        return path
+        return self.write_take(session, label, text)
 
     def relabel(self, path: Path, new_label: str) -> Path:
         """
@@ -319,7 +411,7 @@ class TakeStore:
                 if line.startswith("# label="):
                     out.append("# label=%s\n" % new_label)
                     out.append("# relabeled=%s>%s at %s\n" % (
-                        old_label, new_label, _iso(datetime.datetime.now().timestamp())))
+                        old_label, new_label, iso_time(datetime.datetime.now().timestamp())))
                 else:
                     out.append(line)
 

@@ -2,16 +2,23 @@
 File:        cnn_config.py
 Authors:     Henry (owner); first draft written with Claude
 Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0: training and export settings (request 3; C10, C11, C12
+Version:     0.3.0
+Change:      0.3.0: drive log, manual Record and window cutting
+             (drive-log-manual-record-handoff.md v0.2, requests 5 and 6;
+             one-press-manual-takes-handoff.md v0.1, request 8): the take
+             shape for takes cut from L lines, the folder names, and every
+             DRAFT value of both handoffs. SIM_FW is now sim-0.1.3-bench.
+             0.2.0: training and export settings (request 3; C10, C11, C12
              decided by the owner 2026-11-22).
-Description: Every tunable value for the CNN record GUI and the training
-             pipeline, per cnn-record-train-handoff.md v0.4,
-             "DRAFT values": one Python config location, each value with its
-             status and reason. Firmware values live in
-             firmware/firmware-bench/config.h, not here; the few repeated here
-             are only what the simulated device sends, and real takes carry
-             their own settings in every SNB line.
+Description: Every tunable value for the CNN record GUI, the window cutter and
+             the training pipeline, per cnn-record-train-handoff.md v0.4 and
+             drive-log-manual-record-handoff.md v0.2, "DRAFT values": one
+             Python config location, each value with its status and reason.
+             Firmware values live in firmware/firmware-bench/config.h, not
+             here. The few repeated here are what the simulated device sends,
+             and the take shape and gap rule that takes cut on the PC must
+             share with the firmware's snapshots (the log build's BOOT line
+             does not carry them).
 """
 
 # ============================================================================
@@ -57,6 +64,54 @@ TAKE_FORMAT_VERSION = 1
 # DRAFT. The GUI log (evidence for GUI-3 / GUI-4): one file per day,
 # firmware/cnn/logs/record_gui_<YYYY-MM-DD>.log.
 LOG_DIR = Path(__file__).resolve().parent / "logs"
+
+# DECIDED (L5, 2026-11-21). Subfolders of a session. The training loader reads
+# only <session>/*.csv, so none of these is ever loaded as a take by default:
+# drives/drive-<n>.log   every line of a drive (master data, never deleted)
+# manual/<LABEL>-<n>.csv the raw 6 s around each Record press (M1)
+# weak/<LABEL>-<n>.csv   events below MISS_FRAC, peak-aligned (L6, M2)
+# background/NONE-<n>.csv "nothing happening" windows cut from drive logs (L8)
+DRIVES_DIR_NAME = "drives"
+MANUAL_DIR_NAME = "manual"
+WEAK_DIR_NAME = "weak"
+BACKGROUND_DIR_NAME = "background"
+
+# Label of background windows (handoff, request 6). Not a class and not in
+# LABELS: background takes are only ever written to background/.
+BACKGROUND_LABEL = "NONE"
+
+# Versions of the drive log layout ('#' header, board lines, PC and MARK
+# lines) and of the raw manual recording layout.
+DRIVE_LOG_FORMAT_VERSION = 1
+MANUAL_FORMAT_VERSION = 1
+
+# The cutter's report, rewritten in the session folder on every run.
+CUT_REPORT_NAME = "cut_report.txt"
+
+# ============================================================================
+# Constants: take shape (shared with the firmware's snapshots)
+# ============================================================================
+
+# DECIDED (C4). Every take is 624 rows: TAKE_N_PRE before the aligned sample
+# and TAKE_N_POST from it on, the firmware's SNAP_N_PRE / SNAP_N_POST at
+# 416 Hz. Takes cut from L lines (manual Record, cut_windows.py) take the
+# shape from here, because the log build's BOOT line does not carry it.
+TAKE_N_PRE = 104
+TAKE_N_POST = 520
+TAKE_N_ROWS = TAKE_N_PRE + TAKE_N_POST
+
+# DECIDED (C3). The model channels, named as the firmware's SNAP_CHANNELS.
+TAKE_CHANNELS = "az_hp/gx/gy"
+
+# The firmware's SNAP_MAX_GAP_US (1.5 sample periods at 416 Hz): two
+# neighbouring samples further apart in device time than this mean one was
+# lost without n skipping (merged data-ready edges). A snapshot with such a
+# gap is abandoned on the device; a window cut on the PC is skipped the same way.
+MAX_SAMPLE_GAP_US = 3605
+
+# The IMU rate when no BOOT line has been seen yet (firmware IMU_ODR_HZ). Only
+# sizes the manual Record buffer; takes always use the rate from BOOT.
+DEFAULT_RATE_HZ = 416
 
 # ============================================================================
 # Constants: serial link
@@ -108,19 +163,80 @@ LIVE_READOUT_MS = 250
 # DRAFT. No S line for this long (s) while connected is shown as a warning.
 LIVE_STALE_S = 1.0
 
+# DRAFT (handoff, request 5). In the log build the live view draws every
+# LIVE_DECIMATE-th L sample, so the plot's load stays what it is with S lines.
+LIVE_DECIMATE = 8
+
+# ============================================================================
+# Constants: log build, drive log and manual Record (request 5, request 8)
+# ============================================================================
+
+# DRAFT (handoff). The reader thread hands L samples to the GUI thread in
+# batches this often (s), not one Qt signal per sample.
+SAMPLE_BATCH_S = 0.05
+
+# DRAFT (handoff). A PC line (laptop time and the latest n) this often (s),
+# plus one at start, stop, a lost port and a reconnect.
+PC_LINE_PERIOD_S = 1.0
+
+# DRAFT (handoff). The drive log is flushed at least this often (s), so a
+# crash loses at most about this much.
+LOG_FLUSH_S = 1.0
+
+# How often the reader thread reports the drive log's status to the GUI (s),
+# and checks the free disk space (s).
+LOG_STATUS_PERIOD_S = 0.5
+DISK_CHECK_PERIOD_S = 5.0
+
+# DRAFT (handoff). Below this much free disk space (bytes) the log status
+# warns: about 6 hours of logging at 160 MB per hour.
+LOW_DISK_BYTES = 1_000_000_000
+
+# DECIDED (L4, 2026-11-21). Manual Record keeps the last MANUAL_PRE_S of L
+# samples and collects MANUAL_POST_S more after a press, so a press just
+# before or just after a bump both catch it. R starts it.
+MANUAL_PRE_S = 3.0
+MANUAL_POST_S = 3.0
+MANUAL_RECORD_KEY = "R"
+
+# ============================================================================
+# Constants: alignment and window cutting (request 6, request 8)
+# ============================================================================
+
+# DECIDED (L6, 2026-11-21). A MARK labels an EVT take if it comes within
+# MARK_MATCH_S after the trigger. An event with no threshold crossing is
+# aligned at MISS_FRAC of the BOOT thresholds; below that it is a weak event,
+# peak-aligned into weak/, unless its peak is under WEAK_FLOOR_FRAC (then
+# nothing is saved and it is listed for review).
+MARK_MATCH_S = 3.0
+MISS_FRAC = 0.5
+WEAK_FLOOR_FRAC = 0.2
+
+# DRAFT (handoff). A weak take's peak is placed the session's typical
+# crossing-to-peak gap after the aligned row: the median of n_peak - trigger
+# over the session's event takes, or 0 with fewer than PEAK_GAP_MIN_TAKES.
+PEAK_GAP_MIN_TAKES = 10
+
+# DECIDED (L8, 2026-11-21; the count is DRAFT). Background windows per drive
+# log, the seed that picks them, and how far (s) they stay from any trigger
+# or mark. 0 windows turns them off.
+BACKGROUND_PER_LOG = 20
+BACKGROUND_SEED = 475
+BACKGROUND_CLEAR_S = 3.0
+
 # ============================================================================
 # Constants: simulated device
 # ============================================================================
 
 # The simulated device's firmware version. Starts with "sim-" so takes recorded
 # from it can never be mistaken for real ones.
-SIM_FW = "sim-0.1.2-bench"
+SIM_FW = "sim-0.1.3-bench"
 
 # Snapshot settings the simulated device sends (the firmware's C4 values).
-SIM_RATE_HZ = 416
-SIM_N_PRE = 104
-SIM_N_POST = 520
-SIM_CHANNELS = "az_hp/gx/gy"
+SIM_RATE_HZ = DEFAULT_RATE_HZ
+SIM_N_PRE = TAKE_N_PRE
+SIM_N_POST = TAKE_N_POST
+SIM_CHANNELS = TAKE_CHANNELS
 
 # The simulated device sends an S line every SIM_PRINT_EVERY samples, like the
 # firmware's PRINT_EVERY_N, so the live view has something to show.
@@ -142,6 +258,14 @@ SIM_DISCONNECT_S = 2.0
 
 # DRAFT (handoff). Fixed seed, so a simulated run is the same every time.
 SIM_SEED = 475
+
+# Log mode of the simulated device (request 5): after every boot it sends
+# SIM_SETTLE_S of L lines with ok=0 (the firmware's SETTLE_MS, gyro bias not
+# ready yet); every SIM_GAP_EVERY-th event, SIM_GAP_SAMPLES L lines are lost
+# in the quiet stretch before it (a jump in n). 0 = never.
+SIM_SETTLE_S = 2.0
+SIM_GAP_EVERY = 5
+SIM_GAP_SAMPLES = 20
 
 # ============================================================================
 # Constants: training and export (request 3)

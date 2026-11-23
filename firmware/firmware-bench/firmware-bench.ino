@@ -1,9 +1,15 @@
 /*
  * File:        firmware-bench.ino
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-18
- * Version:     0.1.2-bench
- * Change:      0.1.2-bench (cnn-record-train-handoff.md v0.4): re-arm rule,
+ * Date:        2026-11-22
+ * Version:     0.1.3-bench
+ * Change:      0.1.3-bench (drive-log-manual-record-handoff.md v0.2, request
+ *              4): log build. With LOG_MODE 1 in config.h, every sample goes
+ *              to Serial as an L line for the record GUI's drive log and
+ *              manual Record (no S lines, no snapshots); setup() then makes
+ *              out_q LOG_OUT_Q_LEN long. Every build: the Serial EVT line
+ *              gains n_trig, the trigger's sample count.
+ *              0.1.2-bench (cnn-record-train-handoff.md v0.4): re-arm rule,
  *              so a lockout's tail cannot fire a second event (request 0).
  *              Record mode (request 1): with RECORD_MODE 1 in config.h, each
  *              trigger's snapshot of the model channels goes to Serial for
@@ -25,7 +31,9 @@
  *              Android app over BLE, and prints samples, segments, events, and
  *              health to Serial. The record build (RECORD_MODE 1 in config.h)
  *              also prints each trigger's snapshot (SNB / SNR / SNE lines) for
- *              the CNN record GUI in firmware/cnn/cnn_record_gui/.
+ *              the CNN record GUI in firmware/cnn/cnn_record_gui/. The log
+ *              build (LOG_MODE 1) prints every sample as an L line instead of
+ *              S lines. The two cannot both be on.
  *
  *              setup() only creates the queues and the five tasks, then deletes
  *              its own task, so loop() never runs. Each task initializes the
@@ -47,8 +55,9 @@
  *              The "UART" connector is optional: plug it in too to see ROM boot
  *              messages and configASSERT output when chasing a reboot loop.
  *
- *              Bench trips upload as REAL with fw_version 0.1.2-bench (earlier:
- *              0.1.1-bench, 0.1.0-bench); Ben deletes them by that version.
+ *              Bench trips upload as REAL with fw_version 0.1.3-bench (earlier:
+ *              0.1.2-bench, 0.1.1-bench, 0.1.0-bench); Ben deletes them by
+ *              that version.
  */
 
 // ============================================================================
@@ -112,7 +121,12 @@ static void start_task(TaskFunction_t fn, const char *name, UBaseType_t prio,
  */
 void setup() {
   s_ctx.sample_q = xQueueCreate(SAMPLE_Q_LEN, sizeof(imu_sample_t));
+#if LOG_MODE
+  // Log build: one item per sample, so ~0.6 s of room (L3) instead of OUT_Q_LEN.
+  s_ctx.out_q = xQueueCreate(LOG_OUT_Q_LEN, sizeof(out_msg_t));
+#else
   s_ctx.out_q = xQueueCreate(OUT_Q_LEN, sizeof(out_msg_t));
+#endif
   s_ctx.sys_q = xQueueCreate(SYS_Q_LEN, sizeof(sys_msg_t));
   s_ctx.ble_q = xQueueCreate(BLE_Q_LEN, sizeof(ble_msg_t));
   s_ctx.time_q = xQueueCreate(1, sizeof(time_sync_t));  // 1: written with xQueueOverwrite

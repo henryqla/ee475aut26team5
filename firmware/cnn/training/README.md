@@ -24,6 +24,7 @@ The guide has these parts:
 - **Part 3:** what a run saves.
 - **Part 4:** how to read the report.
 - **Part 5:** the made-up sample sets.
+- **Part 6:** cut takes from drive logs and manual recordings.
 - **Tests:** what to do and what you should see.
 - **If something goes wrong.**
 
@@ -244,6 +245,63 @@ itself.
 
 ---
 
+## Part 6: Cut takes from drive logs and manual recordings
+
+With the board's log build, the record GUI saves whole drives as **drive logs**
+and keeps the 6 seconds around every **Record** press
+(`../cnn_record_gui/README.md`, Part 11). `cut_windows.py` turns them into
+ordinary takes that the GUI and a training run read like any other. Run it
+after **Stop log**, from this folder, with the session's name:
+
+Command Prompt:
+
+```
+"%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" cut_windows.py --session 2026-11-25_car_route1
+```
+
+PowerShell:
+
+```
+& "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" cut_windows.py --session 2026-11-25_car_route1
+```
+
+It makes, in this order:
+
+1. **Manual recordings** in the session's `manual` folder that have no take yet.
+   Record already made a take for most of them; those are skipped.
+2. **One take per board event** (`EVT` line) in each drive log, placed exactly
+   where the board's own snapshot would be. Its label comes from the last P, B
+   or F mark pressed within 3 seconds after the event; with none, it is
+   UNLABELED (relabel it in the GUI). An event inside a manual recording that
+   has a take is skipped, so a bump is never saved twice.
+3. **One take per mark with no event**: a bump the board's threshold missed.
+   It is lined up at half the threshold in the 3 seconds before the mark. If
+   nothing reaches half, the biggest movement is used if it reaches a fifth (a
+   **weak** take, in the `weak` folder); otherwise the mark is listed for review.
+4. **Background windows**: 20 "nothing happening" pieces of each log (`--background`
+   changes the number, 0 turns them off), at least 3 seconds from any event or
+   mark, in the `background` folder. They are picked once per log.
+
+**Rules:**
+
+- A piece with missing readings, a board that was still settling, or not
+  enough readings before or after is skipped and listed, never padded.
+- Running it twice adds nothing: each take records which piece of which file it
+  came from (`src_key`). A take you deleted is never made again.
+- A take whose settings differ from the session's takes is refused and listed.
+- It never changes or deletes a drive log or a manual recording.
+- Training reads only the takes directly in the session folder, so `weak` and
+  `background` are left out unless moved in.
+- Takes cut from marks or by Record have no rule answer (`rule_class` is
+  `missing`). The report counts those as the rule being wrong, so a test set
+  with many of them makes the rule baseline look worse than it is.
+
+It prints a summary and writes `cut_report.txt` in the session folder: takes
+made per label and source, skipped pieces with reasons, items for review,
+events covered by manual recordings, refused takes, and events with no mark.
+
+---
+
 ## Tests
 
 Each test says what to do, what you should see, and what to save as proof.
@@ -265,9 +323,11 @@ PowerShell:
 & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -m unittest discover -s tests
 ```
 
-**You should see** `Ran 38 tests` and `OK` on the last line. Before TensorFlow
+**You should see** `Ran 48 tests` and `OK` on the last line. Before TensorFlow
 is installed, the last line says `OK (skipped=2)`: the two full-run tests wait
-for TensorFlow. With TensorFlow they take about a minute.
+for TensorFlow. With TensorFlow they take about a minute. Ten of the tests
+check `cut_windows.py` (CUT-1, CUT-3 and CUT-4 cases, and manual recordings);
+they need no TensorFlow.
 
 **It fails if** the last line says `FAILED`. Send all of the text to the owner.
 
@@ -369,6 +429,38 @@ prints a traceback (lines starting with `Traceback`).
 
 **Proof to save:** the run folder's `train.log` and `report.md`.
 
+### CUT-1 to CUT-4 and MR-4: The cutter
+
+All five are **NOT TESTED** so far.
+
+- **CUT-1 (simulated):** the automatic checks include it: a take cut at each
+  event of the simulated log build must equal that event's snapshot, row for
+  row as text, with the same CRC. **Proof:** the automatic checks' output.
+- **CUT-2 (board):** run the cutter (Part 6) on the sessions of the GUI's DRV-2
+  and DRV-3 tests. **You should see** one take per event, labeled from its mark;
+  every take opens in the GUI's Collected takes; 20 files per log in
+  `background`, none within 3 seconds of an event or mark (the report lists
+  them). **Proof:** `cut_report.txt` and a screenshot.
+- **CUT-3 (edge cases):** a log with a gap across an event, an event at the very
+  start of a log, and a mark with no event; manual recordings with a tap
+  between a fifth and half of the threshold, and with nothing above a fifth.
+  **You should see** the first two skipped with reasons, the mark cut as
+  `marker_only`, the first recording in `weak` and the second listed for
+  review. The automatic checks include these cases. **Proof:**
+  `cut_report.txt`.
+- **CUT-4 (fault):** run the cutter twice, then on a session holding takes with
+  different settings. **You should see** the second run add nothing ("Takes
+  made: 0") and the odd takes refused and listed. **Proof:** both reports and
+  folder listings.
+- **MR-4 (consistency):** run the cutter on the GUI's MR-2 session. **You
+  should see** "Takes made: 0" from manual recordings (Record already made
+  them; the report counts them under "Already cut before"). To compare one by
+  hand, copy a file from `manual` into a new session's `manual` folder, run the
+  cutter on that session, and compare the take it makes with the GUI's (for
+  example `fc /b` in Command Prompt, or `Compare-Object (Get-Content a)
+  (Get-Content b)` in PowerShell): they are the same. **Proof:**
+  `cut_report.txt` and the comparison.
+
 ---
 
 ## If something goes wrong
@@ -448,6 +540,7 @@ the report says so.
 | `cnn_model.py` | The CNN, normalization inside (imports TensorFlow) |
 | `model_export.py` | TFLite conversion, op list, frozen test set, `model_data.h` |
 | `make_sample_set.py` | Writes the made-up sample sets |
+| `cut_windows.py` | Cuts takes from drive logs and manual recordings (standard library only; the alignment and take format come from `../cnn_record_gui/take_cut.py`, shared with the GUI's Record button) |
 | `requirements.txt` | TensorFlow pin, installed into the GUI's venv |
 | `../cnn_config.py` | Every adjustable setting, in the "training and export" section |
 | `../cnn_record_gui/training_widget.py` | The GUI's Training tab |

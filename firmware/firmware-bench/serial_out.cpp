@@ -1,9 +1,19 @@
 /*
  * File:        serial_out.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-18
- * Version:     0.1.2-bench
- * Change:      BOOT adds rearm_frac and rearm_hold_ms (request 0) and rec=0/1.
+ * Date:        2026-11-22
+ * Version:     0.1.3-bench
+ * Change:      Log build (drive-log-manual-record-handoff.md v0.2, request
+ *              4): an OUT_L item prints as an L line
+ *              (L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok, every float at
+ *              LOG_DECIMALS) under the same whole-line-or-nothing rule; the TX
+ *              buffer is LOG_TX_BUF_BYTES; BOOT adds log=1 and the log
+ *              settings; the #S header becomes #L; and every
+ *              LOG_PERF_PERIOD_MS a "#LPERF" comment line reports how long L
+ *              lines take to format and write, and the lowest free heap
+ *              (owner, 2026-11-22). Every build: EVT gains n_trig as its 13th
+ *              field (L2).
+ *              0.1.2-bench: BOOT adds rearm_frac and rearm_hold_ms (request 0) and rec=0/1.
  *              BOOT was 319 characters, so LINE_MAX_CHARS goes from 352 to
  *              640 and the line buffer becomes static, keeping it off this
  *              task's 4 KB stack. Record mode (request 1): an OUT_SNAP item
@@ -43,6 +53,7 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include "esp_system.h"  // esp_get_minimum_free_heap_size() for #LPERF (log builds)
 #include "esp_timer.h"
 #include "config.h"
 #include "types.h"
@@ -70,6 +81,21 @@
 #define BOOT_REC_ARGS
 #endif
 
+#if LOG_MODE
+// Log-build fields at the end of BOOT (log=1, the L line rate and decimals,
+// both buffer sizes and the #LPERF period), so a drive log records how it was run.
+#define BOOT_LOG_FMT   ",log=1,l_rate=%d,l_dec=%d,log_tx_buf=%d,log_out_q=%d,log_perf_ms=%d"
+#define BOOT_LOG_ARGS  , IMU_ODR_HZ, LOG_DECIMALS, LOG_TX_BUF_BYTES, LOG_OUT_Q_LEN, \
+                       LOG_PERF_PERIOD_MS
+#define TX_BUF_BYTES   LOG_TX_BUF_BYTES     // ~0.75 s of the L stream
+// z_hp, roll and pitch must print exactly as SNR rows do (handoff, request 4).
+static_assert(LOG_DECIMALS == SNAP_DECIMALS, "L lines must use the snapshot decimals");
+#else
+#define BOOT_LOG_FMT   ""
+#define BOOT_LOG_ARGS
+#define TX_BUF_BYTES   SERIAL_TX_BUF_BYTES
+#endif
+
 // Serial must be native USB in Hardware CDC mode (decided): on the bench
 // DevKit that is the "USB" connector. With other settings Serial becomes UART0
 // (the "UART" connector) or the TinyUSB CDC driver instead, and the never-wait
@@ -89,6 +115,12 @@ typedef struct {
   int64_t  last_hb_us;    // Time of the last heartbeat
   uint32_t serial_drops;  // Lines dropped: USB TX buffer full (no host reading)
   uint32_t snap_drops;    // Record mode: snapshots abandoned mid-send
+#if LOG_MODE
+  int64_t  perf_start_us; // Start of the current #LPERF period
+  uint32_t l_lines;       // L lines handled (written or dropped) in this period
+  uint64_t l_sum_us;      // Their total format-and-write time, us
+  uint32_t l_max_us;      // The longest one, us
+#endif
 } ser_stats_t;
 
 // ============================================================================
@@ -104,6 +136,9 @@ static int format_line(char *buf, size_t size, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
 static bool write_wait(const char *line, int len, const app_ctx_t *ctx, ser_stats_t *st);
 static bool send_snapshot(const snap_t *p, const app_ctx_t *ctx, ser_stats_t *st);
+#endif
+#if LOG_MODE
+static void perf_if_due(ser_stats_t *st);
 #endif
 static const char *class_name(evt_class_t c);
 static const char *pitch_seq_name(int8_t first, bool seq);
@@ -254,18 +289,23 @@ static void print_boot(void) {
              "hpf_hz=%.2f,print_every=%d,"
              "settle_ms=%d,nose_down_sign=%d,pitch_smooth=%d,pitch_lobe=%.1f,"
              "pitch_lobe_end=%.1f,lobe_gap_ms=%d,z_lobe=%.3f,bias_max=%.1f,"
-             "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,ble=%s" BOOT_REC_FMT,
+             "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,ble=%s" BOOT_REC_FMT BOOT_LOG_FMT,
              FW_VERSION, IMU_ODR_HZ, ACCEL_FS_G, GYRO_FS_DPS, THR_Z_G,
              THR_ROLL_DPS, THR_PITCH_DPS, LOCKOUT_MS, REARM_FRAC, REARM_HOLD_MS,
              HPF_CUTOFF_HZ,
              PRINT_EVERY_N, SETTLE_MS, PITCH_NOSE_DOWN_SIGN, PITCH_SMOOTH_N,
              PITCH_LOBE_DPS, PITCH_LOBE_END_DPS, PITCH_LOBE_MAX_GAP_MS,
              Z_LOBE_G, GYRO_BIAS_MAX_DPS, IMU_RETRY_MS, IMU_RECOVER_GOOD_READS,
-             SEGMENT_MS, BLE_DEVICE_NAME BOOT_REC_ARGS);
+             SEGMENT_MS, BLE_DEVICE_NAME BOOT_REC_ARGS BOOT_LOG_ARGS);
+#if LOG_MODE
+  write_line("#L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok");
+  write_line("#LPERF,t_ms,lines,avg_us,max_us,heap_min");
+#else
   write_line("#S,n,t_us,ax,ay,az,gx,gy,gz,z_hp");
+#endif
   write_line("#SEG,t_start,t_end,synced,n,rms_z,peak_z,roll_rms,pitch_rms");
   write_line("#EVT,seq,n_peak,t_us_peak,class,peak_z_g,peak_roll_dps,peak_pitch_dps,t_ms,synced,"
-             "pitch_seq,basis");
+             "pitch_seq,basis,n_trig");
 #if RECORD_MODE
   write_line("#HLT,t_ms,samples,sample_q_drops,out_q_drops,drdy_timeouts,"
              "ble_q_drops,ble_sent,ble_fails,serial_drops,imu_recoveries,snap_drops");
@@ -300,14 +340,29 @@ static bool print_msg(const out_msg_t *m) {
                         m->seg.n, m->seg.rms_z, m->seg.peak_z, m->seg.roll_rms,
                         m->seg.pitch_rms);
     case OUT_EVT:
+      // n_trig last (L2), so the first 12 fields keep their place for parsers
+      // that match them by position.
       return write_line("EVT,%" PRIu32 ",%" PRIu32 ",%" PRId64 ",%s,%.3f,%.1f,%.1f,%" PRId64
-                        ",%d,%s,%s",
+                        ",%d,%s,%s,%" PRIu32,
                         m->evt.seq, m->evt.n_peak, m->evt.t_us_peak,
                         class_name(m->evt.cls), m->evt.peak_z_g,
                         m->evt.peak_roll_dps, m->evt.peak_pitch_dps, m->evt.t_ms,
                         m->evt.synced ? 1 : 0,
                         pitch_seq_name(m->evt.pitch_first, m->evt.pitch_seq),
-                        basis_name(m->evt.basis));
+                        basis_name(m->evt.basis), m->evt.n_trig);
+#if LOG_MODE
+    case OUT_L:
+      // Every float at LOG_DECIMALS (= SNAP_DECIMALS), with the same %.*f
+      // conversion as SNR rows, so z_hp, roll and pitch print exactly as a
+      // snapshot would. ok as 1/0.
+      return write_line("L,%" PRIu32 ",%" PRId64 ",%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%d",
+                        m->l.s.n, m->l.s.t_us,
+                        LOG_DECIMALS, m->l.s.ax, LOG_DECIMALS, m->l.s.ay,
+                        LOG_DECIMALS, m->l.s.az, LOG_DECIMALS, m->l.s.gx,
+                        LOG_DECIMALS, m->l.s.gy, LOG_DECIMALS, m->l.s.gz,
+                        LOG_DECIMALS, m->l.model.c[0], LOG_DECIMALS, m->l.model.c[1],
+                        LOG_DECIMALS, m->l.model.c[2], m->l.ok ? 1 : 0);
+#endif
     case OUT_HLT:
 #if RECORD_MODE
       // Record build: snap_drops appended, so the other columns keep their place.
@@ -353,6 +408,36 @@ static void heartbeat_if_due(const app_ctx_t *ctx, ser_stats_t *st) {
     sys_heartbeat(ctx->sys_q, &hb);
   }
 }
+
+#if LOG_MODE
+/**
+ * Every LOG_PERF_PERIOD_MS, prints one "#LPERF" comment line (owner,
+ * 2026-11-22): #LPERF,t_ms,lines,avg_us,max_us,heap_min. lines is the L lines
+ * handled in the period (written or dropped), avg_us and max_us their average
+ * and longest format-and-write time, and heap_min the lowest free heap since
+ * boot, in bytes. lines x avg_us / period is this task's share of core 0 spent
+ * on L lines (LOG-3). Parsers skip '#' lines. Like any line, it is dropped
+ * (and counted) if it does not fit in the TX buffer.
+ * @param st  This task's counters; the period's L line figures are reset.
+ * @return None.
+ */
+static void perf_if_due(ser_stats_t *st) {
+  const int64_t now_us = esp_timer_get_time();
+  if (now_us - st->perf_start_us < (int64_t)LOG_PERF_PERIOD_MS * 1000) {
+    return;
+  }
+  const uint32_t avg_us = (st->l_lines > 0) ? (uint32_t)(st->l_sum_us / st->l_lines) : 0;
+  if (!write_line("#LPERF,%" PRId64 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32,
+                  now_us / 1000, st->l_lines, avg_us, st->l_max_us,
+                  (uint32_t)esp_get_minimum_free_heap_size())) {
+    st->serial_drops++;
+  }
+  st->perf_start_us = now_us;
+  st->l_lines = 0;
+  st->l_sum_us = 0;
+  st->l_max_us = 0;
+}
+#endif
 
 #if RECORD_MODE
 /**
@@ -502,6 +587,23 @@ static void handle_msg(const out_msg_t *m, const app_ctx_t *ctx, ser_stats_t *st
 #else
   (void)ctx;  // Used only in record builds
 #endif
+#if LOG_MODE
+  if (m->tag == OUT_L) {
+    // Timed for #LPERF: formatting nine floats is the main cost on core 0.
+    const int64_t t0_us = esp_timer_get_time();
+    const bool written = print_msg(m);
+    const uint32_t took_us = (uint32_t)(esp_timer_get_time() - t0_us);
+    st->l_lines++;
+    st->l_sum_us += took_us;
+    if (took_us > st->l_max_us) {
+      st->l_max_us = took_us;
+    }
+    if (!written) {
+      st->serial_drops++;
+    }
+    return;
+  }
+#endif
   if (!print_msg(m)) {
     st->serial_drops++;
   }
@@ -514,13 +616,17 @@ void serial_out_task(void *param) {
   // makes every write return at once; write_line() then only writes lines
   // that fit, so nothing here ever waits on the host. No wait for a host
   // either: the board must run with no monitor attached.
-  Serial.setTxBufferSize(SERIAL_TX_BUF_BYTES);
+  // The log build's buffer is LOG_TX_BUF_BYTES (TX_BUF_BYTES above).
+  Serial.setTxBufferSize(TX_BUF_BYTES);
   Serial.setTxTimeoutMs(0);
   Serial.begin(SERIAL_BAUD);
   print_boot();
 
   ser_stats_t st = {};
   st.last_hb_us = esp_timer_get_time();
+#if LOG_MODE
+  st.perf_start_us = st.last_hb_us;
+#endif
   for (;;) {
     out_msg_t m;
     // The timeout lets the heartbeat go out even when out_q stays empty.
@@ -528,5 +634,8 @@ void serial_out_task(void *param) {
       handle_msg(&m, ctx, &st);
     }
     heartbeat_if_due(ctx, &st);
+#if LOG_MODE
+    perf_if_due(&st);
+#endif
   }
 }

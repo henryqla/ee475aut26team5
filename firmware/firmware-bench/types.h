@@ -1,9 +1,13 @@
 /*
  * File:        types.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-18
- * Version:     0.1.2-bench
- * Change:      Record mode (cnn-record-train-handoff.md v0.4, request 1):
+ * Date:        2026-11-22
+ * Version:     0.1.3-bench
+ * Change:      Log build (drive-log-manual-record-handoff.md v0.2, request
+ *              4): OUT_L and its payload out_l_t (log builds only), and
+ *              n_trig in evt_t for the Serial EVT line (L2), added at the end
+ *              so the struct keeps its size.
+ *              0.1.2-bench: Record mode (cnn-record-train-handoff.md v0.4, request 1):
  *              snapshot row and buffer types, OUT_SNAP (a snapshot buffer
  *              pointer in out_q), snap_drops in heartbeats and HLT, and the
  *              snap_free_q handle. Includes config.h for the SNAP_* sizes.
@@ -99,6 +103,8 @@ typedef struct {
   int8_t      pitch_first;     // First pitch lobe: +1 nose down, -1 nose up, 0 none
   bool        pitch_seq;       // The opposite lobe followed within PITCH_LOBE_MAX_GAP_MS
   evt_basis_t basis;           // What decided cls
+  uint32_t    n_trig;          // Sample count at the threshold crossing that opened the
+                               // window (Serial EVT line only; BLE evt unchanged, L2)
 } evt_t;
 
 // One snapshot row: the model channels of one sample, in SNAP_CHANNELS order
@@ -143,6 +149,7 @@ typedef enum : uint8_t {
   OUT_FLT,              // Fault line, once per second in the safe state
   OUT_BLE,              // BLE link line, on each link change
   OUT_SNAP,             // Record mode: a full snapshot, printed as SNB, SNR..., SNE
+  OUT_L,                // Log mode: every sample, printed as an L line
 } out_tag_t;
 
 // Payload of an S line.
@@ -150,6 +157,18 @@ typedef struct {
   imu_sample_t s;       // The sample, chip axes
   float        z_hp;    // High-passed vertical acceleration, g
 } out_s_t;
+
+#if LOG_MODE
+// Payload of an L line (log mode): one sample in raw chip axes, plus the
+// model channels exactly as a snapshot row holds them, so a window cut from
+// L lines equals the snapshot the record build would have sent.
+typedef struct {
+  imu_sample_t s;       // The sample, chip axes (gyro bias still in)
+  snap_row_t   model;   // z_hp (g), roll rate and pitch rate (dps, bias removed)
+  bool         ok;      // Gyro bias ready: false during the settle time and after an
+                        // IMU recovery. Rows with ok = false are never used for takes
+} out_l_t;
+#endif
 
 // Payload of an HLT line.
 typedef struct {
@@ -184,6 +203,9 @@ typedef struct {
     out_flt_t flt;
     link_t    link;
     snap_t   *snap;         // OUT_SNAP: the buffer, owned by serial_out once received
+#if LOG_MODE
+    out_l_t   l;            // OUT_L. Log builds only, so other builds keep their item size
+#endif
   };
 } out_msg_t;
 

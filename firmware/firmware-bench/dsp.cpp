@@ -1,9 +1,15 @@
 /*
  * File:        dsp.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-18
- * Version:     0.1.2-bench
- * Change:      Re-arm rule (cnn-record-train-handoff.md v0.4, request 0,
+ * Date:        2026-11-22
+ * Version:     0.1.3-bench
+ * Change:      Log build (drive-log-manual-record-handoff.md v0.2, request
+ *              4, LOG_MODE): every sample goes to out_q as an L line (raw chip
+ *              axes, the model channels exactly as a snapshot row, and ok =
+ *              gyro bias ready) instead of every PRINT_EVERY_N-th as an S
+ *              line, without waiting. Every build: the window remembers the
+ *              trigger's sample count and the event carries it as n_trig (L2).
+ *              0.1.2-bench: Re-arm rule (cnn-record-train-handoff.md v0.4, request 0,
  *              C16). A window closing disarms the detector; it re-arms once
  *              every axis has stayed below REARM_FRAC x its own threshold for
  *              REARM_HOLD_MS, so the tail of one event (still above threshold
@@ -36,7 +42,8 @@
  *              and each segment and event to both out_q (Serial) and ble_q
  *              (app), all without waiting. In record builds it also keeps
  *              the pre-trigger ring buffer and fills one snapshot per
- *              trigger, again without waiting. DRAFT detection algorithm from
+ *              trigger, again without waiting. Log builds send every sample
+ *              as an L line instead of the S lines. DRAFT detection algorithm from
  *              devkit-phase1-context.md v0.4, "Detection".
  */
 
@@ -63,7 +70,9 @@ static_assert(REARM_HOLD_MS >= 0, "REARM_HOLD_MS must not be negative");
 #if RECORD_MODE
 static_assert(SNAP_RATE_HZ == IMU_ODR_HZ, "Snapshot decimation is not implemented");
 static_assert(SNAP_N_PRE >= 1 && SNAP_N_POST >= 1, "A snapshot needs rows before and after the trigger");
-static_assert(SNAP_N_CH == 3, "dsp_task builds each snapshot row from exactly three channels");
+#endif
+#if RECORD_MODE || LOG_MODE
+static_assert(SNAP_N_CH == 3, "dsp_task builds each snapshot row / L line from exactly three channels");
 #endif
 
 // ============================================================================
@@ -133,6 +142,7 @@ typedef struct {
 typedef struct {
   bool     open;          // true inside a lockout window
   int64_t  end_us;        // Sample time at which the window closes
+  uint32_t n_trig;        // Sample count of the threshold crossing that opened it
   float    peak_z_u;
   float    peak_roll_u;
   float    peak_pitch_u;
@@ -738,10 +748,13 @@ void dsp_task(void *param) {
       }
       const float z_hp = hpf_step(&hpf, car.vert_g);
 #if RECORD_MODE
+      snap_track(&s_rec, ctx, &s, bias.ready);
+#endif
+#if RECORD_MODE || LOG_MODE
       // Model channels in SNAP_CHANNELS order, after the same preprocessing
       // the trigger uses (HPF, bias removal), so a take matches what the CNN
-      // will see on the device.
-      snap_track(&s_rec, ctx, &s, bias.ready);
+      // will see on the device. Snapshot rows and L lines both use this one
+      // row, so a window cut from L lines equals the snapshot.
       const snap_row_t row = {{z_hp, car.roll_dps, car.pitch_dps}};
 #endif
 
@@ -804,6 +817,7 @@ void dsp_task(void *param) {
         e.peak_pitch_dps = win.peak_pitch_u * THR_PITCH_DPS;
         e.pitch_first = win.pitch.first;
         e.pitch_seq = win.pitch.seq;
+        e.n_trig = win.n_trig;  // L2: lets a window be cut from a log aligned as a snapshot
 
         out_msg_t o = {};
         o.tag = OUT_EVT;
@@ -833,6 +847,7 @@ void dsp_task(void *param) {
         win = window_t{};
         win.open = true;
         win.end_us = s.t_us + (int64_t)LOCKOUT_MS * 1000;
+        win.n_trig = s.n;
         lobe_seq_open(&win.pitch, &pitch_trk, s.t_us);
         lobe_seq_open(&win.z, &z_trk, s.t_us);
         opened = true;
@@ -861,6 +876,19 @@ void dsp_task(void *param) {
       snap_push(&s_rec, &row);
 #endif
 
+#if LOG_MODE
+      // Log build: every sample goes out as an L line, without waiting. A
+      // full out_q drops it and counts out_q_drops, so every lost sample
+      // shows up as a jump in n on the PC. No S lines in this build.
+      {
+        out_msg_t m = {};
+        m.tag = OUT_L;
+        m.l.s = s;
+        m.l.model = row;
+        m.l.ok = bias.ready;
+        send_out(ctx->out_q, &m, &out_q_drops);
+      }
+#else
       // Every PRINT_EVERY_N-th sample also goes out as an S line.
       if (s.n % PRINT_EVERY_N == 0) {
         out_msg_t m = {};
@@ -869,6 +897,7 @@ void dsp_task(void *param) {
         m.s.z_hp = z_hp;
         send_out(ctx->out_q, &m, &out_q_drops);
       }
+#endif
     }
 
     const int64_t now_us = esp_timer_get_time();

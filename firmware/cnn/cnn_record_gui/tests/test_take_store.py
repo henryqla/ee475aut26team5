@@ -21,7 +21,7 @@ from pathlib import Path
 
 import helpers  # Sets sys.path; must come before the GUI imports
 from snapshot_protocol import SnapshotAssembler
-from take_store import TakeStore, load_take, parse_take_name
+from take_store import TakeStore, load_take, parse_take_name, read_header
 
 # ============================================================================
 # Functions
@@ -133,6 +133,32 @@ class TestTakeStore(unittest.TestCase):
     def test_no_temp_files_left(self):
         path = self.save()
         self.assertEqual(sorted(os.listdir(path.parent)), ["POTHOLE-1.csv"])
+
+    def test_write_take_subfolders(self):
+        s = "2026-11-12_bench"
+        a = self.store.write_take(s, "POTHOLE", "# src_key=a\n1,2,3\n", subdir="weak")
+        b = self.store.write_take(s, "NONE", "# src_key=b\n1,2,3\n", subdir="background")
+        c = self.store.write_take(s, "POTHOLE", "# src_key=c\n1,2,3\n", subdir="manual")
+        self.assertEqual([p.relative_to(self.tmp.name).as_posix() for p in (a, b, c)],
+                         [s + "/weak/POTHOLE-1.csv", s + "/background/NONE-1.csv",
+                          s + "/manual/POTHOLE-1.csv"])
+        with self.assertRaises(ValueError):
+            self.store.write_take(s, "NONE", "x\n")                    # Not in the session folder
+        with self.assertRaises(ValueError):
+            self.store.write_take(s, "POTHOLE", "x\n", subdir="background")
+        with self.assertRaises(ValueError):
+            self.store.write_take(s, "POTHOLE", "x\n", subdir="../other")
+
+    def test_src_keys_and_read_header(self):
+        s = "2026-11-12_bench"
+        kept = self.store.write_take(s, "POTHOLE", "# src_key=k1\n# label=POTHOLE\n1,2,3\n#x=y\n")
+        gone = self.store.write_take(s, "POTHOLE", "# src_key=k2\n1,2,3\n")
+        self.store.delete(gone)
+        self.store.write_take(s, "POTHOLE", "# src_key=k3\n1,2,3\n", subdir="weak")
+        self.store.write_take(s, "POTHOLE", "# src_key=k4\n1,2,3\n", subdir="manual")
+        # Deleted takes count (never cut again); raw recordings are sources.
+        self.assertEqual(self.store.src_keys(s), {"k1", "k2", "k3"})
+        self.assertEqual(read_header(kept), {"src_key": "k1", "label": "POTHOLE"})
 
 
 if __name__ == "__main__":

@@ -1,9 +1,13 @@
 /*
  * File:        config.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-18
- * Version:     0.1.2-bench
- * Change:      FW_VERSION 0.1.2-bench. Re-arm rule (cnn-record-train-handoff.md
+ * Date:        2026-11-22
+ * Version:     0.1.3-bench
+ * Change:      FW_VERSION 0.1.3-bench (owner, 2026-11-22). Log build
+ *              (drive-log-manual-record-handoff.md v0.2, request 4, L1, L3):
+ *              LOG_MODE, LOG_DECIMALS, LOG_TX_BUF_BYTES, LOG_OUT_Q_LEN and
+ *              LOG_PERF_PERIOD_MS.
+ *              0.1.2-bench: Re-arm rule (cnn-record-train-handoff.md
  *              v0.4, request 0, C16): REARM_FRAC, REARM_HOLD_MS. Record mode
  *              (request 1): RECORD_MODE and the SNAP_* settings.
  *              0.1.1-bench: Pitch-sequence classification settings
@@ -25,7 +29,7 @@
 // Macros: firmware identity
 // ============================================================================
 
-#define FW_VERSION            "0.1.2-bench"  // Printed in BOOT and sent in status. Must not
+#define FW_VERSION            "0.1.3-bench"  // Printed in BOOT and sent in status. Must not
                                              // start with "fake". Bench trips upload as REAL
                                              // and Ben deletes them by this version, so tell
                                              // Henry before changing it
@@ -50,8 +54,10 @@
 #define SERIAL_BAUD           115200   // Ignored by native USB; passed only because
                                        // Serial.begin() takes a baud rate
 #define SERIAL_TX_BUF_BYTES   4096     // DRAFT. ~1 s of output. Holds BOOT until a host
-                                       // reads it, and absorbs bursts
-#define PRINT_EVERY_N         8        // DRAFT. 52 S lines/s, ~3.6 kB/s
+                                       // reads it, and absorbs bursts. The log build uses
+                                       // LOG_TX_BUF_BYTES instead
+#define PRINT_EVERY_N         8        // DRAFT. 52 S lines/s, ~3.6 kB/s. No S lines in the
+                                       // log build (it sends an L line for every sample)
 
 // ============================================================================
 // Macros: detection
@@ -143,6 +149,36 @@
 #define SNAP_WAIT_MS          1        // DRAFT. serial_out's sleep between checks for TX space
 
 // ============================================================================
+// Macros: log mode (CNN data, drive-log-manual-record-handoff.md v0.2)
+// ============================================================================
+
+// Log build: every sample goes to Serial as an L line (raw chip axes plus the
+// model channels exactly as a snapshot row holds them, and an ok flag) for the
+// record GUI's drive log and manual Record. No S lines and no snapshots: every
+// snapshot can be cut from the log. Detection, EVT, SEG, BLE and the safe
+// state are the same as in the product build.
+#define LOG_MODE              0        // DECIDED (L1): compile-time flag, off by default.
+                                       // 1 = log build (set locally to log; commit 0)
+#if LOG_MODE != 0 && LOG_MODE != 1
+#error "LOG_MODE must be 0 or 1"
+#endif
+#if LOG_MODE && RECORD_MODE
+#error "LOG_MODE and RECORD_MODE cannot both be 1: snapshots would compete with the L stream for out_q, and every snapshot can be cut from the log"
+#endif
+#define LOG_DECIMALS          SNAP_DECIMALS  // Every float in an L line. Must equal
+                                       // SNAP_DECIMALS, so z_hp, roll and pitch print exactly as
+                                       // SNR rows do and a window cut from L lines equals the
+                                       // snapshot text
+#define LOG_TX_BUF_BYTES      32768    // DRAFT (L3). ~0.75 s of the ~44 kB/s L stream; replaces
+                                       // SERIAL_TX_BUF_BYTES in the log build only
+#define LOG_OUT_Q_LEN         256      // DRAFT (L3). ~0.6 s of samples; replaces OUT_Q_LEN in
+                                       // the log build only. ~64 bytes per item
+#define LOG_PERF_PERIOD_MS    10000    // DRAFT (owner, 2026-11-22). serial_out prints a
+                                       // "#LPERF" comment line this often: L lines handled, the
+                                       // average and largest time to format and write one, and
+                                       // the lowest free heap so far (evidence for LOG-2, LOG-3)
+
+// ============================================================================
 // Macros: BLE (data contract section 3)
 // ============================================================================
 
@@ -170,7 +206,8 @@
 // ============================================================================
 
 #define SAMPLE_Q_LEN          104      // DRAFT. 0.25 s of samples
-#define OUT_Q_LEN             32       // DRAFT. Placeholder; check out_q_drops in HLT
+#define OUT_Q_LEN             32       // DRAFT. Placeholder; check out_q_drops in HLT. The log
+                                       // build uses LOG_OUT_Q_LEN instead
 #define SYS_Q_LEN             16       // DRAFT. From the architecture doc
 #define BLE_Q_LEN             16       // DRAFT. ~2 items/s from dsp plus link changes
 
