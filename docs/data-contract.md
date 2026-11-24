@@ -508,8 +508,8 @@ read further pages with `range(...)`, the same way it pages segments.
 - 10 m is a starting value: GPS is typically off by 3–5 m per fix. Measure the real spread by
   driving over the same speed bump ~10 times, and adjust.
 - **Timing:** the first version is written (raw `rms_z` × `scale_factor`, no speed
-  normalization); speed normalization after the calibration drives. Result columns only change
-  through this file.
+  normalization). Speed adjustment: formula in §8, to be added per segment before the median.
+  Result columns only change through this file.
 
 ---
 
@@ -517,18 +517,36 @@ read further pages with `range(...)`, the same way it pages segments.
 
 - Segments drawn as lines colored by (normalized) roughness, like Google Maps traffic:
   **green** (new pavement) → **yellow** → **light red** (≈ I-5) → **dark red** (worse).
-- Numeric thresholds (g, the roughness value the map functions return), with colors blended
-  in between. Set Nov 2026 from the first clean drive (slow driving ≈ 0.04 g; a paved bridge at
-  ~30 mph 0.10–0.25 g, which should be light red at most), before speed normalization; to be
-  retuned after normalization and the calibration drives (new construction = green, I-5 = light
-  red). Both maps use these values:
+- **Speed adjustment.** The same road reads rougher the faster it's driven, so every segment's
+  `rms_z` is scaled to what it would read at **25 mph**, before averaging or coloring:
 
-  | Color | Roughness |
+  ```
+  road     = sqrt(max(rms_z² − 0.015², 0))           -- remove the noise floor
+  speed    = max(speed_mps, 4.4704)                   -- below 10 mph counts as 10 mph
+  adjusted = road × (11.176 / speed) ^ 0.56           -- 11.176 m/s = 25 mph
+  ```
+
+  - 0.015 g: what the device reads with the car still and the engine running. It doesn't grow
+    with speed, and RMS values from independent sources add as squares, so it's removed that way.
+  - 0.56: from the Nov 22 2026 speed test (Escape, 21 passes of one straight road at 10–50 mph,
+    steady-speed segments only; fit of log roughness vs log speed over the per-pass medians,
+    R² 0.84). Doubling speed reads about 1.47× rougher. Close to the textbook random-road
+    model's √speed. Only tested on a smooth road; assumed to hold on rough roads.
+  - Segments with no `speed_mps` (no GPS fix): noise floor removed, no speed scaling.
+  - The app applies this to its own trip lines and the Drive screen. **The map SQL functions
+    should apply it per segment, before the median over drives** (and before `scale_factor`).
+    `rms_z` stays raw in the database.
+- Numeric thresholds (g, speed-adjusted to 25 mph as above), with colors blended in between.
+  Set Nov 2026 from Scott's anchors at ~20 mph (green below 0.08, yellow from 0.10, reds from
+  0.17, darkest at 0.24: the red brick road at 47.6564–47.6744, −122.0789), scaled to 25 mph.
+  Both maps use these values:
+
+  | Color | Roughness at 25 mph |
   |---|---|
-  | green | ≤ 0.05 |
-  | yellow | 0.12 |
-  | light red | 0.25 |
-  | dark red | ≥ 0.50 |
+  | green | ≤ 0.09 |
+  | yellow | 0.11 |
+  | light red | 0.19 |
+  | dark red | ≥ 0.27 |
 - Each direction of a road is drawn on its own side (offset to the right of travel, as US traffic
   drives on the right). Zoomed out, the two directions overlap.
 - Line width on the ground, so lines widen as you zoom in (at least 4 dp wide when zoomed out):
@@ -575,7 +593,7 @@ read further pages with `range(...)`, the same way it pages segments.
 **Team**
 - [ ] Confirm IMU rate 416 Hz (the IMU has no 400 Hz rate, §4.1) and 1 s segment windows
 - [ ] Vehicle list and IDs (truck, Camry, Escape)
-- [ ] Where speed normalization happens (proposal: in the SQL functions, after calibration drives)
+- [ ] Where speed normalization happens (proposal: in the SQL functions, per segment, formula in §8)
 - [ ] Web map owner and timing (after the app → Supabase → map pipeline works)
 - [ ] Per-direction (not per-lane) grading is acceptable for the project
 
@@ -614,3 +632,5 @@ Earlier v0.3 changes:
 - `road_quality_snapped` with `lanes_dir`: OK from Scott; the app's Road quality view switched to it from `road_quality_in_area` (`piece_m` 15 / 60 / 240 m by zoom, "© OpenStreetMap contributors" under the map legend) (§7). Line width and side offset now come from `lanes_dir` instead of a fixed 5 m (§8).
 - First numeric map color thresholds: green 0.05, yellow 0.12, light red 0.25, dark red 0.50 g, from the first clean drive; to be retuned after speed normalization (§8).
 - Label taps match device events from 5 s before to 2 s after the tap (was: only before); a tap with no device event gets `peak_z` from the segments around it instead of 0 (§7).
+- Speed adjustment: roughness scaled to 25 mph, `road × (25 mph ÷ speed)^0.56` after removing a 0.015 g noise floor, from the Nov 22 speed test; the app applies it to trip lines and the Drive screen, the SQL functions should too (§7, §8).
+- Map color thresholds retuned to speed-adjusted values: green 0.09, yellow 0.11, light red 0.19, dark red 0.27 g (was 0.05 / 0.12 / 0.25 / 0.50, unadjusted) (§8).

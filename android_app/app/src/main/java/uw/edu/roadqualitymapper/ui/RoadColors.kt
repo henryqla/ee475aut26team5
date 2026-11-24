@@ -6,17 +6,17 @@ import uw.edu.roadqualitymapper.data.ColorMode
 import uw.edu.roadqualitymapper.data.EventClass
 
 /**
- * Roughness anchors, in g (RMS vertical acceleration), like Google Maps traffic colors.
- * Set from the first clean drive (Nov 2026, board on the dashboard, no speed normalization):
- * slow driving read about 0.04 g, and a paved bridge at ~30 mph 0.10-0.25 g, which should be
- * light red at most. To be retuned after speed normalization and the calibration drives (new
- * pavement = SMOOTH, I-5 = I5). Keep in sync with data contract §8 so the web map matches.
+ * Roughness anchors, in g (RMS vertical acceleration) scaled to 25 mph (speedAdjustedRoughness),
+ * like Google Maps traffic colors. Set Nov 2026 from Scott's anchors at ~20 mph (green below
+ * 0.08, yellow from 0.10, red from 0.17, darkest at 0.24: the red brick road), scaled to 25 mph.
+ * I5 is the light red anchor (the name is from the original plan to anchor it on I-5).
+ * Keep in sync with data contract §8 so the web map matches.
  */
 object RoughnessScale {
-    const val SMOOTH = 0.05
-    const val MODERATE = 0.12
-    const val I5 = 0.25
-    const val VERY_ROUGH = 0.50
+    const val SMOOTH = 0.09
+    const val MODERATE = 0.11
+    const val I5 = 0.19
+    const val VERY_ROUGH = 0.27
 }
 
 /** Red-green palettes add a light blue halfway between smooth and moderate. */

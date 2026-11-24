@@ -82,6 +82,7 @@ import uw.edu.roadqualitymapper.data.RoadPieceKind
 import uw.edu.roadqualitymapper.data.Segment
 import uw.edu.roadqualitymapper.data.downloadDrives
 import uw.edu.roadqualitymapper.data.shortMessage
+import uw.edu.roadqualitymapper.data.speedAdjustedRoughness
 import uw.edu.roadqualitymapper.data.supabase.SupabaseConnection
 import uw.edu.roadqualitymapper.data.supabase.SupabaseTripRepository
 import uw.edu.roadqualitymapper.ui.RoadQualityTiles
@@ -92,9 +93,11 @@ import uw.edu.roadqualitymapper.ui.boxAround
 import uw.edu.roadqualitymapper.ui.headingDirection
 import uw.edu.roadqualitymapper.ui.metersToPixels
 import uw.edu.roadqualitymapper.ui.eventMarkerHue
+import uw.edu.roadqualitymapper.ui.nextBand
 import uw.edu.roadqualitymapper.ui.roughnessColor
 import uw.edu.roadqualitymapper.ui.shiftPathRight
 import uw.edu.roadqualitymapper.ui.shiftRight
+import uw.edu.roadqualitymapper.ui.standInFor
 import uw.edu.roadqualitymapper.ui.tilesCovering
 import uw.edu.roadqualitymapper.ui.zoomBand
 import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
@@ -121,6 +124,13 @@ private const val MAP_DRIVES_SINCE_MS = 1_795_075_200_000L
 
 /** Tiles loading at once (see RoadQualityTiles.kt). The rest wait their turn, the screen's first. */
 private const val MAX_PARALLEL_TILE_LOADS = 4
+
+/** The Road quality tiles to load, in order (see wantedTiles in MapScreen). */
+private data class WantedTiles(
+    val visible: List<RoadTile>,     // on screen
+    val ring: List<RoadTile>,        // one tile around the screen
+    val nextBands: List<RoadTile>,   // the screen at the zoom bands just in and out
+)
 
 /** Trips line width on the ground, about one direction's lanes on a city street. */
 private const val ROAD_LINE_WIDTH_M = 5.0
@@ -200,7 +210,9 @@ fun MapScreen(modifier: Modifier = Modifier) {
 
     // Road quality, in tiles (RoadQualityTiles.kt). Each time the map stops moving: show the tiles
     // already loaded around the screen, then load the missing ones, the screen's first, then a
-    // ring around it. A tile that has started loading always finishes (it's kept for later);
+    // ring around it, then the screen at the zoom bands just in and out. Requests go in that order
+    // (the Semaphore is first come, first served). A tile that has started loading always finishes
+    // (it's kept for later);
     // tiles still waiting their turn are dropped if the map has moved away from them.
     // Starts before the map has finished drawing, so both happen at once.
     LaunchedEffect(view, mapSize) {
@@ -215,21 +227,32 @@ fun MapScreen(modifier: Modifier = Modifier) {
         val loading = HashSet<RoadTile>()        // request sent
         var lastError: String? = null
 
-        /** The screen's tiles, and the ring of tiles around them. */
-        fun wantedTiles(): Pair<List<RoadTile>, List<RoadTile>> {
+        /**
+         * The tiles to load, in this order: the screen's, the ring of tiles around them, then the
+         * screen at the zoom bands just in and out (so zooming usually finds its tiles ready).
+         */
+        fun wantedTiles(): WantedTiles {
             val camera = cameraPositionState.position
             val band = zoomBand(camera.zoom)
             val screenRadiusM = max(mapSize.width, mapSize.height) / 2.0 /
                 metersToPixels(1.0, camera.zoom, camera.target.latitude, density)
             val screen = boxAround(camera.target, screenRadiusM)
             val visible = tilesCovering(screen, band)
-            return visible to (tilesCovering(screen, band, ring = 1) - visible.toSet())
+            val nextBands = listOfNotNull(nextBand(camera.zoom, ZOOM_STEP), nextBand(camera.zoom, -ZOOM_STEP))
+            return WantedTiles(
+                visible = visible,
+                ring = tilesCovering(screen, band, ring = 1) - visible.toSet(),
+                nextBands = nextBands.flatMap { tilesCovering(screen, it) },
+            )
         }
 
-        /** Draws what's loaded for the screen and the ring around it (a piece in two tiles once). */
+        /**
+         * Draws what's loaded for the screen and the ring around it (a piece in two tiles once).
+         * A tile that hasn't loaded yet shows another zoom band's lines there meanwhile.
+         */
         fun show() {
             val (visible, ring) = wantedTiles()
-            val tiles = (visible + ring).mapNotNull { RoadQualityTiles.loaded[it] }
+            val tiles = (visible + ring).mapNotNull { RoadQualityTiles.loaded[it] ?: standInFor(it) }
             pieces = tiles.flatMap { it.pieces }.distinctBy { it.pieceId }
             spots = tiles.flatMap { it.spots }.distinctBy { Triple(it.lat, it.lon, it.eventClass) }
             status = when {
@@ -268,13 +291,14 @@ fun MapScreen(modifier: Modifier = Modifier) {
 
         snapshotFlow { cameraPositionState.isMoving }.collect { moving ->
             if (moving) return@collect
-            val (visible, ring) = wantedTiles()
-            val wanted = (visible + ring).toSet()
+            val (visible, ring, nextBands) = wantedTiles()
+            val wanted = (visible + ring + nextBands).toSet()
             // Tiles still waiting their turn that the map has moved away from: drop them, so the
             // ones needed now go first.
             queued.filterKeys { it !in wanted }.values.forEach { it.cancel() }
             visible.forEach(::load)
             ring.forEach(::load)
+            nextBands.forEach(::load)
             show()
         }
     }
@@ -625,7 +649,9 @@ private fun RoadLine(located: List<Segment>, lineWidthPx: Float, colorMode: Colo
     // A span covers one piece by default, so there's one span per piece.
     val dark = LocalDarkTheme.current
     val spans = remember(located, colorMode, dark) {
-        val colors = located.map { roughnessColor(it.rmsZ, colorMode, dark).toArgb() }
+        val colors = located.map {
+            roughnessColor(speedAdjustedRoughness(it.rmsZ, it.speedMps), colorMode, dark).toArgb()
+        }
         (1 until colors.size).map { i ->
             StyleSpan(StrokeStyle.gradientBuilder(colors[i - 1], colors[i]).build())
         }

@@ -47,6 +47,7 @@ import uw.edu.roadqualitymapper.data.GpsFix
 import uw.edu.roadqualitymapper.data.Trip
 import uw.edu.roadqualitymapper.data.TripUploader
 import uw.edu.roadqualitymapper.data.shortMessage
+import uw.edu.roadqualitymapper.data.speedAdjustedRoughness
 import uw.edu.roadqualitymapper.data.local.DeviceMessageEntity
 import uw.edu.roadqualitymapper.data.local.EventEntity
 import uw.edu.roadqualitymapper.data.local.RoadDao
@@ -376,7 +377,7 @@ class RecordingService : Service() {
             it.copy(
                 segments = it.segments + 1,
                 segmentsWithoutLocation = it.segmentsWithoutLocation + if (fix == null) 1 else 0,
-                lastRoughness = seg.rmsZ,
+                lastRoughness = speedAdjustedRoughness(seg.rmsZ, fix?.speedMps),
             )
         }
     }
