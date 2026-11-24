@@ -101,8 +101,8 @@ class AppStyles:
     # Model channels (framework red / green / blue pens, matched to the
     # channel colors the GUI already used): same color in every plot.
     PEN_Z_HP = "#00FF00"
-    PEN_ROLL = "#0000FF"          # gx
-    PEN_PITCH = "#FF0000"         # gy
+    PEN_ROLL = "#0000FF"          # Roll: chip gy (bench mapping, chip Y forward)
+    PEN_PITCH = "#FF0000"         # Pitch: chip gx
     MODEL_PEN_WIDTH = 2
     # Raw channels, live plot only (DRAFT): muted, so the model channels stand out.
     PEN_AX = "#B8875A"

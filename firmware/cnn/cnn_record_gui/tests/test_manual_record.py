@@ -1,12 +1,15 @@
 """
 File:        test_manual_record.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.1.1
+Change:      0.1.1 (owner, 2026-11-23): weak and very weak events are saved
+             in the session folder (SAVED, listed with the other takes); only
+             a recording with no movement at all gives no take.
 Description: Unit tests for manual_record.py (request 5, changed by request
              8): the 3 s buffer and 3 s after the press; a press before and
              after a bump both give one 624-row take with the crossing at row
-             104 (MR-2); weak, nothing, edge and two-event recordings (MR-3);
+             104 (MR-2); weak, no-movement, edge and two-event recordings (MR-3);
              gaps, resets, ok=0 and a lost port save nothing; presses during a
              recording are ignored; the raw recording and its take share a
              src_key, and re-cutting the raw file gives the same bytes (MR-4).
@@ -22,7 +25,7 @@ from pathlib import Path
 
 import helpers  # Sets sys.path; must come before the GUI imports
 import cnn_config as cfg
-from manual_record import NO_TAKE, NOT_SAVED, SAVED, WEAK, ManualRecorder, save_capture
+from manual_record import NO_TAKE, NOT_SAVED, SAVED, ManualRecorder, save_capture
 from take_cut import cut_manual_file, typical_peak_gap
 from take_store import load_take, read_header
 
@@ -112,16 +115,31 @@ class TestManualRecord(unittest.TestCase):
         self.assertEqual(out.state, SAVED)
         self.assertEqual(read_header(out.take_path)["align"], "miss_frac")
 
-    def test_weak_goes_to_weak_folder(self):
-        out = save_capture(self.store, SESSION, self.record(helpers.bump(3400, 0.3)), "c")
-        self.assertEqual(out.state, WEAK, out.message)
-        self.assertEqual(out.take_path.parent.name, cfg.WEAK_DIR_NAME)
-        self.assertEqual(read_header(out.take_path)["align"], "peak")
+    def check_peak_take(self, out, peak_n, peak_frac):
+        """A peak-aligned take, saved and listed like any other take."""
+        self.assertEqual(out.state, SAVED, out.message)
+        self.assertEqual(out.take_path.parent.name, SESSION)
+        self.assertEqual(self.store.list_takes(SESSION), [out.take_path])
+        header = read_header(out.take_path)
+        self.assertEqual((header["align"], header["n_peak"], header["peak_frac"]),
+                         ("peak", str(peak_n), peak_frac))
+        self.assertNotIn("weak", out.message)
 
-    def test_nothing_found(self):
-        out = save_capture(self.store, SESSION, self.record(), "c")
+    def test_weak_saved_in_session_folder(self):
+        out = save_capture(self.store, SESSION, self.record(helpers.bump(3400, 0.3)), "c")
+        self.check_peak_take(out, 3400, "0.300")
+
+    def test_very_weak_saved_in_session_folder(self):
+        # No floor (owner, 2026-11-23): 5% of the threshold is still a take.
+        out = save_capture(self.store, SESSION, self.record(helpers.bump(3400, 0.05)), "c")
+        self.check_peak_take(out, 3400, "0.050")
+
+    def test_no_movement_no_take(self):
+        flat = dict.fromkeys(range(1, 6001), (0.0, 0.0, 0.0))
+        out = save_capture(self.store, SESSION, self.record(flat), "c")
         self.assertEqual(out.state, NO_TAKE)
-        self.assertTrue(out.message.startswith("Nothing found near the press"))
+        self.assertEqual(out.message,
+                         "Nothing found near the press (nothing found: no movement at all)")
         self.assertTrue(out.raw_path.exists())           # M1: the raw recording is kept
         self.assertEqual(self.store.list_takes(SESSION), [])
 

@@ -1,9 +1,14 @@
 """
 File:        snapshot_protocol.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5):
+Date:        2026-11-23
+Version:     0.2.1
+Change:      0.2.1: CFG lines (firmware-bench serial_out.cpp, every
+             CFG_PERIOD_MS): BOOT's settings again under another tag, parsed
+             into a ConfigLine, not a BootLine, because a CFG is not a reboot.
+             ConfigLine.as_boot() gives the BOOT line it repeats, for take
+             headers. BOOT and CFG share one settings parser.
+             0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5):
              parses the log build's L lines (every sample, text kept so it
              can be copied into takes unchanged) and counts malformed ones;
              EVT gains n_trig, its 13th field (firmware-bench 0.1.3-bench,
@@ -13,8 +18,8 @@ Description: Parses the Serial lines from firmware-bench 0.1.3-bench
              (cnn-record-train-handoff.md v0.4, "Serial snapshot protocol";
              drive-log-manual-record-handoff.md v0.2, request 4).
              SnapshotAssembler turns SNB / SNR / SNE lines into one validated
-             Snapshot, or one Rejected with the reason, and parses BOOT, EVT,
-             HLT, FLT, the S sample lines (live IMU view) and the log build's
+             Snapshot, or one Rejected with the reason, and parses BOOT, CFG,
+             EVT, HLT, FLT, the S sample lines (live IMU view) and the log build's
              L lines. parse_other_line() and parse_l_fields() are also used by
              the window cutter. Standard library only (no Qt, numpy or
              pyserial), so it runs in the unit tests on any Python 3.11.
@@ -65,7 +70,7 @@ L_FIELDS = ("n", "t_us", "ax", "ay", "az", "gx", "gy", "gz", "z_hp", "roll", "pi
 
 # Known tags that are not part of a snapshot. Seeing one between SNB and SNE
 # means the block was interrupted.
-OTHER_KNOWN_TAGS = ("BOOT", "S", "L", "SEG", "EVT", "HLT", "FLT", "BLE")
+OTHER_KNOWN_TAGS = ("BOOT", "CFG", "S", "L", "SEG", "EVT", "HLT", "FLT", "BLE")
 
 # ============================================================================
 # Functions
@@ -157,6 +162,22 @@ class BootLine:
 
 
 @dataclass
+class ConfigLine:
+    """A CFG line: the BOOT settings again, repeated every cfg_ms so a PC
+    that missed BOOT (it is sent once, right after a reset) still gets them.
+    Not a reboot: nothing restarts on a CFG."""
+    settings: dict           # key -> text, the same as BOOT's
+    raw: str
+
+    def as_boot(self) -> BootLine:
+        """
+        @return The BOOT line this CFG repeats: the same fields under the tag
+                BOOT, which is how take headers and drive logs keep settings.
+        """
+        return BootLine(self.settings, "BOOT" + self.raw[len("CFG"):])
+
+
+@dataclass
 class HealthLine:
     """An HLT line: health counters (snap_drops only in record builds)."""
     fields: dict             # HLT_FIELDS name -> int, for the fields present
@@ -199,8 +220,8 @@ class LogSample:
         return self.text[8:11]
 
 
-Item = Union[Snapshot, Rejected, EventLine, BootLine, HealthLine, FaultLine, SampleLine,
-             LogSample]
+Item = Union[Snapshot, Rejected, EventLine, BootLine, ConfigLine, HealthLine, FaultLine,
+             SampleLine, LogSample]
 
 # ============================================================================
 # Functions: line parsers (also used by the window cutter)
@@ -225,13 +246,26 @@ def parse_l_fields(fields: list) -> Optional[LogSample]:
                      tuple(fields))
 
 
+def _settings(fields: list) -> dict:
+    """
+    @param fields  A BOOT or CFG line's fields after the tag.
+    @return Its key=value settings (fields without '=' are skipped).
+    """
+    settings = {}
+    for part in fields:
+        key, sep, value = part.partition("=")
+        if sep:
+            settings[key] = value
+    return settings
+
+
 def parse_other_line(line: str) -> Optional[Item]:
     """
     Parses one line that is not part of a snapshot block.
     @param line  The line, line ending already removed.
-    @return An EventLine, BootLine, HealthLine, FaultLine, SampleLine or
-            LogSample, or None (malformed, a comment, or a tag the GUI does
-            not use: SEG, BLE, snapshot lines).
+    @return An EventLine, BootLine, ConfigLine, HealthLine, FaultLine,
+            SampleLine or LogSample, or None (malformed, a comment, or a tag
+            the GUI does not use: SEG, BLE, snapshot lines).
     """
     f = line.split(",")
     tag = f[0]
@@ -253,12 +287,9 @@ def parse_other_line(line: str) -> Optional[Item]:
             return None
         return EventLine(seq, dict(zip(EVT_FIELDS, f[1:])), line)
     if tag == "BOOT":
-        settings = {}
-        for part in f[1:]:
-            key, sep, value = part.partition("=")
-            if sep:
-                settings[key] = value
-        return BootLine(settings, line)
+        return BootLine(_settings(f[1:]), line)
+    if tag == "CFG":
+        return ConfigLine(_settings(f[1:]), line)
     if tag == "HLT":
         nums = [_to_int(x) for x in f[1:]]
         if not nums or any(n is None for n in nums):
@@ -300,7 +331,7 @@ class SnapshotAssembler:
         @param line  One Serial line; a trailing line ending is removed.
         @param now   Monotonic time in seconds (for the stall timeout).
         @return Items completed by this line: Snapshot, Rejected, EventLine,
-                BootLine, HealthLine, FaultLine, SampleLine, LogSample.
+                BootLine, ConfigLine, HealthLine, FaultLine, SampleLine, LogSample.
                 Usually empty or one item.
         """
         line = line.rstrip("\r\n")

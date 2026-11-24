@@ -4,7 +4,10 @@
 - Authors: Henry (owner); written with Claude
 - Date: 2026-11-16
 - Version: 0.2
-- Change: `0.1.1-bench`. Gestures now depend on direction (pitch sequence). There is no `UNKNOWN`
+- Change: 2026-11-23: the board is turned so the Y arrow points to the nose (pitch = `gx`,
+  roll = `gy`, `PITCH_NOSE_DOWN_SIGN` `-1`); gestures and the sign check follow. A `CFG` line
+  repeats the `BOOT` settings every 5 s.
+  `0.1.1-bench`: Gestures now depend on direction (pitch sequence). There is no `UNKNOWN`
   class. The IMU recovers from F1/F2 without a reset.
 - Description: How to wire the ESP32-S3-DevKitC-1 to the Adafruit LSM6DSO32 breakout for the
   `0.1.1-bench` build, and what Serial should show once it runs. Pins come from `board_pins.h`
@@ -44,23 +47,24 @@ Unplug USB while wiring. The GPIO numbers are printed on the DevKit silkscreen.
 ## Orientation
 
 Lay the breakout flat with the chip facing up. At rest the `az` column reads about +1.0 g. The
-end the X arrow points at is the car's **nose** (front).
+end the Y arrow points at is the car's **nose** (front), so the X arrow points to the car's
+right. Pitch is `gx` and roll is `gy` (`map_axes()` in `dsp.cpp`).
 
 The class comes from the **first** pitch movement. Nose down then back up is a pothole (the
 front wheels drop in, then climb out). Nose up then back down is a speed bump. Every event is
 `POTHOLE` or `BUMP`.
 
-- **Pothole (`POTHOLE`, `pitch_seq` `DU`):** quickly tip the X-arrow end down, then back to
+- **Pothole (`POTHOLE`, `pitch_seq` `DU`):** quickly tip the Y-arrow end down, then back to
   flat.
-- **Speed bump (`BUMP`, `pitch_seq` `UD`):** quickly tip the X-arrow end up, then back to flat.
-- **One-wheel pothole (`POTHOLE`, basis `roll`):** tip the board around the X axis only (the
-  edge the Y arrow points at goes up or down). Mostly `gx` moves.
+- **Speed bump (`BUMP`, `pitch_seq` `UD`):** quickly tip the Y-arrow end up, then back to flat.
+- **One-wheel pothole (`POTHOLE`, basis `roll`):** tip the board around the Y axis only (the
+  edge the X arrow points at goes up or down). Mostly `gy` moves.
 
 Tilts must be quick, about 20–30° in about 0.2 s, to pass the 60 dps threshold. Hold still for
 the first 2 s after boot or after an IMU recovery: that is when gyro bias is measured.
 
-**First run: check the sign.** Tip the X-arrow end down quickly and watch `gy` in the `S`
-lines. It should go **positive**. If it goes negative, set `PITCH_NOSE_DOWN_SIGN` to `-1` in
+**First run: check the sign.** Tip the Y-arrow end down quickly and watch `gx` in the `S`
+lines. It should go **negative**. If it goes positive, set `PITCH_NOSE_DOWN_SIGN` to `+1` in
 `config.h`, or every pothole will read as a bump.
 
 ## Expected behavior
@@ -72,6 +76,7 @@ printed before the monitor opens wait in the buffer, so `BOOT` still appears.
 |---|---|
 | Monitor opens | One `BOOT,fw=0.1.1-bench,...` line with every setting, then `#` column headers, then `BLE,advertising,0` |
 | Every second | One `HLT` line: `samples` rises by about 416 and every drop count is 0. `serial_drops` can be nonzero only from time the monitor was closed |
+| Every 5 s | One `CFG,fw=...` line: the `BOOT` settings again, so a program that connected after `BOOT` went by still gets them |
 | Every second | One `SEG` line: `n` is 416 or 417, and `synced` is 0 until a phone writes TIME. The first `SEG` after boot is partial |
 | Continuously | About 52 `S` lines/s. Flat and still: `az` about 1.00, `ax` and `ay` about 0, gyro within a few dps of 0, `z_hp` about 0 |
 | First 2 s after boot | No events (settle time) |

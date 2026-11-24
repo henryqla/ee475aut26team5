@@ -1,9 +1,20 @@
 """
 File:        record_widget.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.3.0
-Change:      0.3.0 (drive-log-manual-record-handoff.md v0.2, request 5;
+Date:        2026-11-23
+Version:     0.3.2
+Change:      0.3.2 (owner, 2026-11-23): no weak takes. Every manual take,
+             however weak the event, gets the green "Manual take" card and
+             goes into Collected takes; the counters drop "weak".
+             0.3.1: the board's settings can come from a CFG line (BOOT's
+             settings, repeated every CFG_PERIOD_S) when BOOT was missed,
+             without BOOT's reboot handling. Record and Start log stay off
+             until the connection has settings, so a press can no longer
+             give a raw file with nothing to cut it by. Connect forgets the
+             previous connection's BOOT. In the log build EVTs are no longer
+             paired with snapshots (none come), so they no longer log "had no
+             valid snapshot".
+             0.3.0 (drive-log-manual-record-handoff.md v0.2, request 5;
              one-press-manual-takes-handoff.md v0.1, request 8): the log
              build. The panel tells the build from BOOT (log=1 or rec=1), or
              from the line types until BOOT arrives: the log build enables
@@ -63,11 +74,11 @@ import cnn_config as cfg
 from app_styles import AppStyles, set_flag, set_role, set_state
 from elided_label import ElidedLabel
 from live_plot import LivePlot
-from manual_record import NO_TAKE, SAVED, WEAK, ManualRecorder, save_capture
+from manual_record import NO_TAKE, ManualRecorder, save_capture
 from record_core import Claim, RecordController
 from serial_handler import SerialHandler, list_ports
 from snapshot_plot import SnapshotPlot
-from snapshot_protocol import SampleLine
+from snapshot_protocol import BootLine, SampleLine
 from status_card import ARMED, IDLE, OK, WARN, StatusCard
 from take_store import TakeStore, load_take, parse_take_name
 
@@ -322,6 +333,18 @@ class RecordWidget(QGroupBox):
                                  "rule %s" % header.get("rule_class", "?"),
                                  "%s rows" % header.get("n_rows", "?"), when))
 
+    def _settings_wait_reason(self, action: str) -> str:
+        """
+        @param action  "Record" or "Start log".
+        @return Why action must wait for the board's settings ("" if they are
+                known). Takes are cut with BOOT's thresholds, rate and fw.
+        """
+        if self.ctrl.boot is not None:
+            return ""
+        return ("%s: waiting for the board's settings (its BOOT line, or the CFG line it "
+                "repeats every %.0f s; firmware older than the CFG line needs a reset)"
+                % (action, cfg.CFG_PERIOD_S))
+
     def _record_block_reason(self) -> str:
         """
         @return Why Record cannot start now ("" if it can).
@@ -334,7 +357,7 @@ class RecordWidget(QGroupBox):
             return "Record needs the log build (LOG_MODE 1)"
         if not self.ctrl.session:
             return "Enter a valid session name before recording"
-        return ""
+        return self._settings_wait_reason("Record")
 
     def _log_block_reason(self) -> str:
         """
@@ -348,7 +371,7 @@ class RecordWidget(QGroupBox):
             return "Start log needs the log build (LOG_MODE 1)"
         if not self.ctrl.session:
             return "Enter a valid session name before logging"
-        return ""
+        return self._settings_wait_reason("Start log")
 
     def _refresh(self) -> None:
         """Redraws the card's base state, the counters and the buttons."""
@@ -390,9 +413,9 @@ class RecordWidget(QGroupBox):
         set_flag(self.arm_button, "armed", self.ctrl.armed or self.ctrl.keep_armed)
         if log_build:
             self.card.set_counters(
-                "manual takes %d | weak %d | no take %d | not saved %d | marks %d\n"
+                "manual takes %d | no take %d | not saved %d | marks %d\n"
                 "L lines/s %s | malformed L %d"
-                % (c.manual_takes, c.manual_weak, c.manual_no_take, c.manual_not_saved, c.marks,
+                % (c.manual_takes, c.manual_no_take, c.manual_not_saved, c.marks,
                    "-" if self._l_rate is None else "%.0f" % self._l_rate,
                    self.handler.malformed_l if self.handler is not None else 0))
             return
@@ -461,6 +484,7 @@ class RecordWidget(QGroupBox):
         self.handler.snapshot_rejected.connect(self._on_rejected)
         self.handler.event_received.connect(self._on_event)
         self.handler.boot_received.connect(self._on_boot)
+        self.handler.config_received.connect(self._on_config)
         self.handler.health_received.connect(self._on_health)
         self.handler.fault_received.connect(self._on_fault)
         self.handler.sample_received.connect(self._on_s_line)
@@ -473,6 +497,7 @@ class RecordWidget(QGroupBox):
         self.live_plot.reset()
         self.card.clear_fault()          # A fault stays up until the next Connect
         self.card.set_simulated(False)
+        self.ctrl.on_new_connection()    # The last connection's BOOT may not apply now
         self._boot_info = ""
         self._health_info = ""
         self._show_strip()
@@ -648,11 +673,7 @@ class RecordWidget(QGroupBox):
             if out.raw_path is not None else ""
         if out.take_path is not None:
             name = out.take_path.stem
-            if out.state == WEAK:
-                name = "%s/%s" % (cfg.WEAK_DIR_NAME, name)
-                sub = "Weak take: %s (not listed in Collected takes)" % out.message
-            else:
-                sub = "Manual take: %s · %s" % (out.message, self._take_summary(out.take_path))
+            sub = "Manual take: %s · %s" % (out.message, self._take_summary(out.take_path))
             self.card.add_recent(name)
             self.card.show_take(OK, name, sub)
             al = out.result.alignment
@@ -662,8 +683,7 @@ class RecordWidget(QGroupBox):
             self.last_plot.show_values(values, cfg.TAKE_N_PRE, rate, "manual  %s  %s  align %s"
                                        % (name, cap.label, al.kind))
             _LOG.info("Manual take %s/%s (%s)%s", session, name, out.message, raw)
-            if out.state == SAVED:
-                self.take_saved.emit(out.take_path)
+            self.take_saved.emit(out.take_path)
         else:
             headline = "NO TAKE" if out.state == NO_TAKE else "NOT SAVED"
             self.card.show_take(WARN, headline, out.message + raw)
@@ -687,6 +707,8 @@ class RecordWidget(QGroupBox):
             self._on_error(reason)
             return
         drives = self.store.session_dir(self.ctrl.session) / cfg.DRIVES_DIR_NAME
+        # Known: _log_block_reason() waits for the settings. The header keeps
+        # them because the log usually starts after BOOT went by.
         boot = self.ctrl.boot.raw if self.ctrl.boot else ""
         self.handler.start_log(drives, {"session": self.ctrl.session,
                                         "gui_commit": self.ctrl.gui_commit,
@@ -695,11 +717,6 @@ class RecordWidget(QGroupBox):
         self._log_text = "Starting the log in %s/%s/ ..." % (self.ctrl.session,
                                                              cfg.DRIVES_DIR_NAME)
         _LOG.info("Start log in %s", drives)
-        if not boot:
-            # The cutter needs BOOT's thresholds and fw for the samples before
-            # the next reset; Record needs them too.
-            self._on_error("No BOOT line on this connection yet: takes cannot be cut from this "
-                           "log (or recorded) until the board resets. Press RST on the board.")
         self._refresh()
 
     def take_moved(self, old: Path, new: Optional[Path]) -> None:
@@ -751,7 +768,11 @@ class RecordWidget(QGroupBox):
         """
         @param evt  An EventLine.
         """
-        self.ctrl.on_event(evt, time.monotonic())
+        if self._build != _BUILD_LOG:
+            # Paired with its snapshot. The log build sends no snapshots, so
+            # there every EVT would time out as "had no valid snapshot"; its
+            # EVTs are in the drive log for cut_windows.py instead.
+            self.ctrl.on_event(evt, time.monotonic())
         _LOG.info("EVT seq %d class %s", evt.seq, evt.fields.get("class", "?"))
         snap = self.ctrl.last_snapshot
         if snap is not None and snap.seq == evt.seq:
@@ -772,10 +793,34 @@ class RecordWidget(QGroupBox):
 
     def _on_boot(self, boot) -> None:
         """
-        @param boot  A BootLine: settles which build is connected.
+        @param boot  A BootLine: the board (re)booted. Settles which build is
+                     connected.
         """
         self.ctrl.on_boot(boot)
         cap = self.recorder.interrupt("the board rebooted during the recording")
+        _LOG.info("BOOT: %s", boot.raw)
+        self._apply_settings(boot, from_cfg=False)
+        if cap is not None:
+            self._finish_capture(cap)
+
+    def _on_config(self, line) -> None:
+        """
+        @param line  A ConfigLine: the board's settings, repeated every
+                     CFG_PERIOD_S. Used only while this connection has none
+                     (its BOOT was missed). Not a reboot: nothing is cleared.
+        """
+        boot = line.as_boot()
+        if self.ctrl.on_settings(boot):
+            _LOG.info("Settings from CFG (no BOOT seen on this connection): %s", line.raw)
+            self._apply_settings(boot, from_cfg=True)
+
+    def _apply_settings(self, boot: BootLine, from_cfg: bool) -> None:
+        """
+        Shows the board's settings in the strip, sizes the manual Record
+        buffer by its rate, and settles which build is connected.
+        @param boot      A BOOT line, or a CFG's as_boot().
+        @param from_cfg  The settings came from a CFG line (BOOT was missed).
+        """
         s = {k: html.escape(v) for k, v in boot.settings.items()}
         rec = s.get("rec", "?")
         log = s.get("log", "0") == "1"
@@ -790,7 +835,8 @@ class RecordWidget(QGroupBox):
                 s.get("snap_pre", "?"), s.get("snap_post", "?"),
                 s.get("snap_rate", s.get("odr", "?")))
         self._boot_info = " | ".join((
-            "fw %s" % s.get("fw", "?"), build_text,
+            "fw %s%s" % (s.get("fw", "?"), " (settings from CFG)" if from_cfg else ""),
+            build_text,
             "thr z %s g, roll %s, pitch %s dps" % (s.get("thr_z", "?"), s.get("thr_roll", "?"),
                                                   s.get("thr_pitch", "?")),
             "rearm %s, hold %s ms" % (s.get("rearm_frac", "?"), s.get("rearm_hold_ms", "?")),
@@ -801,10 +847,7 @@ class RecordWidget(QGroupBox):
             self.recorder.set_rate(int(boot.settings.get("odr", cfg.DEFAULT_RATE_HZ)))
         except ValueError:
             pass   # Keeps the default rate
-        _LOG.info("BOOT: %s", boot.raw)
         self._set_build(_BUILD_LOG if log else _BUILD_RECORD if rec == "1" else _BUILD_PRODUCT)
-        if cap is not None:
-            self._finish_capture(cap)
 
     def _set_build(self, build: str) -> None:
         """
@@ -949,7 +992,8 @@ class RecordWidget(QGroupBox):
         the build is judged again (a different firmware may be flashed)."""
         self.ctrl.on_reconnect()
         cap = self.recorder.interrupt("USB reconnected during the recording")
-        self._boot_info = "Device settings: waiting for BOOT (lost on reconnect)"
+        self._boot_info = ("Device settings: waiting for BOOT or CFG (cleared on reconnect; "
+                           "CFG comes every %.0f s)" % cfg.CFG_PERIOD_S)
         self._show_strip()
         self._build = _BUILD_UNKNOWN
         _LOG.info("Reconnected: unmatched items cleared")

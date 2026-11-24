@@ -1,9 +1,11 @@
 """
 File:        test_snapshot_protocol.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0: the log build's L lines (text kept, malformed ones
+Date:        2026-11-23
+Version:     0.2.1
+Change:      0.2.1: a CFG line parses to a ConfigLine (not a BootLine) whose
+             as_boot() is the BOOT line it repeats.
+             0.2.0: the log build's L lines (text kept, malformed ones
              counted), EVT's n_trig, and an L line interrupting a snapshot
              (request 5).
 Description: Unit tests for snapshot_protocol.py: the CRC variant, a valid
@@ -21,9 +23,9 @@ Description: Unit tests for snapshot_protocol.py: the CRC variant, a valid
 import unittest
 
 import helpers  # Sets sys.path; must come before the GUI imports
-from snapshot_protocol import (S_CHANNELS, BootLine, EventLine, FaultLine, HealthLine,
-                               LogSample, Rejected, SampleLine, Snapshot, SnapshotAssembler,
-                               crc16_ccitt_false)
+from snapshot_protocol import (S_CHANNELS, BootLine, ConfigLine, EventLine, FaultLine,
+                               HealthLine, LogSample, Rejected, SampleLine, Snapshot,
+                               SnapshotAssembler, crc16_ccitt_false)
 
 # ============================================================================
 # Functions
@@ -216,6 +218,17 @@ class TestOtherLines(unittest.TestCase):
         out = new_asm().feed("BOOT,fw=0.1.2-bench,thr_z=1.000,rearm_frac=0.50,rec=1", 0.0)
         self.assertEqual(out[0].settings["rec"], "1")
         self.assertEqual(out[0].settings["thr_z"], "1.000")
+
+    def test_cfg_is_boot_settings_not_a_boot(self):
+        boot = "BOOT,fw=0.1.3-bench,odr=416,thr_z=1.000,cfg_ms=5000,rec=0,log=1"
+        out = new_asm().feed("CFG" + boot[len("BOOT"):] + "\r\n", 0.0)
+        self.assertEqual(len(out), 1)
+        self.assertIsInstance(out[0], ConfigLine)     # Not a BootLine: not a reboot
+        self.assertEqual(out[0].settings["thr_z"], "1.000")
+        again = out[0].as_boot()
+        self.assertIsInstance(again, BootLine)
+        self.assertEqual(again.raw, boot)
+        self.assertEqual(again.settings, new_asm().feed(boot, 0.0)[0].settings)
 
     def test_hlt_product_and_record(self):
         asm = new_asm()

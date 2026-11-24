@@ -1,9 +1,15 @@
 """
 File:        cnn_config.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.3.0
-Change:      0.3.0: drive log, manual Record and window cutting
+Date:        2026-11-23
+Version:     0.3.2
+Change:      0.3.2 (owner, 2026-11-23; changes L6/M2): WEAK_FLOOR_FRAC
+             removed and weak/ no longer written. A take of an event below
+             MISS_FRAC is peak-aligned into the session folder like any
+             other, however weak. WEAK_DIR_NAME stays so takes already in
+             weak/ still count as cut.
+             0.3.1: CFG_PERIOD_S (the firmware's CFG_PERIOD_MS).
+             0.3.0: drive log, manual Record and window cutting
              (drive-log-manual-record-handoff.md v0.2, requests 5 and 6;
              one-press-manual-takes-handoff.md v0.1, request 8): the take
              shape for takes cut from L lines, the folder names, and every
@@ -69,7 +75,9 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 # only <session>/*.csv, so none of these is ever loaded as a take by default:
 # drives/drive-<n>.log   every line of a drive (master data, never deleted)
 # manual/<LABEL>-<n>.csv the raw 6 s around each Record press (M1)
-# weak/<LABEL>-<n>.csv   events below MISS_FRAC, peak-aligned (L6, M2)
+# weak/<LABEL>-<n>.csv   no longer written (owner, 2026-11-23: weak events go
+#                        in the session folder). Older takes found here
+#                        still count as cut, so they are never cut twice.
 # background/NONE-<n>.csv "nothing happening" windows cut from drive logs (L8)
 DRIVES_DIR_NAME = "drives"
 MANUAL_DIR_NAME = "manual"
@@ -109,8 +117,9 @@ TAKE_CHANNELS = "az_hp/gx/gy"
 # gap is abandoned on the device; a window cut on the PC is skipped the same way.
 MAX_SAMPLE_GAP_US = 3605
 
-# The IMU rate when no BOOT line has been seen yet (firmware IMU_ODR_HZ). Only
-# sizes the manual Record buffer; takes always use the rate from BOOT.
+# The IMU rate when no BOOT (or CFG) line has been seen yet (firmware
+# IMU_ODR_HZ). Only sizes the manual Record buffer; takes always use the rate
+# from BOOT.
 DEFAULT_RATE_HZ = 416
 
 # ============================================================================
@@ -140,6 +149,12 @@ RECONNECT_PERIOD_S = 1.0
 
 # DRAFT. Serial read timeout; also how often the reader thread checks for stop.
 SERIAL_READ_TIMEOUT_S = 0.1
+
+# The firmware's CFG_PERIOD_MS: the board repeats its BOOT settings as a CFG
+# line this often, because BOOT goes out once, at reset, and a PC that
+# connects (or reconnects after a reset) usually misses it. Record and Start
+# log wait at most this long for the settings. The simulated device uses it too.
+CFG_PERIOD_S = 5.0
 
 # ============================================================================
 # Constants: live IMU view
@@ -203,16 +218,17 @@ MANUAL_RECORD_KEY = "R"
 # Constants: alignment and window cutting (request 6, request 8)
 # ============================================================================
 
-# DECIDED (L6, 2026-11-21). A MARK labels an EVT take if it comes within
-# MARK_MATCH_S after the trigger. An event with no threshold crossing is
-# aligned at MISS_FRAC of the BOOT thresholds; below that it is a weak event,
-# peak-aligned into weak/, unless its peak is under WEAK_FLOOR_FRAC (then
-# nothing is saved and it is listed for review).
+# DECIDED (L6, 2026-11-21; changed by the owner 2026-11-23). A MARK labels
+# an EVT take if it comes within MARK_MATCH_S after the trigger. An event with
+# no threshold crossing is aligned at MISS_FRAC of the BOOT thresholds; below
+# that it is aligned on its peak, however small. Strength never decides
+# whether or where a take is saved: every one goes in the session folder
+# (there is no floor and no weak/ folder any more). Only a stretch with no
+# movement at all gives nothing.
 MARK_MATCH_S = 3.0
 MISS_FRAC = 0.5
-WEAK_FLOOR_FRAC = 0.2
 
-# DRAFT (handoff). A weak take's peak is placed the session's typical
+# DRAFT (handoff). A peak-aligned take's peak is placed the session's typical
 # crossing-to-peak gap after the aligned row: the median of n_peak - trigger
 # over the session's event takes, or 0 with fewer than PEAK_GAP_MIN_TAKES.
 PEAK_GAP_MIN_TAKES = 10

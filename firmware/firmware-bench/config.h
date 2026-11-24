@@ -6,7 +6,10 @@
  * Change:      FW_VERSION 0.1.3-bench (owner, 2026-11-22). Log build
  *              (drive-log-manual-record-handoff.md v0.2, request 4, L1, L3):
  *              LOG_MODE, LOG_DECIMALS, LOG_TX_BUF_BYTES, LOG_OUT_Q_LEN and
- *              LOG_PERF_PERIOD_MS.
+ *              LOG_PERF_PERIOD_MS. Bench mapping (2026-11-23): chip Y now
+ *              points forward (pitch = chip X gyro), so PITCH_NOSE_DOWN_SIGN
+ *              is -1; SNAP_CHANNELS comment updated. CFG line (2026-11-23):
+ *              CFG_PERIOD_MS.
  *              0.1.2-bench: Re-arm rule (cnn-record-train-handoff.md
  *              v0.4, request 0, C16): REARM_FRAC, REARM_HOLD_MS. Record mode
  *              (request 1): RECORD_MODE and the SNAP_* settings.
@@ -58,6 +61,11 @@
                                        // LOG_TX_BUF_BYTES instead
 #define PRINT_EVERY_N         8        // DRAFT. 52 S lines/s, ~3.6 kB/s. No S lines in the
                                        // log build (it sends an L line for every sample)
+#define CFG_PERIOD_MS         5000     // DRAFT. serial_out repeats the BOOT settings as a CFG
+                                       // line this often (~0.5 kB each), so a PC that connects
+                                       // after BOOT went by still gets them. BOOT goes out only
+                                       // once, at reset, usually before the PC can reopen the
+                                       // port (native USB re-enumerates on every reset)
 
 // ============================================================================
 // Macros: detection
@@ -92,10 +100,11 @@
 // near the event counts. Fallbacks when no pitch lobe is seen: roll at its
 // threshold = pothole (one wheel), else the sign of the first vertical
 // excursion (drop = pothole, push up = bump). Every event is POTHOLE or BUMP.
-#define PITCH_NOSE_DOWN_SIGN  (+1)     // DRAFT. +1 if positive pitch rate (chip gy) is nose
-                                       // down. Right-hand rule with chip X forward, Z up says
-                                       // +1. Bench check: tip the X-arrow end down quickly;
-                                       // gy must go positive, else set -1
+#define PITCH_NOSE_DOWN_SIGN  (-1)     // DRAFT. +1 if positive pitch rate (chip gx, see
+                                       // map_axes in dsp.cpp) is nose down. Right-hand rule
+                                       // with chip Y forward, Z up (so X to the right) says -1.
+                                       // Bench check: tip the Y-arrow end down quickly; gx must
+                                       // go negative, else set +1
 #define PITCH_SMOOTH_N        4        // DRAFT. Moving average length for the lobe tracker
                                        // (~10 ms at 416 Hz), so vibration does not flip sign
 #define PITCH_LOBE_DPS        30.0f    // DRAFT, bench only. Smoothed |pitch rate| that starts
@@ -135,9 +144,14 @@
 #define SNAP_N_CH             3        // DECIDED (C3). Channels per row
 #define SNAP_CHANNELS         "az_hp/gx/gy"  // DECIDED (C3), bench mapping in map_axes()
                                        // (dsp.cpp, the one mapping table): vertical accel after
-                                       // the HPF (chip Z, g), roll rate (chip X gyro, dps),
-                                       // pitch rate (chip Y gyro, dps). Gyro with the settle-time
-                                       // bias removed, exactly as the trigger sees it (C7)
+                                       // the HPF (chip Z, g), roll rate (chip Y gyro, dps),
+                                       // pitch rate (chip X gyro, dps). Gyro with the settle-time
+                                       // bias removed, exactly as the trigger sees it (C7). The
+                                       // name dates from when chip X pointed forward (before
+                                       // 2026-11-23). The columns are always z_hp, roll, pitch,
+                                       // so with this mapping "gx" holds chip gy and "gy" holds
+                                       // chip gx. Renaming it means changing TAKE_CHANNELS in
+                                       // cnn_config.py too
 #define SNAP_DECIMALS         4        // DRAFT. 0.1 mg and 0.1 mdps, below the sensor noise
 #define SNAP_BUFFERS          2        // DRAFT. One filling while one sends, ~7.5 KB each
 #define SNAP_MAX_GAP_US       ((3 * 1000000) / (2 * IMU_ODR_HZ))  // DRAFT. 1.5 sample periods
@@ -157,7 +171,7 @@
 // record GUI's drive log and manual Record. No S lines and no snapshots: every
 // snapshot can be cut from the log. Detection, EVT, SEG, BLE and the safe
 // state are the same as in the product build.
-#define LOG_MODE              0        // DECIDED (L1): compile-time flag, off by default.
+#define LOG_MODE              1        // DECIDED (L1): compile-time flag, off by default.
                                        // 1 = log build (set locally to log; commit 0)
 #if LOG_MODE != 0 && LOG_MODE != 1
 #error "LOG_MODE must be 0 or 1"

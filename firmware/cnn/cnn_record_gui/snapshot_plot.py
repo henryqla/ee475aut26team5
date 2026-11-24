@@ -117,8 +117,10 @@ class SnapshotPlot(QGroupBox):
         self.c1 = self.p_gyr.plot(pen=channel_pen(AppStyles.PEN_ROLL, model=True))
         self.c2 = self.p_gyr.plot(pen=channel_pen(AppStyles.PEN_PITCH, model=True))
         acc_legend.addItem(self.c0, "az_hp")
-        gyr_legend.addItem(self.c1, "gx (roll)")
-        gyr_legend.addItem(self.c2, "gy (pitch)")
+        # c1 is roll and c2 pitch. Bench mapping (map_axes() in firmware-bench
+        # dsp.cpp): chip Y points forward, so roll is chip gy and pitch chip gx.
+        gyr_legend.addItem(self.c1, "gy (roll)")
+        gyr_legend.addItem(self.c2, "gx (pitch)")
 
         # One line; cut off with "..." when too long, full text in the tooltip.
         self.info = set_role(ElidedLabel(""), "info")

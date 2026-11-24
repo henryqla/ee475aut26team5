@@ -1,12 +1,14 @@
 """
 File:        test_take_cut.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.1.1
+Change:      0.1.1 (owner, 2026-11-23): no floor. A very weak event is still
+             peak-aligned; only rows with no movement at all give nothing.
 Description: Unit tests for take_cut.py, the alignment shared by manual
              Record and cut_windows.py (request 8): the window checks (jump in
              n, time gap, ok=0), the >= threshold comparison, threshold /
-             MISS_FRAC / peak alignment, the floor, the edge (the first
+             MISS_FRAC / peak alignment, no floor, the edge (the first
              crossing wins, M3), a second event, the session's typical gap,
              and a take's crc16 equal to the SNE CRC of the same rows.
 """
@@ -98,11 +100,21 @@ class TestAlign(unittest.TestCase):
         al = tc.align(rows_with(bump_at(1500, 0.3)), THR, tc.MANUAL_LEVELS, 40)
         self.assertEqual((al.kind, al.peak, al.gap, al.index), (tc.ALIGN_PEAK, 1500, 40, 1460))
         self.assertTrue(al.ok)
+        self.assertEqual(tc.describe(al, 416), "aligned on its peak (30% of the threshold)")
 
-    def test_below_floor_nothing(self):
-        al = tc.align(rows_with(bump_at(1500, 0.15)), THR, tc.MANUAL_LEVELS, 0)
+    def test_very_weak_event_still_peak_aligned(self):
+        # No floor (owner, 2026-11-23): 5% of the threshold is still a take.
+        al = tc.align(rows_with(bump_at(1500, 0.05)), THR, tc.MANUAL_LEVELS, 0)
+        self.assertTrue(al.ok, al.problem)
+        self.assertEqual((al.kind, al.peak, al.index), (tc.ALIGN_PEAK, 1500, 1500))
+        self.assertAlmostEqual(al.peak_frac, 0.05)
+
+    def test_no_movement_nothing(self):
+        flat = dict.fromkeys(range(2496), (0.0, 0.0, 0.0))
+        al = tc.align(rows_with(flat), THR, tc.MANUAL_LEVELS, 0)
         self.assertFalse(al.ok)
         self.assertEqual(al.problem_kind, tc.NOTHING)
+        self.assertEqual(al.problem, "nothing found: no movement at all")
 
     def test_first_crossing_wins_even_at_the_edge(self):
         # MR-3: a tap in the first 0.2 s, then a later one: no take.

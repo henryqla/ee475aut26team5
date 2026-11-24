@@ -1,8 +1,17 @@
 """
 File:        take_cut.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.2.0
+Change:      0.2.0 (owner, 2026-11-23; changes L6/M2 of request 6): an
+             event's strength no longer decides whether or where its take is
+             saved. No floor (WEAK_FLOOR_FRAC is gone) and no weak/ folder: a
+             take aligned on its peak goes to the session folder like any
+             other. Strength only picks the alignment, written in the header
+             (align, peak_frac). Only a run with no movement at all gives
+             nothing.
+             0.1.1: the "no BOOT line" reason names the CFG line too (the
+             board repeats BOOT's settings as CFG every CFG_PERIOD_MS).
 Description: The one place a standard take (624 rows: TAKE_N_PRE before the
              aligned sample, TAKE_N_POST from it on) is cut out of full-rate
              samples: L lines from the log build, or a raw manual recording.
@@ -19,11 +28,11 @@ Description: The one place a standard take (624 rows: TAKE_N_PRE before the
                threshold (|value| >= threshold, as the firmware compares); if
                none, the first at MISS_FRAC of it; if none, the largest peak
                (each channel divided by its threshold, so the three share one
-               scale), if it is at least WEAK_FLOOR_FRAC, placed the session's
-               typical crossing-to-peak gap after the aligned row: a weak
-               take, saved to weak/. The first crossing wins even when its
-               window does not fit (M3); a later crossing past the take window
-               is reported, not saved.
+               scale), however small, placed the session's typical
+               crossing-to-peak gap after the aligned row. Every one of these
+               is a normal take in the session folder. The first crossing wins
+               even when its window does not fit (M3); a later crossing past
+               the take window is reported, not saved.
              - Rows are copied as printed (text), never re-formatted, so a
                window cut at a trigger equals that trigger's snapshot byte for
                byte, and its crc16 is the one the SNE line would carry.
@@ -56,7 +65,7 @@ from take_store import RULE_FIELDS, header_text, parse_take_name, read_header
 ALIGN_TRIGGER = "trigger"        # The firmware's own trigger (EVT n_trig)
 ALIGN_THRESHOLD = "threshold"    # First sample at the BOOT thresholds
 ALIGN_MISS_FRAC = "miss_frac"    # First sample at MISS_FRAC of them
-ALIGN_PEAK = "peak"              # Weak event: its peak placed at the typical gap
+ALIGN_PEAK = "peak"              # Below MISS_FRAC: its peak placed at the typical gap
 ALIGN_RANDOM = "random"          # Background window
 
 # Levels (fraction of the thresholds, kind) tried in order. A manual
@@ -66,7 +75,7 @@ MANUAL_LEVELS = ((1.0, ALIGN_THRESHOLD), (cfg.MISS_FRAC, ALIGN_MISS_FRAC))
 MARK_LEVELS = ((cfg.MISS_FRAC, ALIGN_MISS_FRAC),)
 
 # Why an Alignment has no take (Alignment.problem_kind).
-NOTHING = "nothing"    # Peak below WEAK_FLOOR_FRAC
+NOTHING = "nothing"    # No movement at all in the searched rows (or no rows)
 EDGE = "edge"          # The 624-row window does not fit in the rows
 WINDOW = "window"      # The window has a jump, a time gap or an ok=0 row
 
@@ -142,7 +151,8 @@ def boot_problem(settings: dict) -> str:
     """
     missing = [k for k in ("fw", "odr", "thr_z", "thr_roll", "thr_pitch") if k not in settings]
     if not settings:
-        return "no BOOT line (it is sent at reset; reset the board to get one)"
+        return ("no BOOT line, and no CFG line repeating its settings (firmware older than "
+                "the CFG line sends them only at reset)")
     if missing:
         return "BOOT line lacks %s" % ", ".join(missing)
     if thresholds_from_boot(settings) is None:
@@ -244,14 +254,15 @@ def align(rows: list, thr: Thresholds, levels: tuple, typical_gap: int, lo: int 
           hi: Optional[int] = None) -> Alignment:
     """
     The shared alignment (request 8): the first crossing of each level in
-    turn, else the peak if it is above the floor. The take window must fit
-    in rows (not only in the searched range) and pass window_problem().
+    turn, else the peak, however small (owner, 2026-11-23: no floor). Only
+    rows with no movement at all give NOTHING. The take window must fit in
+    rows (not only in the searched range) and pass window_problem().
     @param rows         LogSample rows in device order (one run).
     @param thr          Thresholds from BOOT.
     @param levels       (fraction, kind) pairs, tried in order (MANUAL_LEVELS,
                         MARK_LEVELS).
-    @param typical_gap  Samples from the aligned row to the peak, for a weak
-                        event (typical_peak_gap()).
+    @param typical_gap  Samples from the aligned row to the peak, for an
+                        event that reaches no level (typical_peak_gap()).
     @param lo           First row searched.
     @param hi           One past the last row searched (default: all).
     @return The Alignment; check .ok.
@@ -265,10 +276,10 @@ def align(rows: list, thr: Thresholds, levels: tuple, typical_gap: int, lo: int 
             break
     if al is None:
         p, frac = peak_index(rows, thr, lo, hi)
-        if p is None or frac < cfg.WEAK_FLOOR_FRAC:
+        if p is None or frac <= 0.0:
+            # Every channel reads exactly 0: there is no peak to align on.
             return Alignment(peak=p, peak_frac=frac, problem_kind=NOTHING,
-                             problem="nothing found: peak %.0f%% of the threshold, below the "
-                                     "%.0f%% floor" % (100 * frac, 100 * cfg.WEAK_FLOOR_FRAC))
+                             problem="nothing found: no movement at all")
         al = Alignment(kind=ALIGN_PEAK, index=p - typical_gap, level=frac, peak=p,
                        peak_frac=frac, gap=typical_gap)
 
@@ -377,7 +388,7 @@ def take_header(*, label: str, session: str, source: str, source_file: str, src_
     @param label_from   How the label was chosen ("mark", "none", "manual", ...).
     @param evt          The EventLine (EVT takes), or None.
     @param evt_missing  Why there is no EVT (written in the evt field).
-    @param gap          The peak offset used (weak takes), or None.
+    @param gap          The peak offset used (ALIGN_PEAK takes), or None.
     @param extra        More (key, value) pairs, written before columns.
     @return (key, value) pairs in file order.
     """
@@ -419,10 +430,10 @@ def take_header(*, label: str, session: str, source: str, source_file: str, src_
 
 @dataclass
 class CutResult:
-    """A take cut from a source, or why there is none."""
+    """A take cut from a source, or why there is none. A take always goes in
+    the session folder, however it was aligned."""
     ok: bool
     label: str = ""
-    subdir: str = ""                # "" (session folder) or cfg.WEAK_DIR_NAME
     text: str = ""                  # The take file's contents
     header: dict = field(default_factory=dict)
     src_key: str = ""
@@ -441,8 +452,7 @@ def describe(al: Alignment, rate_hz: float) -> str:
     elif al.kind == ALIGN_MISS_FRAC:
         text = "aligned at %.0f%% of the threshold" % (100 * al.level)
     elif al.kind == ALIGN_PEAK:
-        text = ("weak event (peak %.0f%% of the threshold), peak-aligned into %s/"
-                % (100 * al.peak_frac, cfg.WEAK_DIR_NAME))
+        text = "aligned on its peak (%.0f%% of the threshold)" % (100 * al.peak_frac)
     else:
         text = "aligned (%s)" % al.kind
     if al.second is not None:
@@ -488,7 +498,8 @@ def cut_manual(header: dict, rows: list, source_file: str, typical_gap: int) -> 
     @param rows         Its rows.
     @param source_file  Its path relative to the session folder (manual/...).
     @param typical_gap  The session's typical crossing-to-peak gap.
-    @return The CutResult; .subdir is weak/ for a weak event.
+    @return The CutResult. Its take goes in the session folder however weak
+            the event (owner, 2026-11-23).
     """
     label = header.get("label", "")
     src_key = header.get("src_key", "")
@@ -530,7 +541,6 @@ def cut_manual(header: dict, rows: list, source_file: str, typical_gap: int) -> 
     text = header_text(pairs) + take_rows_text(rows, al.index - cfg.TAKE_N_PRE,
                                                al.index + cfg.TAKE_N_POST)
     return CutResult(True, label=label,
-                     subdir=cfg.WEAK_DIR_NAME if al.kind == ALIGN_PEAK else "",
                      text=text, header=dict((k, str(v)) for k, v in pairs), src_key=src_key,
                      alignment=al, message=describe(al, rate))
 

@@ -12,7 +12,12 @@
  *              LOG_PERF_PERIOD_MS a "#LPERF" comment line reports how long L
  *              lines take to format and write, and the lowest free heap
  *              (owner, 2026-11-22). Every build: EVT gains n_trig as its 13th
- *              field (L2).
+ *              field (L2). CFG line (2026-11-23, every build): every
+ *              CFG_PERIOD_MS the BOOT settings go out again as
+ *              "CFG,<BOOT's fields>" (print_settings(), cfg_if_due()), and BOOT
+ *              gains cfg_ms. BOOT is sent once, right after a reset, and a PC
+ *              that connects later (or reopens the port after a reset, which
+ *              re-enumerates native USB) usually misses it.
  *              0.1.2-bench: BOOT adds rearm_frac and rearm_hold_ms (request 0) and rec=0/1.
  *              BOOT was 319 characters, so LINE_MAX_CHARS goes from 352 to
  *              640 and the line buffer becomes static, keeping it off this
@@ -31,7 +36,8 @@
  * Description: serial_out task (core 0, same priority as ble_link). Sole owner
  *              of Serial, which is the S3's native USB (USB Serial/JTAG), the
  *              DevKit's "USB" connector. Calls Serial.begin, prints BOOT and the
- *              column headers, then turns each out_q item into one line. Line
+ *              column headers, then turns each out_q item into one line, and
+ *              repeats BOOT's settings as a CFG line every CFG_PERIOD_MS. Line
  *              format (DRAFT): comma-separated, no spaces, one record per
  *              line, each starting with a type tag. Lines starting with '#'
  *              are comments a parser skips.
@@ -64,7 +70,7 @@
 // Macros
 // ============================================================================
 
-#define LINE_MAX_CHARS  640  // Longest line (BOOT, record build) is ~495 characters; up to
+#define LINE_MAX_CHARS  640  // Longest line (BOOT, record build) is ~508 characters; up to
                              // 638 print whole
 #define SNAP_LINE_CHARS 160  // Snapshot lines are under 64 characters; room for any float
 
@@ -96,6 +102,23 @@ static_assert(LOG_DECIMALS == SNAP_DECIMALS, "L lines must use the snapshot deci
 #define TX_BUF_BYTES   SERIAL_TX_BUF_BYTES
 #endif
 
+// Every setting in use, as key=value fields: BOOT's fields after its tag, and
+// the same text again in every CFG line (print_settings()).
+#define SETTINGS_FMT   "fw=%s,odr=%d,acc_fs=%d,gyr_fs=%d,thr_z=%.3f,thr_roll=%.1f,"         \
+                       "thr_pitch=%.1f,lockout_ms=%d,rearm_frac=%.2f,rearm_hold_ms=%d,"      \
+                       "hpf_hz=%.2f,print_every=%d,"                                         \
+                       "settle_ms=%d,nose_down_sign=%d,pitch_smooth=%d,pitch_lobe=%.1f,"     \
+                       "pitch_lobe_end=%.1f,lobe_gap_ms=%d,z_lobe=%.3f,bias_max=%.1f,"       \
+                       "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,cfg_ms=%d,ble=%s"         \
+                       BOOT_REC_FMT BOOT_LOG_FMT
+#define SETTINGS_ARGS  FW_VERSION, IMU_ODR_HZ, ACCEL_FS_G, GYRO_FS_DPS, THR_Z_G,               \
+                       THR_ROLL_DPS, THR_PITCH_DPS, LOCKOUT_MS, REARM_FRAC, REARM_HOLD_MS,     \
+                       HPF_CUTOFF_HZ,                                                          \
+                       PRINT_EVERY_N, SETTLE_MS, PITCH_NOSE_DOWN_SIGN, PITCH_SMOOTH_N,         \
+                       PITCH_LOBE_DPS, PITCH_LOBE_END_DPS, PITCH_LOBE_MAX_GAP_MS,              \
+                       Z_LOBE_G, GYRO_BIAS_MAX_DPS, IMU_RETRY_MS, IMU_RECOVER_GOOD_READS,      \
+                       SEGMENT_MS, CFG_PERIOD_MS, BLE_DEVICE_NAME BOOT_REC_ARGS BOOT_LOG_ARGS
+
 // Serial must be native USB in Hardware CDC mode (decided): on the bench
 // DevKit that is the "USB" connector. With other settings Serial becomes UART0
 // (the "UART" connector) or the TinyUSB CDC driver instead, and the never-wait
@@ -113,6 +136,7 @@ static_assert(LOG_DECIMALS == SNAP_DECIMALS, "L lines must use the snapshot deci
 // for a while (a snapshot send), so the heartbeat keeps going.
 typedef struct {
   int64_t  last_hb_us;    // Time of the last heartbeat
+  int64_t  last_cfg_us;   // Time of the last CFG line (or of boot, before the first)
   uint32_t serial_drops;  // Lines dropped: USB TX buffer full (no host reading)
   uint32_t snap_drops;    // Record mode: snapshots abandoned mid-send
 #if LOG_MODE
@@ -145,7 +169,9 @@ static const char *pitch_seq_name(int8_t first, bool seq);
 static const char *basis_name(evt_basis_t b);
 static const char *fault_name(fault_code_t f);
 static const char *link_name(link_event_t w);
+static bool print_settings(const char *tag);
 static void print_boot(void);
+static void cfg_if_due(ser_stats_t *st);
 static bool print_msg(const out_msg_t *m);
 
 // ============================================================================
@@ -277,26 +303,26 @@ static const char *link_name(link_event_t w) {
 }
 
 /**
+ * Prints one line with every setting in use: the tag, then SETTINGS_FMT's
+ * key=value fields. BOOT and CFG lines differ only in the tag.
+ * @param tag  "BOOT" or "CFG".
+ * @return true if the line was written, false if it was dropped.
+ */
+static bool print_settings(const char *tag) {
+  return write_line("%s," SETTINGS_FMT, tag, SETTINGS_ARGS);
+}
+
+/**
  * Prints BOOT with every setting in use, so each capture records how it was
  * run, then a '#' header naming the columns of each line type. Runs right
  * after Serial.begin, so the empty TX buffer (SERIAL_TX_BUF_BYTES) holds all
- * of it until a host reads the port; nothing here is dropped.
+ * of it until a host reads the port; nothing here is dropped. A host can
+ * still miss BOOT (it connects later, or opening the port discards what was
+ * waiting), so cfg_if_due() repeats the settings.
  * @return None.
  */
 static void print_boot(void) {
-  write_line("BOOT,fw=%s,odr=%d,acc_fs=%d,gyr_fs=%d,thr_z=%.3f,thr_roll=%.1f,"
-             "thr_pitch=%.1f,lockout_ms=%d,rearm_frac=%.2f,rearm_hold_ms=%d,"
-             "hpf_hz=%.2f,print_every=%d,"
-             "settle_ms=%d,nose_down_sign=%d,pitch_smooth=%d,pitch_lobe=%.1f,"
-             "pitch_lobe_end=%.1f,lobe_gap_ms=%d,z_lobe=%.3f,bias_max=%.1f,"
-             "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,ble=%s" BOOT_REC_FMT BOOT_LOG_FMT,
-             FW_VERSION, IMU_ODR_HZ, ACCEL_FS_G, GYRO_FS_DPS, THR_Z_G,
-             THR_ROLL_DPS, THR_PITCH_DPS, LOCKOUT_MS, REARM_FRAC, REARM_HOLD_MS,
-             HPF_CUTOFF_HZ,
-             PRINT_EVERY_N, SETTLE_MS, PITCH_NOSE_DOWN_SIGN, PITCH_SMOOTH_N,
-             PITCH_LOBE_DPS, PITCH_LOBE_END_DPS, PITCH_LOBE_MAX_GAP_MS,
-             Z_LOBE_G, GYRO_BIAS_MAX_DPS, IMU_RETRY_MS, IMU_RECOVER_GOOD_READS,
-             SEGMENT_MS, BLE_DEVICE_NAME BOOT_REC_ARGS BOOT_LOG_ARGS);
+  print_settings("BOOT");
 #if LOG_MODE
   write_line("#L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok");
   write_line("#LPERF,t_ms,lines,avg_us,max_us,heap_min");
@@ -318,6 +344,28 @@ static void print_boot(void) {
 #endif
   write_line("#FLT,code,name");
   write_line("#BLE,what,value");
+  write_line("#CFG,<the BOOT fields again, every cfg_ms>");
+}
+
+/**
+ * Every CFG_PERIOD_MS, prints the BOOT settings again as a CFG line. BOOT goes
+ * out once, right after a reset, usually before the PC has the port open
+ * again (a reset re-enumerates native USB), so the PC often never sees it; a
+ * CFG reaches it within CFG_PERIOD_MS. A CFG is not a reboot: the GUI uses
+ * one only while it has no BOOT. Like any line, it is dropped (and counted)
+ * if it does not fit in the TX buffer.
+ * @param st  This task's counters and the time of the last CFG.
+ * @return None.
+ */
+static void cfg_if_due(ser_stats_t *st) {
+  const int64_t now_us = esp_timer_get_time();
+  if (now_us - st->last_cfg_us < (int64_t)CFG_PERIOD_MS * 1000) {
+    return;
+  }
+  st->last_cfg_us = now_us;
+  if (!print_settings("CFG")) {
+    st->serial_drops++;
+  }
 }
 
 /**
@@ -624,6 +672,7 @@ void serial_out_task(void *param) {
 
   ser_stats_t st = {};
   st.last_hb_us = esp_timer_get_time();
+  st.last_cfg_us = st.last_hb_us;  // The first CFG goes out CFG_PERIOD_MS after BOOT
 #if LOG_MODE
   st.perf_start_us = st.last_hb_us;
 #endif
@@ -634,6 +683,8 @@ void serial_out_task(void *param) {
       handle_msg(&m, ctx, &st);
     }
     heartbeat_if_due(ctx, &st);
+    // Between items only, so a CFG never lands inside a snapshot block.
+    cfg_if_due(&st);
 #if LOG_MODE
     perf_if_due(&st);
 #endif

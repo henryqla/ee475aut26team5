@@ -1,9 +1,12 @@
 """
 File:        serial_handler.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5): the
+Date:        2026-11-23
+Version:     0.2.1
+Change:      0.2.1: CFG lines (the BOOT settings, repeated by the board) go
+             out as config_received. Unlike BOOT they do not start a new run
+             in the drive log's stats: a CFG is not a reboot.
+             0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5): the
              log build. L samples go to the GUI thread in batches every
              SAMPLE_BATCH_S, not one signal each (a batch is sent before any
              other item, so the order is kept); this thread writes the drive
@@ -53,8 +56,8 @@ from PyQt5.QtCore import QThread, pyqtSignal
 import cnn_config as cfg
 from drive_log import DriveLog, LogStatus
 from sim_source import SimDevice, SimDisconnect
-from snapshot_protocol import (BootLine, EventLine, FaultLine, HealthLine, LogSample,
-                               Rejected, SampleLine, Snapshot, SnapshotAssembler)
+from snapshot_protocol import (BootLine, ConfigLine, EventLine, FaultLine, HealthLine,
+                               LogSample, Rejected, SampleLine, Snapshot, SnapshotAssembler)
 
 # ============================================================================
 # Constants
@@ -104,6 +107,7 @@ class SerialHandler(QThread):
     snapshot_rejected = pyqtSignal(object)          # Rejected
     event_received = pyqtSignal(object)             # EventLine
     boot_received = pyqtSignal(object)              # BootLine
+    config_received = pyqtSignal(object)            # ConfigLine (BOOT's settings, repeated)
     health_received = pyqtSignal(object)            # HealthLine
     fault_received = pyqtSignal(object)             # FaultLine
     sample_received = pyqtSignal(object)            # SampleLine (live view only)
@@ -326,6 +330,8 @@ class SerialHandler(QThread):
                 self.event_received.emit(x)
             elif isinstance(x, BootLine):
                 self.boot_received.emit(x)
+            elif isinstance(x, ConfigLine):
+                self.config_received.emit(x)
             elif isinstance(x, HealthLine):
                 self.health_received.emit(x)
             elif isinstance(x, FaultLine):

@@ -1,14 +1,20 @@
 """
 File:        test_cut_windows.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.1.2
+Change:      0.1.2 (owner, 2026-11-23): weak and very weak marks and raw
+             recordings give takes in the session folder (no weak/, no
+             floor); only no movement at all is listed for review.
+             0.1.1: a run with no BOOT takes the settings of its first CFG
+             line; a CFG never starts a run or overrides a BOOT.
 Description: Unit tests for cut_windows.py (request 6, with request 8):
              CUT-1 (a take cut at each EVT of the simulated log build equals
              its snapshot, row for row as text, with the same CRC), labels
              from marks, CUT-3 (an event at the start of a log or across a
-             gap is skipped; a mark with no EVT becomes a marker_only or weak
-             take or is listed for review), raw manual recordings, CUT-4
+             gap is skipped; a mark with no EVT becomes a marker_only take
+             however weak, or is listed for review if nothing moved), raw
+             manual recordings, CUT-4
              (a second run adds nothing; different settings are refused),
              EVTs and marks covered by a manual recording (owner,
              2026-11-22), and background windows (count, distance, seed).
@@ -44,6 +50,7 @@ LOG_BOOT = ("BOOT,fw=0.1.3-bench,odr=416,acc_fs=16,gyr_fs=500,thr_z=1.000,thr_ro
             "thr_pitch=60.0,lockout_ms=1250,rearm_frac=0.50,rearm_hold_ms=200,hpf_hz=0.50,"
             "print_every=8,settle_ms=2000,ble=RoadQuality,rec=0,log=1,l_rate=416,l_dec=4,"
             "log_tx_buf=32768,log_out_q=256,log_perf_ms=10000")
+LOG_CFG = "CFG" + LOG_BOOT[len("BOOT"):]    # The board repeats BOOT's settings as CFG
 
 
 def l_line(n, z=0.0, ok=1):
@@ -175,28 +182,36 @@ class TestLabelsAndBoundaries(CutTestCase):
         events = dict(bump(60, 1.3))
         events.update(bump(3000, 1.3))
         events.update(bump(5800, 0.7))       # Below the threshold, above MISS_FRAC
-        events.update(bump(8700, 0.3))       # Weak: above the floor only
+        events.update(bump(8700, 0.3))       # Weak
+        events.update(dict.fromkeys(range(9700, 11001), 0.0))   # No movement at all
+        events.update(bump(12000, 0.05))     # Very weak: still a take (no floor)
         after = {579: [evt_line(0, 60)],                       # At the very start
                  3519: [evt_line(1, 3000)],                    # A gap across it (skip)
                  6200: ["MARK,%d,6200,POTHOLE" % epoch_at(6200)],
                  9000: ["MARK,%d,9000,SPEED_BUMP" % epoch_at(9000)],
-                 11000: ["MARK,%d,11000,POTHOLE" % epoch_at(11000)]}   # Nothing there
+                 11000: ["MARK,%d,11000,POTHOLE" % epoch_at(11000)],   # Nothing there
+                 12300: ["MARK,%d,12300,FALSE_TRIGGER" % epoch_at(12300)]}
         write_log(self.drives / "drive-1.log", 13000, events, after, skip={3200})
         rep = self.cut()
         reasons = dict(rep.skipped)
         self.assertIn("too few rows before", reasons["drive-1.log run 1 EVT seq 0"])
         self.assertIn("jump in n", reasons["drive-1.log run 1 EVT seq 1"])
         marker = self.made(rep, "marker_only")
-        self.assertEqual(len(marker), 2)
+        self.assertEqual(len(marker), 3)
         by_label = {label: p for p, label in marker}
         h = read_header(self.data / SESSION / by_label["POTHOLE"])
         self.assertEqual((h["align"], h["align_n"], h["source"]), ("miss_frac", "5800",
                                                                    "marker_only"))
-        self.assertTrue(by_label["SPEED_BUMP"].startswith("weak/"))
-        hw = read_header(self.data / SESSION / by_label["SPEED_BUMP"])
-        self.assertEqual((hw["align"], hw["n_peak"], hw["peak_gap"]), ("peak", "8700", "0"))
+        # Weak and very weak marks go in the session folder (owner, 2026-11-23).
+        for label, n_peak, frac in (("SPEED_BUMP", "8700", "0.300"),
+                                    ("FALSE_TRIGGER", "12000", "0.050")):
+            self.assertEqual(by_label[label], "%s-1.csv" % label)
+            hw = read_header(self.data / SESSION / by_label[label])
+            self.assertEqual((hw["align"], hw["n_peak"], hw["peak_gap"], hw["peak_frac"]),
+                             ("peak", n_peak, "0", frac))
         self.assertEqual(len(rep.review), 1)
         self.assertIn("MARK POTHOLE at n 11000", rep.review[0][0])
+        self.assertIn("no movement at all", rep.review[0][1])
 
     def test_log_without_boot(self):
         write_log(self.drives / "drive-1.log", 4000, bump(2000, 1.3),
@@ -204,6 +219,30 @@ class TestLabelsAndBoundaries(CutTestCase):
         rep = self.cut()
         self.assertFalse(rep.made)
         self.assertIn("no BOOT line", rep.skipped[0][1])
+
+    def test_log_without_boot_uses_cfg(self):
+        write_log(self.drives / "drive-1.log", 4000, bump(2000, 1.3),
+                  {300: [LOG_CFG], 2519: [evt_line(0, 2000)], 2600: [LOG_CFG]},
+                  header_boot=None)
+        log = cw.read_drive_log(self.drives / "drive-1.log")
+        self.assertEqual(len(log.runs), 1)                  # A CFG never starts a run
+        self.assertEqual(log.runs[0].boot_raw, LOG_BOOT)    # Kept as the BOOT it repeats
+        rep = self.cut()
+        made = self.made(rep, "evt")
+        self.assertEqual(len(made), 1, rep.skipped)
+        self.assertEqual(read_header(self.data / SESSION / made[0][0])["boot"], LOG_BOOT)
+
+    def test_cfg_fills_only_a_run_without_boot(self):
+        other = LOG_CFG.replace("fw=0.1.3-bench", "fw=other")
+        lines = ["#session=%s" % SESSION, "#boot=%s" % LOG_BOOT]
+        lines += [l_line(1), l_line(2), other, l_line(3)]        # Run 1 has BOOT: ignored
+        lines += [l_line(1), l_line(2), other, l_line(3)]        # Reset, BOOT lost: used
+        path = self.drives / "drive-1.log"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        runs = cw.read_drive_log(path).runs
+        self.assertEqual([len(r.rows) for r in runs], [3, 3])
+        self.assertEqual([r.boot_raw for r in runs],
+                         [LOG_BOOT, LOG_BOOT.replace("fw=0.1.3-bench", "fw=other")])
 
 
 class TestManualAndCoverage(CutTestCase):
@@ -227,14 +266,22 @@ class TestManualAndCoverage(CutTestCase):
         return cap
 
     def test_raw_recordings_weak_and_review(self):
+        # However weak, a take goes in the session folder (owner, 2026-11-23);
+        # only a recording with no movement at all is listed for review.
         self.raw_recording(bump(3500, 0.3), label="SPEED_BUMP")                # Weak
-        self.raw_recording(bump(3500, 0.1), press_n=3150, label="POTHOLE")     # Nothing
+        self.raw_recording(bump(3500, 0.1), press_n=3150, label="POTHOLE")     # Very weak
+        self.raw_recording(dict.fromkeys(range(1, 6001), 0.0), press_n=3200,
+                           label="FALSE_TRIGGER")                              # No movement
         rep = self.cut()
         manual = self.made(rep, "manual")
         self.assertEqual([(p, label) for p, label in manual],
-                         [("weak/SPEED_BUMP-1.csv", "SPEED_BUMP")])
+                         [("POTHOLE-1.csv", "POTHOLE"), ("SPEED_BUMP-1.csv", "SPEED_BUMP")])
+        for name, frac in (("POTHOLE-1.csv", "0.100"), ("SPEED_BUMP-1.csv", "0.300")):
+            h = read_header(self.data / SESSION / name)
+            self.assertEqual((h["align"], h["n_peak"], h["peak_frac"]), ("peak", "3500", frac))
         self.assertEqual(len(rep.review), 1)
-        self.assertIn("manual/POTHOLE-1.csv", rep.review[0][0])
+        self.assertIn("manual/FALSE_TRIGGER-1.csv", rep.review[0][0])
+        self.assertIn("no movement at all", rep.review[0][1])
 
     def test_recording_already_cut_by_the_gui_is_skipped(self):
         self.raw_recording(bump(3500, 1.3), cut=True)

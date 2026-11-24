@@ -9,6 +9,9 @@
  *              gyro bias ready) instead of every PRINT_EVERY_N-th as an S
  *              line, without waiting. Every build: the window remembers the
  *              trigger's sample count and the event carries it as n_trig (L2).
+ *              Bench mapping (2026-11-23): chip Y now points forward, so
+ *              map_axes() takes roll from chip Y gyro and pitch from chip X
+ *              gyro (was roll = X, pitch = Y).
  *              0.1.2-bench: Re-arm rule (cnn-record-train-handoff.md v0.4, request 0,
  *              C16). A window closing disarms the detector; it re-arms once
  *              every axis has stayed below REARM_FRAC x its own threshold for
@@ -244,16 +247,20 @@ static void send_ble(QueueHandle_t ble_q, const ble_msg_t *m, uint32_t *drops);
 
 /**
  * The only place chip axes become car axes. Bench mapping (DRAFT) until
- * Kyle's mounting info: vertical = chip Z accel, roll = chip X gyro,
- * pitch = chip Y gyro.
+ * Kyle's mounting info: chip Y points forward and chip Z up, so chip X points
+ * to the right. Vertical = chip Z accel, roll = chip Y gyro (rotation about
+ * the forward axis), pitch = chip X gyro (rotation about the side axis).
+ * Signs stay as the chip gives them: positive chip X rate is nose UP, which
+ * PITCH_NOSE_DOWN_SIGN (-1) corrects for the lobe tracker, and the detector
+ * only uses |roll|.
  * @param s  Sample in chip axes.
  * @return The three detection axes in car axes.
  */
 static car_axes_t map_axes(const imu_sample_t *s) {
   car_axes_t c;
   c.vert_g = s->az;
-  c.roll_dps = s->gx;
-  c.pitch_dps = s->gy;
+  c.roll_dps = s->gy;
+  c.pitch_dps = s->gx;
   return c;
 }
 

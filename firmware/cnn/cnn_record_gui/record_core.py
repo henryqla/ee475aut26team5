@@ -1,9 +1,16 @@
 """
 File:        record_core.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5;
+Date:        2026-11-23
+Version:     0.2.2
+Change:      0.2.2 (owner, 2026-11-23): no manual_weak counter; every manual
+             take counts in manual_takes, however weak the event.
+             0.2.1: on_settings() takes the settings of a CFG line (the board
+             repeats BOOT's settings) while no BOOT is known on this
+             connection; nothing waiting is cleared, since a CFG is not a
+             reboot. on_new_connection() forgets the previous connection's
+             BOOT.
+             0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5;
              one-press-manual-takes-handoff.md v0.1, request 8): counters for
              the log build's manual Record outcomes and marks
              (count_manual(), count_mark()).
@@ -156,9 +163,8 @@ class Counters:
     save_errors: int = 0        # Takes that could not be written
     device_snap_drops: Optional[int] = None  # snap_drops from the latest HLT (record build)
     # Log build (manual Record, request 8; marks, request 5)
-    manual_takes: int = 0       # Takes saved to the session folder
-    manual_weak: int = 0        # Weak takes saved to weak/
-    manual_no_take: int = 0     # Raw recording kept, but no take (nothing found, edge)
+    manual_takes: int = 0       # Takes saved to the session folder (any strength)
+    manual_no_take: int = 0     # Raw recording kept, but no take (no movement, edge)
     manual_not_saved: int = 0   # Nothing saved (gap, reset, ok=0, lost port, write error)
     marks: int = 0              # MARK lines sent to the drive log
 
@@ -188,7 +194,8 @@ class RecordController:
         self.keep_armed = False
         self.label = cfg.UNLABELED      # Never mislabels by default
         self.session = ""
-        self.boot: Optional[BootLine] = None     # Latest BOOT on this connection
+        self.boot: Optional[BootLine] = None     # Latest BOOT on this connection (or a
+                                                 # CFG's settings, if no BOOT came)
         self.last_claim: Optional[Claim] = None  # Most recent snapshot chosen for saving
         self.last_snapshot: Optional[Snapshot] = None
         self.last_rule_class: Optional[str] = None
@@ -287,6 +294,27 @@ class RecordController:
         self._handle(self.matcher.reset("USB reconnected before its EVT"))
         self.boot = None
 
+    def on_new_connection(self) -> None:
+        """
+        Connect was pressed: the previous connection's BOOT says nothing
+        about the board now (it may have been reflashed in between).
+        """
+        self.boot = None
+
+    def on_settings(self, boot: BootLine) -> bool:
+        """
+        The board's settings from a CFG line, as the BOOT line it repeats.
+        Used only while no BOOT is known on this connection (BOOT is sent
+        once, at reset, and is easily missed). Not a reboot, so nothing
+        waiting is cleared.
+        @param boot  ConfigLine.as_boot() of the CFG.
+        @return True if these became the connection's settings.
+        """
+        if self.boot is not None:
+            return False
+        self.boot = boot
+        return True
+
     def on_health(self, hlt: HealthLine) -> None:
         """
         @param hlt  An HLT line; snap_drops is present only in record builds.
@@ -304,12 +332,10 @@ class RecordController:
     def count_manual(self, state: str) -> None:
         """
         Counts one manual Record outcome (log build).
-        @param state  manual_record.SAVED, WEAK, NO_TAKE or NOT_SAVED.
+        @param state  manual_record.SAVED, NO_TAKE or NOT_SAVED.
         """
         if state == "saved":
             self.counters.manual_takes += 1
-        elif state == "weak":
-            self.counters.manual_weak += 1
         elif state == "no_take":
             self.counters.manual_no_take += 1
         else:

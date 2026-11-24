@@ -53,13 +53,15 @@ from snapshot_protocol import S_CHANNELS, SampleLine
 
 # (S channel, legend name, AppStyles pen token, model channel?) per plot.
 # z_hp, gx and gy are the model channels and have the colors they have in
-# the snapshot plots, so the two views are easy to compare.
+# the snapshot plots, so the two views are easy to compare. Bench mapping
+# (map_axes() in firmware-bench dsp.cpp): chip Y points forward, so gx is
+# pitch and gy is roll.
 _ACC_CURVES = (("ax", "ax", "PEN_AX", False),
                ("ay", "ay", "PEN_AY", False),
                ("az", "az", "PEN_AZ", False),
                ("z_hp", "z_hp", "PEN_Z_HP", True))
-_GYR_CURVES = (("gx", "gx (roll)", "PEN_ROLL", True),
-               ("gy", "gy (pitch)", "PEN_PITCH", True),
+_GYR_CURVES = (("gx", "gx (pitch)", "PEN_PITCH", True),
+               ("gy", "gy (roll)", "PEN_ROLL", True),
                ("gz", "gz (yaw)", "PEN_GZ", False))
 
 # ============================================================================
@@ -219,8 +221,9 @@ class LivePlot(QGroupBox):
         rate = self.buffer.rate_hz()
         rate_text = "-" if rate is None else "%.1f" % rate
         v = dict(zip(S_CHANNELS, s.values))
+        # Bench mapping: roll = chip gy, pitch = chip gx (see _GYR_CURVES).
         self.info.setText("z_hp %+.4f g   roll %+7.2f  pitch %+7.2f dps   %s lines/s   n %d"
-                          % (v["z_hp"], v["gx"], v["gy"], rate_text, s.n))
+                          % (v["z_hp"], v["gy"], v["gx"], rate_text, s.n))
         self.info.set_detail(
             "%s lines/s  n %d  t %.3f s\n"
             "ax %+.4f  ay %+.4f  az %+.4f  z_hp %+.4f g\n"

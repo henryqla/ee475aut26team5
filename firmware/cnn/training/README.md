@@ -276,8 +276,10 @@ It makes, in this order:
    has a take is skipped, so a bump is never saved twice.
 3. **One take per mark with no event**: a bump the board's threshold missed.
    It is lined up at half the threshold in the 3 seconds before the mark. If
-   nothing reaches half, the biggest movement is used if it reaches a fifth (a
-   **weak** take, in the `weak` folder); otherwise the mark is listed for review.
+   nothing reaches half, it is lined up on the biggest movement there, however
+   small. Like every take, it goes in the session folder, so training uses it
+   however weak the bump was. The mark is listed for review only if nothing
+   moved at all. Manual recordings (step 1) follow the same rule.
 4. **Background windows**: 20 "nothing happening" pieces of each log (`--background`
    changes the number, 0 turns them off), at least 3 seconds from any event or
    mark, in the `background` folder. They are picked once per log.
@@ -290,8 +292,13 @@ It makes, in this order:
   came from (`src_key`). A take you deleted is never made again.
 - A take whose settings differ from the session's takes is refused and listed.
 - It never changes or deletes a drive log or a manual recording.
-- Training reads only the takes directly in the session folder, so `weak` and
-  `background` are left out unless moved in.
+- Training reads only the takes directly in the session folder, so
+  `background` is left out unless moved in. Nothing is saved in `weak` any
+  more. Takes that older versions put there still count as made, so they
+  are never cut again; move them into the session folder (each under a number
+  its label hasn't used) to train on them.
+- A mark or Record press with no bump near it still gives a take, lined up on
+  noise (its header's `peak_frac` is small). Delete it in the GUI.
 - Takes cut from marks or by Record have no rule answer (`rule_class` is
   `missing`). The report counts those as the rule being wrong, so a test set
   with many of them makes the rule baseline look worse than it is.
@@ -442,11 +449,12 @@ All five are **NOT TESTED** so far.
   `background`, none within 3 seconds of an event or mark (the report lists
   them). **Proof:** `cut_report.txt` and a screenshot.
 - **CUT-3 (edge cases):** a log with a gap across an event, an event at the very
-  start of a log, and a mark with no event; manual recordings with a tap
-  between a fifth and half of the threshold, and with nothing above a fifth.
+  start of a log, and a mark with no event; manual recordings with a tap under
+  half of the threshold, with one under a tenth, and with no movement at all.
   **You should see** the first two skipped with reasons, the mark cut as
-  `marker_only`, the first recording in `weak` and the second listed for
-  review. The automatic checks include these cases. **Proof:**
+  `marker_only`, the two tapped recordings cut into takes in the session folder
+  (`align=peak`), and the one with no movement listed for review. No `weak`
+  folder appears. The automatic checks include these cases. **Proof:**
   `cut_report.txt`.
 - **CUT-4 (fault):** run the cutter twice, then on a session holding takes with
   different settings. **You should see** the second run add nothing ("Takes

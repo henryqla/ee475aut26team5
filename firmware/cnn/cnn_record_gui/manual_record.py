@@ -1,8 +1,11 @@
 """
 File:        manual_record.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.2.0
+Change:      0.2.0 (owner, 2026-11-23): no WEAK outcome. However weak the
+             event, its take goes in the session folder (SAVED), so it is
+             listed in Collected takes and used for training.
 Description: Manual Record (drive-log-manual-record-handoff.md v0.2, request
              5; changed by one-press-manual-takes-handoff.md v0.1, request 8).
              The GUI always keeps the last MANUAL_PRE_S of L samples; a press
@@ -15,9 +18,8 @@ Description: Manual Record (drive-log-manual-record-handoff.md v0.2, request
                z_hp,roll,pitch,ok" exactly as the L lines sent them;
              - and at once, cut from that file by take_cut.cut_manual_file()
                (the cutter's own function), one finished 624-row take in the
-               session folder, or in weak/ for a peak-aligned weak event
-               (M2). Both files carry the same src_key, so cut_windows.py
-               adds no duplicate later.
+               session folder, however weak the event. Both files carry the
+               same src_key, so cut_windows.py adds no duplicate later.
              ManualRecorder works in the GUI thread on the reader's sample
              batches. No Qt, so it is unit-tested.
 """
@@ -43,9 +45,8 @@ from take_store import TakeStore, header_text, iso_time
 # ============================================================================
 
 # SaveOutcome.state values.
-SAVED = "saved"          # Take in the session folder
-WEAK = "weak"            # Take in weak/
-NO_TAKE = "no_take"      # Raw recording kept, no take (nothing found, edge, no BOOT)
+SAVED = "saved"          # Take in the session folder (any strength)
+NO_TAKE = "no_take"      # Raw recording kept, no take (no movement, edge, no BOOT)
 NOT_SAVED = "not_saved"  # Nothing written (gap, reset, ok=0, lost port, write error)
 
 # ============================================================================
@@ -73,10 +74,10 @@ class Capture:
 @dataclass
 class SaveOutcome:
     """What one press ended up saving."""
-    state: str                          # SAVED, WEAK, NO_TAKE or NOT_SAVED
+    state: str                          # SAVED, NO_TAKE or NOT_SAVED
     message: str                        # For the status card and the log
     raw_path: Optional[Path] = None     # manual/<LABEL>-<n>.csv
-    take_path: Optional[Path] = None    # The take (session folder or weak/)
+    take_path: Optional[Path] = None    # The take (session folder)
     result: Optional[CutResult] = None  # The cut, with its alignment
     capture: Optional[Capture] = None
 
@@ -273,9 +274,9 @@ def save_capture(store: TakeStore, session: str, cap: Capture, gui_commit: str) 
         return SaveOutcome(NO_TAKE, result.message, raw_path=raw_path, result=result,
                            capture=cap)
     try:
-        take_path = store.write_take(session, result.label, result.text, subdir=result.subdir)
+        take_path = store.write_take(session, result.label, result.text)
     except (OSError, ValueError) as exc:
         return SaveOutcome(NO_TAKE, "Take not saved: %s" % exc, raw_path=raw_path,
                            result=result, capture=cap)
-    return SaveOutcome(WEAK if result.subdir else SAVED, result.message, raw_path=raw_path,
-                       take_path=take_path, result=result, capture=cap)
+    return SaveOutcome(SAVED, result.message, raw_path=raw_path, take_path=take_path,
+                       result=result, capture=cap)

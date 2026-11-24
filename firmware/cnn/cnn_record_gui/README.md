@@ -534,7 +534,10 @@ out briefly. Takes that are already saved are never lost.
   - `manual\`: the full 6 seconds around every Record press, under the label
     it had when you pressed. Keep these too; they are the copy a take can be
     cut from again.
-  - `weak\`: takes of weak events (Part 11).
+  - `weak\`: only from older versions, which put takes of weak events here.
+    Nothing is saved here any more: weak events go in the session folder like
+    any other take (Part 11). If you move old ones into the session folder,
+    give each a number its label hasn't used yet.
   - `background\`: "nothing happening" pieces of drive logs, made by the
     cutter (`..\training\README.md`, Part 6).
 - **Takes and logs stay on this computer.** `firmware\cnn\.gitignore` keeps
@@ -573,15 +576,19 @@ Takes are cut from drive logs afterwards by the cutter
 
 1. Put the log build on the board: Part 2, with `LOG_MODE` set to `1` and
    `RECORD_MODE` left at `0`.
-2. Start the program and connect (Part 6, steps 2 to 4). The board's settings
-   line says **log build (L lines, no snapshots)**, and the card says **LOG
-   BUILD**. **Arm** and **Keep armed** are grayed out; **Start log** and
-   **Record** can be clicked. Live IMU scrolls as usual.
+2. Start the program and connect (Part 6, steps 2 to 4). Within 5 seconds the
+   board's settings line says **log build (L lines, no snapshots)**, and the
+   card says **LOG BUILD**. **Arm** and **Keep armed** are grayed out; **Start
+   log** and **Record** can be clicked once the settings are there. Live IMU
+   scrolls as usual.
 3. Type a session name and press Enter.
 
-The program needs the board's settings line (it holds the thresholds) to find
-a bump in a recording and to cut takes from a log. If it says **No device info
-yet**, press **RST** on the board.
+The program needs the board's settings (they hold the thresholds) to find a
+bump in a recording and to cut takes from a log, so **Start log** and
+**Record** stay grayed out until it has them. The board sends them once when
+it starts (the BOOT line), which the program usually misses, and again every
+5 seconds (the CFG line), so you wait at most 5 seconds. If the settings line
+then says **(settings from CFG)**, that is normal.
 
 To try all this without the board, tick **Simulated device**, choose **log
 build** in the box next to it, and click **Connect**. Its pretend events come
@@ -598,20 +605,22 @@ every 3 seconds.
    cutter does:
    - the first moment the movement reaches the board's threshold;
    - if nothing does, the first moment it reaches half of it;
-   - if nothing does, the biggest movement, if it reaches at least a fifth of
-     the threshold. This is called a **weak** event.
+   - if nothing does, the biggest movement, however small.
 
-   It saves the 1.5-second take around that moment.
+   It saves the 1.5-second take around that moment. How strong the bump was
+   only decides which of these lines the take up: every take is saved the same
+   way, in the session, and used for training. The take's header still says how
+   it was lined up (`align`) and how strong the bump was (`peak_frac`, 1.000 =
+   the threshold).
 4. The card shows what happened:
    - **green, with the take's name**, such as **POTHOLE-4**: the take is in the
      session and in **Collected takes**, marked **(manual)**. **Last snapshot**
-     shows it.
-   - **green, with weak/ in front**, such as **weak/POTHOLE-2**: a weak event.
-     It's saved in the session's `weak` folder, which training doesn't read by
-     default, and it isn't listed in Collected takes.
-   - **amber NO TAKE**: **Nothing found near the press**, or **Event too close
-     to the edge of the recording** (the bump came in the first or last quarter
-     second of the 6). The 6 seconds are still kept in `manual\`.
+     shows it. The card also says how the take was lined up, such as **aligned
+     on its peak (35% of the threshold)** for a gentle bump.
+   - **amber NO TAKE**: **Nothing found near the press** (the readings didn't
+     move at all), or **Event too close to the edge of the recording** (the
+     bump came in the first quarter second, or the last 1.25 seconds, of the
+     6). The 6 seconds are still kept in `manual\`.
    - **amber NOT SAVED**: the board dropped readings, restarted, or was still
      settling after a start, or the cable came out. Nothing is saved. Press
      Record again.
@@ -621,6 +630,11 @@ every 3 seconds.
 Every press also keeps the full 6 seconds in the session's `manual` folder.
 **Relabel** and **Delete take** in Collected takes work on manual takes as on
 any take; the 6-second copy in `manual\` keeps its first label.
+
+Because there is no lower limit, pressing Record when nothing happened still
+saves a take, lined up on the biggest wobble of road or desk noise, under the
+label you chose. Delete it in Collected takes. A deleted take is never cut
+again.
 
 ### Log a drive
 
@@ -1072,21 +1086,25 @@ line.
 
 **What to do** (board, session `mr3`):
 
-1. Tap gently, so the tap is between a fifth and half as strong as needed to
-   trigger, then press Record.
+1. Tap gently, less than half as strong as needed to trigger, then press
+   Record. Then do it again with a very gentle tap, under a fifth.
 2. Press Record with no tap.
 3. Tap, wait about 2.8 seconds, then press Record (the tap is then in the
    first 0.2 seconds of the recording).
 4. Press Record and tap twice, 2 seconds apart.
 
-**What you should see:** (1) a take in `data\mr3\weak\` and a green
-**weak/…** card; (2) **NO TAKE**, **Nothing found near the press**; (3) **NO
+**What you should see:** (1) two takes directly in `data\mr3\`, both listed in
+Collected takes, and green cards saying **aligned on its peak (…% of the
+threshold)**; (2) a green card with a small percentage (the biggest wobble of
+noise), or **NO TAKE**, **Event too close to the edge of the recording** if
+that wobble came near the start or end. Delete this take afterwards. (3) **NO
 TAKE**, **Event too close to the edge of the recording**; (4) one take, of the
 first tap, and the card says a second event was not saved.
 
-**It fails if** any of the four does something else.
+**It fails if** any of the four does something else, or a `weak\` folder
+appears.
 
-**Proof to save:** a listing of `data\mr3\` and `weak\`, and screenshots.
+**Proof to save:** a listing of `data\mr3\`, and screenshots.
 
 ---
 
@@ -1150,16 +1168,27 @@ first tap, and the card says a second event was not saved.
   Session box, delete the letter, press Enter, then press the key again.
 
 - **Start log and Record are grayed out.** Point at the button to see why. The
-  board must run the log build (Part 11) and be connected, and the session name
-  must be valid (press Enter after typing it).
+  board must run the log build (Part 11) and be connected, the session name
+  must be valid (press Enter after typing it), and the program must have the
+  board's settings: they come within 5 seconds of connecting.
 
-- **Record says no BOOT line, or a red message says takes can't be cut from
-  this log.** The program missed the board's settings line (it is sent when the
-  board starts). Press **RST** on the board once.
+- **Start log and Record stay grayed out with "waiting for the board's
+  settings".** The board's firmware is older than the CFG line, so it sends
+  its settings only when it starts. Upload the current firmware (Part 2).
 
-- **NO TAKE, Nothing found near the press.** The movement in the 6 seconds was
-  under a fifth of the board's threshold, or the press came more than 3 seconds
-  before or after the bump. The 6 seconds are kept in `manual\` anyway.
+- **NO TAKE, cannot align: no BOOT line.** The recording was made without the
+  board's settings (older firmware or an older copy of this program). It can't
+  be cut; record it again.
+
+- **NO TAKE, Nothing found near the press.** All three readings were exactly 0
+  for the whole 6 seconds, so there was nothing to line a take up on. A working
+  board never does this: check the sensor and its wiring. The 6 seconds are
+  kept in `manual\` anyway.
+
+- **A take was saved, but its plot shows only small wiggles.** However weak the
+  movement, a press saves a take. If the press came more than 3 seconds before
+  or after the bump, or there was no bump, the take is lined up on noise (the
+  card shows a small percentage of the threshold). Delete it in Collected takes.
 
 - **missing samples keeps going up during a log.** The laptop isn't reading
   fast enough, or the cable is poor. Close other programs, use another USB
@@ -1209,6 +1238,20 @@ board sends `L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok` for every sample
 says `log=1`. The panel tells the build from BOOT, or from the first S, L or
 snapshot lines until BOOT arrives.
 
+- *Settings (BOOT and CFG, every build).* BOOT goes out once, right after a
+  reset, usually before Windows gives the port back (a reset re-enumerates
+  native USB), so the GUI often never sees it. Every `CFG_PERIOD_MS` (5 s) the
+  board sends `CFG,<BOOT's fields>`. The parser makes it a `ConfigLine`, not a
+  `BootLine`: it is not a reboot, so it never clears pending EVTs, stops a
+  recording or starts a new run. `RecordController.on_settings()` uses it only
+  while the connection has no BOOT (a reconnect or a new Connect clears it),
+  stored as the BOOT line it repeats (`ConfigLine.as_boot()`), so take headers
+  and the training loader see a BOOT line either way. The strip then says
+  "(settings from CFG)". Record and Start log stay off until the settings are
+  known. `cut_windows.py` gives a run with no BOOT the settings of its first CFG.
+  In the log build EVTs are not sent to the snapshot matcher (no snapshots
+  come), so they no longer log "had no valid snapshot".
+
 - *Reader.* L samples reach the GUI thread in batches every `SAMPLE_BATCH_S`;
   a batch is flushed before any other item, so order is kept. The live view
   gets every `LIVE_DECIMATE`-th sample, as an S line would look.
@@ -1224,12 +1267,14 @@ snapshot lines until BOOT arrives.
   the raw 6 s (`# key=value` header with `src_key=manual:<press_epoch_ms>:<press_n>`,
   `press_n`, `first_n`, `last_n`, `boot`; rows are the L fields as sent). The take
   is then cut from that file by `take_cut.cut_manual_file()`, the cutter's own
-  function, so re-cutting gives the same bytes.
+  function, so re-cutting gives the same bytes. The take always goes in the
+  session folder, whatever its alignment: there is no floor and no `weak/`
+  (owner, 2026-11-23). Only rows with no movement at all give no take.
 - *Takes cut from L rows* (`take_cut.py`) have the snapshot take's header keys
   (`trig_idx` is the aligned sample; `crc16` is what the SNE line would carry)
   plus `source` (manual, evt, marker_only, background), `source_file`,
   `src_key`, `align` (trigger, threshold, miss_frac, peak, random), `align_n`,
-  `n_peak`, `peak_frac`, `peak_gap` (weak only), `label_from`, and
+  `n_peak`, `peak_frac`, `peak_gap` (align=peak only), `label_from`, and
   `pc_time_est` instead of `pc_received`. Rows are copied as printed, never
   re-formatted. A take holds no cut time or cutter commit.
 

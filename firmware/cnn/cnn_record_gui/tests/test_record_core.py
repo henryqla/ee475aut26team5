@@ -1,12 +1,15 @@
 """
 File:        test_record_core.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.1.1
+Change:      0.1.1: settings from a CFG line: used only while no BOOT is
+             known, clear nothing, and go into takes as a BOOT line; a new
+             connection forgets the old BOOT.
 Description: Unit tests for record_core.py: Arm saves one snapshot, keep armed
              saves all, disarmed snapshots are not saved, EVT pairing in
-             either order, the 5 s timeout, BOOT / reconnect clearing, and
-             quick labels before and after a take is written.
+             either order, the 5 s timeout, BOOT / reconnect clearing, CFG
+             settings, and quick labels before and after a take is written.
 """
 
 # ============================================================================
@@ -56,6 +59,14 @@ def evt(seq, cls="POTHOLE"):
     @return An EventLine with this seq.
     """
     return parse([helpers.evt_line(seq=seq, cls=cls)])[0]
+
+
+def cfg_boot(fields):
+    """
+    @param fields  A CFG line's text after "CFG,".
+    @return The BOOT line that CFG repeats (ConfigLine.as_boot()).
+    """
+    return parse(["CFG," + fields])[0].as_boot()
 
 # ============================================================================
 # Tests
@@ -148,6 +159,31 @@ class TestRecordController(unittest.TestCase):
         self.c.on_reconnect()
         self.assertEqual(len(self.saved), 1)
         self.assertIn("USB reconnected", load_take(self.saved[0])[0]["evt"])
+        self.assertIsNone(self.c.boot)
+
+    def test_cfg_settings_are_not_a_reboot(self):
+        self.c.keep_armed = True
+        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)          # Waiting for its EVT
+        self.assertTrue(self.c.on_settings(cfg_boot("fw=y")))
+        self.assertEqual(self.saved, [])                    # Nothing cleared
+        self.c.on_event(evt(0), 0.1)                        # Still pairs
+        self.assertEqual(len(self.saved), 1)
+        self.assertEqual(self.c.counters.saved_without_evt, 0)
+        self.c.on_snapshot(snap(1), W0 + 1.0, 1.0)
+        self.c.on_event(evt(1), 1.1)
+        self.assertEqual(load_take(self.saved[1])[0]["boot"], "BOOT,fw=y")   # Kept as BOOT
+
+    def test_cfg_used_only_without_boot(self):
+        boot = BootLine({"fw": "x"}, "BOOT,fw=x")
+        self.c.on_boot(boot)
+        self.assertFalse(self.c.on_settings(cfg_boot("fw=y")))
+        self.assertIs(self.c.boot, boot)
+        self.c.on_reconnect()                               # The new BOOT may be lost
+        self.assertTrue(self.c.on_settings(cfg_boot("fw=y")))
+        self.assertEqual(self.c.boot.raw, "BOOT,fw=y")
+        self.c.on_boot(boot)                                # A real reboot wins
+        self.assertIs(self.c.boot, boot)
+        self.c.on_new_connection()
         self.assertIsNone(self.c.boot)
 
     def test_quick_label_before_save(self):

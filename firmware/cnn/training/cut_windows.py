@@ -1,8 +1,17 @@
 """
 File:        cut_windows.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.2.0
+Change:      0.2.0 (owner, 2026-11-23; changes L6/M2): nothing is written to
+             weak/ any more and there is no floor. A marker_only or manual
+             take that reaches no level is peak-aligned into the session
+             folder like any other, however weak (take_cut.py 0.2.0). Takes
+             already in weak/ still count as cut.
+             0.1.1: a run with no BOOT line (missed at a reset, or a log with
+             no BOOT in its header) takes its settings from the first CFG line
+             in it: the board repeats BOOT's settings as CFG every
+             CFG_PERIOD_MS. A CFG never starts a run.
 Description: Cuts standard takes (624 rows: 104 before and 520 from the
              aligned sample) out of a session's drive logs and manual
              recordings (drive-log-manual-record-handoff.md v0.2, request 6;
@@ -22,15 +31,17 @@ Description: Cuts standard takes (624 rows: 104 before and 520 from the
                 yet: cut by take_cut.cut_manual_file(). Manual Record already
                 cut most of them; their src_key matches, so they are skipped.
              2. From each drive log (<session>/drives/*.log, split into runs
-                at each BOOT line or where n goes backwards), one take per
+                at each BOOT line or where n goes backwards; a run without a
+                BOOT uses its first CFG line's settings), one take per
                 EVT, at n_trig, exactly where the firmware's snapshot would
                 be. Its label is the last MARK within MARK_MATCH_S after the
                 trigger, or UNLABELED. An EVT inside a manual recording that
                 has a take is skipped as covered by it (owner, 2026-11-22).
              3. One take per MARK with no EVT (marker_only): aligned at
-                MISS_FRAC in the MARK_MATCH_S before the mark, else a weak,
-                peak-aligned take in weak/, else listed for review. Marks
-                inside a manual recording with a take are skipped as covered.
+                MISS_FRAC in the MARK_MATCH_S before the mark, else on the
+                biggest peak there, however small (listed for review only if
+                nothing moved at all). Marks inside a manual recording with a
+                take are skipped as covered.
              4. Background windows (background/NONE-<n>.csv): N per log,
                 picked with the seed, at least BACKGROUND_CLEAR_S from any
                 trigger or mark, with no jump in n and every row ok=1. Picked
@@ -39,8 +50,9 @@ Description: Cuts standard takes (624 rows: 104 before and 520 from the
 
              Rules: a window with a jump in n, a time gap, an ok=0 row or too
              few rows is skipped with its reason, never padded. A window
-             whose src_key already exists (in the session folder, weak/,
-             background/ or their _deleted/ folders) is skipped, so running
+             whose src_key already exists (in the session folder, weak/ from
+             older versions, background/ or their _deleted/ folders) is
+             skipped, so running
              twice adds nothing. A take whose settings differ from the
              session's takes is refused and listed. Logs and raw recordings
              are only read, never changed. The script prints a summary and
@@ -73,7 +85,8 @@ for _p in (HERE, CNN_DIR, CNN_DIR / "cnn_record_gui"):  # This folder, cnn_confi
 
 import cnn_config as cfg  # noqa: E402  (needs the path above)
 import take_cut as tc  # noqa: E402
-from snapshot_protocol import EventLine, parse_l_fields, parse_other_line  # noqa: E402
+from snapshot_protocol import (ConfigLine, EventLine, parse_l_fields,  # noqa: E402
+                               parse_other_line)
 from take_store import (TakeStore, checkout_commit, header_text, iso_time,  # noqa: E402
                         read_header)
 
@@ -105,7 +118,8 @@ class Mark:
 class Run:
     """The part of a drive log between two resets: n only grows within it."""
     number: int                                   # 1, 2, ... in the log
-    boot_raw: str = ""                            # Its BOOT line ("" if not seen)
+    boot_raw: str = ""                            # Its BOOT line, or the one its first CFG
+                                                  # repeats ("" if neither was seen)
     rows: list = field(default_factory=list)      # LogSample, in order
     ns: list = field(default_factory=list)        # rows[k].n, for searching
     evts: list = field(default_factory=list)      # EventLine
@@ -159,7 +173,9 @@ def read_drive_log(path: Path) -> DriveLogData:
     """
     Parses a drive log. The first run takes the header's BOOT line (the log
     usually starts after BOOT went by); every BOOT line in the log starts a
-    run, and so does n going backwards (a reset whose BOOT was lost).
+    run, and so does n going backwards (a reset whose BOOT was lost). A run
+    with no BOOT takes the settings of its first CFG line (BOOT's settings,
+    repeated by the board); a CFG never starts a run, except before any.
     @param path  The log file.
     @return Its contents.
     @raise OSError if it cannot be read.
@@ -206,6 +222,14 @@ def read_drive_log(path: Path) -> DriveLogData:
                 cur.ns.append(s.n)
             elif tag == "BOOT":
                 cur = new_run(line)
+            elif tag == "CFG":
+                item = parse_other_line(line)
+                if isinstance(item, ConfigLine):
+                    boot = item.as_boot().raw
+                    if cur is None:
+                        cur = new_run(boot)     # Settings before any sample: the first run
+                    elif not cur.boot_raw:
+                        cur.boot_raw = boot     # This run's BOOT was missed
             elif tag == "EVT":
                 item = parse_other_line(line)
                 if isinstance(item, EventLine) and cur is not None:
@@ -411,7 +435,7 @@ class Cutter:
 
         # 3. Marks with no EVT (the gap now includes this run's EVT takes).
         gap, used = tc.typical_peak_gap(self.dir)
-        rep.notes.append("Typical crossing-to-peak gap for weak takes: %d samples (from %d "
+        rep.notes.append("Typical crossing-to-peak gap for peak-aligned takes: %d samples (from %d "
                          "event take(s); 0 below %d)" % (gap, used, cfg.PEAK_GAP_MIN_TAKES))
         for log in logs:
             for run in log.runs:
@@ -443,7 +467,7 @@ class Cutter:
             else:
                 self.report.skipped.append((what, result.message))
             return
-        self._write(what, result.label, result.text, result.header, result.subdir,
+        self._write(what, result.label, result.text, result.header, "",
                     result.src_key, "manual", result.alignment.kind)
 
     def _covered_spans(self, manual: list) -> dict:
@@ -613,8 +637,8 @@ class Cutter:
                 evt_missing="no EVT: the threshold did not fire", gap=al.gap, extra=extra)
             text = header_text(pairs) + tc.take_rows_text(run.rows, al.index - cfg.TAKE_N_PRE,
                                                           al.index + cfg.TAKE_N_POST)
-            subdir = cfg.WEAK_DIR_NAME if al.kind == tc.ALIGN_PEAK else ""
-            self._write(what, m.label, text, dict((k, str(v)) for k, v in pairs), subdir, key,
+            # Session folder however weak (owner, 2026-11-23: no weak/).
+            self._write(what, m.label, text, dict((k, str(v)) for k, v in pairs), "", key,
                         "marker_only", al.kind)
 
     def _cut_background(self, log: DriveLogData) -> None:

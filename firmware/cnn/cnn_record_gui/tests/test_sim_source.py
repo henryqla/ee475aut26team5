@@ -1,9 +1,10 @@
 """
 File:        test_sim_source.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0: the log build (request 5): L lines every sample, ok=0
+Date:        2026-11-23
+Version:     0.2.1
+Change:      0.2.1: the CFG line repeats the BOOT fields every CFG_PERIOD_S.
+             0.2.0: the log build (request 5): L lines every sample, ok=0
              during settle, EVT n_trig at the crossing, the missing-sample
              count equal to the injected jumps (DRV-1), and the test mode's
              snapshot equal to the L lines' model channels as text.
@@ -26,8 +27,8 @@ import cnn_config as cfg
 from drive_log import StreamStats
 from record_core import RecordController
 from sim_source import SimDevice, SimDisconnect
-from snapshot_protocol import (BootLine, EventLine, HealthLine, LogSample, Rejected,
-                               SampleLine, Snapshot, SnapshotAssembler)
+from snapshot_protocol import (BootLine, ConfigLine, EventLine, HealthLine, LogSample,
+                               Rejected, SampleLine, Snapshot, SnapshotAssembler)
 from take_store import TakeStore, load_take
 
 # ============================================================================
@@ -201,6 +202,20 @@ class TestSimLogBuild(unittest.TestCase):
             self.assertTrue(all(abs(by_n[n].model[0]) < 0.5 for n in range(n_trig - 104,
                                                                           n_trig)))
         self.assertEqual((stats.missing, stats.runs), (0, 1))
+
+    def test_cfg_repeats_boot(self):
+        _dev, items, _stats = self.run_log(8, reset_every=0, disconnect_every=0, gap_every=0)
+        boots = [x for x in items if isinstance(x, BootLine)]
+        cfgs = [x for x in items if isinstance(x, ConfigLine)]
+        self.assertEqual(len(boots), 1)
+        self.assertEqual(boots[0].settings["cfg_ms"], "%d" % (cfg.CFG_PERIOD_S * 1000))
+        # ~27 s of device time (settle, 8 events and the next quiet stretch).
+        self.assertGreaterEqual(len(cfgs), 4)
+        self.assertTrue(all(c.as_boot().raw == boots[0].raw for c in cfgs))
+        # The first one comes CFG_PERIOD_S after BOOT: after that many L lines.
+        first = items.index(cfgs[0])
+        self.assertEqual(len([x for x in items[:first] if isinstance(x, LogSample)]),
+                         int(round(cfg.CFG_PERIOD_S * cfg.SIM_RATE_HZ)))
 
     def test_missing_count_equals_injected_gaps(self):
         # DRV-1: the count the status line shows equals the injected jumps.

@@ -14,6 +14,11 @@ Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5,
              a window cut from the L lines equals the snapshot (CUT-1). Every
              event's shape now crosses the threshold at the trigger row
              (false triggers too), as a real trigger does.
+             Bench mapping (2026-11-23): chip Y points forward, so S and L
+             lines carry pitch in gx and roll in gy, and a pothole's first
+             pitch lobe is negative (PITCH_NOSE_DOWN_SIGN -1). CFG line
+             (2026-11-23): every CFG_PERIOD_S the BOOT fields go out again as
+             a CFG line, and BOOT gains cfg_ms, as the firmware now does.
 Adapted from: the simulated-data option (generate_random_data) of
              Python/real_time_graph.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
@@ -64,6 +69,11 @@ FAULT_KINDS = ("missing_row", "bad_crc", "wrong_length", "missing_sne", "device_
 # Gyro bias in the S lines (chip X, Y, Z, dps). The firmware removes the bias
 # only from what the trigger and the snapshots see, not from S lines.
 _SIM_GYRO_BIAS = (0.4, -0.3, 0.2)
+
+# firmware-bench's PITCH_NOSE_DOWN_SIGN (config.h). Bench mapping: chip Y
+# points forward, so pitch is chip gx (roll is chip gy) and nose down is a
+# negative pitch rate: a pothole's first pitch lobe is negative.
+_SIM_NOSE_DOWN_SIGN = -1.0
 
 # ============================================================================
 # Classes
@@ -124,6 +134,8 @@ class SimDevice:
         self._t = 0.0           # Device time since boot, s
         self._n = 0             # Device sample count since boot
         self._next_hlt_t = 1.0  # Device time of the next HLT, s
+        self._next_cfg_t = cfg.CFG_PERIOD_S  # Device time of the next CFG, s
+        self._cfg_line = ""     # The CFG line: this boot's BOOT fields under the tag CFG
         self._pending = 0.0     # Device time not yet given out as a delay, s
         self._seq = 0
         self._snap_drops = 0
@@ -170,37 +182,40 @@ class SimDevice:
         """
         A (re)boot: BOOT and the column headers; seq and the clock restart.
         The log build then sends SIM_SETTLE_S of ok=0 samples (gyro bias not
-        ready yet).
+        ready yet). Every CFG_PERIOD_S of device time after this, _samples()
+        repeats the BOOT fields as a CFG line.
         @return (delay, line) pairs.
         """
         self._t = 0.0
         self._n = 0
         self._next_hlt_t = 1.0
+        self._next_cfg_t = cfg.CFG_PERIOD_S
         self._seq = 0
         self._snap_drops = 0
         self._drop = 0
         common = ("BOOT,fw=%s,odr=416,acc_fs=16,gyr_fs=500,thr_z=1.000,thr_roll=60.0,"
                   "thr_pitch=60.0,lockout_ms=1250,rearm_frac=0.50,rearm_hold_ms=200,"
-                  "hpf_hz=0.50,print_every=%d,settle_ms=2000,ble=RoadQuality"
-                  % (cfg.SIM_FW, cfg.SIM_PRINT_EVERY))
+                  "hpf_hz=0.50,print_every=%d,settle_ms=2000,cfg_ms=%d,ble=RoadQuality"
+                  % (cfg.SIM_FW, cfg.SIM_PRINT_EVERY, int(round(cfg.CFG_PERIOD_S * 1000))))
         evt_header = ("#EVT,seq,n_peak,t_us_peak,class,peak_z_g,peak_roll_dps,"
                       "peak_pitch_dps,t_ms,synced,pitch_seq,basis,n_trig")
         hlt_header = ("#HLT,t_ms,samples,sample_q_drops,out_q_drops,drdy_timeouts,"
                       "ble_q_drops,ble_sent,ble_fails,serial_drops,imu_recoveries")
         if self._log:
-            yield 0.0, common + (",rec=0,log=1,l_rate=%d,l_dec=4,log_tx_buf=32768,"
-                                 "log_out_q=256,log_perf_ms=10000" % cfg.SIM_RATE_HZ)
+            boot = common + (",rec=0,log=1,l_rate=%d,l_dec=4,log_tx_buf=32768,"
+                             "log_out_q=256,log_perf_ms=10000" % cfg.SIM_RATE_HZ)
             headers = ("#L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok",
                        "#LPERF,t_ms,lines,avg_us,max_us,heap_min", evt_header, hlt_header)
         else:
-            yield 0.0, common + (",rec=1,snap_rate=%d,snap_pre=%d,snap_post=%d,snap_rows=%d,"
-                                 "snap_ch=%s" % (cfg.SIM_RATE_HZ, cfg.SIM_N_PRE, cfg.SIM_N_POST,
-                                                 cfg.SIM_N_PRE + cfg.SIM_N_POST,
-                                                 cfg.SIM_CHANNELS))
+            boot = common + (",rec=1,snap_rate=%d,snap_pre=%d,snap_post=%d,snap_rows=%d,"
+                             "snap_ch=%s" % (cfg.SIM_RATE_HZ, cfg.SIM_N_PRE, cfg.SIM_N_POST,
+                                             cfg.SIM_N_PRE + cfg.SIM_N_POST, cfg.SIM_CHANNELS))
             headers = ("#S,n,t_us,ax,ay,az,gx,gy,gz,z_hp", evt_header,
                        hlt_header + ",snap_drops",
                        "#SNB,seq,trig_idx,rate_hz,n_pre,n_post,n_rows,channels,fw",
                        "#SNR,i,c0,c1,c2", "#SNE,seq,n_rows,crc16")
+        self._cfg_line = "CFG" + boot[len("BOOT"):]
+        yield 0.0, boot
         for header in headers:
             yield 0.0, header
         if self._log and self._settle_n:
@@ -221,16 +236,17 @@ class SimDevice:
         with gravity on az and the gyro bias in, then the model channels
         (bias removed), then ok.
         @param z      z_hp, g.
-        @param roll   Roll rate, dps (bench mapping: chip X gyro).
-        @param pitch  Pitch rate, dps (bench mapping: chip Y gyro).
+        @param roll   Roll rate, dps (bench mapping: chip Y gyro).
+        @param pitch  Pitch rate, dps (bench mapping: chip X gyro).
         @param ok     Gyro bias ready.
         @return The line.
         """
         nz = self._noise
         bx, by, bz = _SIM_GYRO_BIAS
+        # Raw columns in chip order: gx = pitch, gy = roll.
         return "L,%d,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%d" % (
             self._n, int(round(self._t * 1e6)), nz.gauss(0.0, 0.01), nz.gauss(0.0, 0.01),
-            1.0 + z, roll + bx, pitch + by, nz.gauss(0.0, 1.0) + bz, z, roll, pitch,
+            1.0 + z, pitch + bx, roll + by, nz.gauss(0.0, 1.0) + bz, z, roll, pitch,
             1 if ok else 0)
 
     def _noise_rows(self, count: int) -> list:
@@ -247,7 +263,9 @@ class SimDevice:
         Runs device time forward one sample per row, as the firmware does: an
         S line every SIM_PRINT_EVERY-th sample (record build) or an L line
         every sample (log build; skipped while an injected jump is being
-        dropped), and an HLT each time device time passes a whole second.
+        dropped), an HLT each time device time passes a whole second, and a
+        CFG every CFG_PERIOD_S. Never inside a snapshot: those go out after
+        the samples, as the firmware sends them between items.
         @param rows  (z_hp, roll, pitch) per sample: noise, or an event's shape.
         @param ok    The L lines' ok field (False during settle).
         @return (delay, line) pairs; each delay is the device time since the
@@ -270,15 +288,19 @@ class SimDevice:
                     self._pending = 0.0
             elif self._n % cfg.SIM_PRINT_EVERY == 0:
                 # Chip axes, as serial_out.cpp prints them: gravity on az, the
-                # gyro with its bias, then z_hp.
+                # gyro with its bias (gx = pitch, gy = roll), then z_hp.
                 yield self._pending, ("S,%d,%d,%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.4f" % (
                     self._n, int(round(self._t * 1e6)), nz.gauss(0.0, 0.01),
-                    nz.gauss(0.0, 0.01), 1.0 + z, roll + bx, pitch + by,
+                    nz.gauss(0.0, 0.01), 1.0 + z, pitch + bx, roll + by,
                     nz.gauss(0.0, 1.0) + bz, z))
                 self._pending = 0.0
             if self._t >= self._next_hlt_t:
                 self._next_hlt_t += 1.0
                 yield self._pending, self._hlt()
+                self._pending = 0.0
+            if self._t >= self._next_cfg_t:
+                self._next_cfg_t += cfg.CFG_PERIOD_S
+                yield self._pending, self._cfg_line
                 self._pending = 0.0
 
     def _rows(self, true_class: str) -> list:
@@ -304,7 +326,9 @@ class SimDevice:
                     z += amp * math.exp(-t / 0.03) * math.sin(2 * math.pi * 30 * t)
                 else:
                     z += -sign * amp * ring * math.sin(2 * math.pi * 4 * t)
-                    pitch += sign * 120 * ring * math.sin(2 * math.pi * 3 * t)
+                    # sign is +1 for nose down first; the firmware's sign turns
+                    # it into a pitch rate.
+                    pitch += _SIM_NOSE_DOWN_SIGN * sign * 120 * ring * math.sin(2 * math.pi * 3 * t)
                     roll += 25 * ring * math.sin(2 * math.pi * 5 * t)
                 if t < 0.003:
                     # Cross the threshold at the trigger row, as a real trigger does.
