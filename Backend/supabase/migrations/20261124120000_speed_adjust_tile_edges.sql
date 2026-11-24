@@ -11,10 +11,12 @@
 --      rebuilt at the end of this migration, from the raw segments, so nothing is lost.
 --    - roads.fallback_cells (CELL rows): adjusted value x scale_factor, as for ROAD rows.
 -- 2. Tile edges. The app loads the map as tiles that share edges. Before, a row near an edge
---    came back from both tiles (ROAD lines crossing it, CELL cells split by it, and events
---    merged differently on each side), so it was drawn twice and sent twice. Now the box is
---    half-open (south <= lat < north, west <= lon < east) and each row comes back only from the
---    tile holding its point:
+--    came back from both tiles: a ROAD line crossing it was sent twice (the app kept one by
+--    piece_id); a CELL cut by it came back from each side under the same piece_id but with
+--    only that side's drives (the app kept whichever loaded first); events merged differently
+--    on each side, so one pothole showed as two pins with the hits split between them. Now the
+--    box is half-open (south <= lat < north, west <= lon < east) and each row comes back only
+--    from the tile holding its point:
 --      ROAD   the middle of its line (the lat / lon it returns)
 --      CELL   the centre of its grid cell (fixed to the globe, so the same for every tile);
 --             the cell is computed from all its pieces, also those over the edge

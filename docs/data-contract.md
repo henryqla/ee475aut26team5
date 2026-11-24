@@ -443,10 +443,11 @@ of its grid cell, a merged event its merged position. So when the app loads the 
 that share edges, every row comes back from exactly one tile, even when its line or its merged
 hits cross the edge, and the whole row comes back (lines are not cut at the edge; events near
 the edge are merged with hits just over it, up to ~200 m away). For this to work, neighbouring
-tiles must send the **exact same number** for their shared edge (e.g. both computed as
-`k × tile size`, not one of them by adding to the other). A line whose middle is in a tile that
-isn't loaded isn't drawn, even if part of it is on screen; loading one tile past the screen edge
-avoids that. ROAD lines are at most `piece_m` long (CELL lines about the cell size).
+tiles must send the **exact same number** for their shared edge. The app's web-map tiles
+(`RoadQualityTiles.kt`) already do: each edge comes from the same integer tile index through the
+same formula on both sides. A line whose middle is in a tile that isn't loaded isn't drawn, even
+if part of it is on screen; the app's ring of tiles around the screen covers that. ROAD lines are
+at most `piece_m` long (CELL lines about the cell size).
 - `events_in_area(...)`: events merged into one when they are within **10 m** of each other, have
   the same class, and headings within ~45° (so potholes on opposite sides of a road stay
   separate). The class is `user_label` if set (except `UNKNOWN`, see General rules), otherwise
@@ -465,8 +466,8 @@ avoids that. ROAD lines are at most `piece_m` long (CELL lines about the cell si
   The map shows "hit by `hits` of `passes` drives". This is a different shape from `RoadEvent`,
   so the app will need a small model for it.
 
-- `road_quality_snapped(...)`: road quality for the Road quality view (`piece_m` 15 / 60 / 240
-  by zoom; line width and side offset from `lanes_dir`, as in §8). It replaced the old grid-cell
+- `road_quality_snapped(...)`: road quality for the Road quality view (`piece_m` 15 / 60 / 240 /
+  960 / 3000 by zoom; line width and side offset from `lanes_dir`, as in §8). It replaced the old grid-cell
   function `road_quality_in_area`, removed Nov 2026. Drives are snapped to
   OpenStreetMap roads on the server (Valhalla
   map matching, run on the laptop once a trip has its `end_time`), so lines lie on the road and
