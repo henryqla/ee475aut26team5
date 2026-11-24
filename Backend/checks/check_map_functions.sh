@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # check_map_functions.sh - does events_in_area (contract §7) return what the contract says,
-# including the since_ms / until_ms time filter? Uploads four FAKE_DEVICE test drives in the
-# middle of the Pacific (so no real data is nearby), calls the function as the web map would
+# including the since_ms / until_ms time filter and tile edges? Uploads four FAKE_DEVICE test
+# drives in the middle of the Pacific (so no real data is nearby), calls the function as the web map would
 # (not signed in), then deletes the drives and the test user with the secret key. Also checks
 # that the old road_quality_in_area is gone. Prints PASS/FAIL only; never prints a key.
 # road_quality_snapped is checked by check_snapped_map.sh (it needs the road matcher).
@@ -109,7 +109,22 @@ expect "vehicle_id filter: camry still sees all 3" 'len(rows) == 3'
 req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"vehicle_id\":\"truck\"}"
 expect "vehicle_id filter: truck sees none" 'rows == []'
 
-echo "${BOLD}3. Time filter (since_ms / until_ms, by trip start_time)${RESET}"
+echo "${BOLD}3. Tiles: each merged event from exactly one tile${RESET}"
+# Cut the box 26 m north of the start: A's hit (25 m) is south of the edge, B's (29 m) north of
+# it, their merged position (27 m) north. C's (25 m, southbound) south; D's (40 m) north.
+EDGE=$(awk "BEGIN{printf \"%.7f\", 10 + 26 / 111195}")
+req POST /rest/v1/rpc/events_in_area "" "{\"south\":9.999,\"west\":-150.001,\"north\":$EDGE,\"east\":-149.999,\"include_fake\":true}"
+expect "south tile: only C's southbound pothole (A's hit is merged into the north tile's spot)" \
+    'len(rows) == 1 and dir(rows[0]["heading_deg"], 180)'
+req POST /rest/v1/rpc/events_in_area "" "{\"south\":$EDGE,\"west\":-150.001,\"north\":10.001,\"east\":-149.999,\"include_fake\":true}"
+expect "north tile: the north pothole with A's hit from over the edge (2 hits of 3 passes), and the speed bump" \
+    'len(rows) == 2 and any(r["event_class"] == "POTHOLE" and r["hits"] == 2 and r["passes"] == 3 for r in rows) and any(r["event_class"] == "SPEED_BUMP" for r in rows)'
+req POST /rest/v1/rpc/events_in_area "" "{\"south\":9.999,\"west\":-150.001,\"north\":10.001,\"east\":-150.0,\"include_fake\":true}"
+expect "the box is half-open: events at lon -150.0 are not in a tile with east = -150.0" 'rows == []'
+req POST /rest/v1/rpc/events_in_area "" "{\"south\":9.999,\"west\":-150.0,\"north\":10.001,\"east\":-149.999,\"include_fake\":true}"
+expect "... but are in the tile with west = -150.0 (all 3 spots)" 'len(rows) == 3'
+
+echo "${BOLD}4. Time filter (since_ms / until_ms, by trip start_time)${RESET}"
 req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"since_ms\":$CUT}"
 expect "since an hour ago: D's speed bump is gone (2 spots left)" \
     'len(rows) == 2 and not any(r["event_class"] == "SPEED_BUMP" for r in rows)'
@@ -126,11 +141,11 @@ expect "since a time after every drive: nothing" 'rows == []'
 req POST /rest/v1/rpc/events_in_area "" "{$BOX,\"include_fake\":true,\"since_ms\":null,\"until_ms\":null}"
 expect "since_ms / until_ms sent as null: same as not sent (3 spots)" 'len(rows) == 3'
 
-echo "${BOLD}4. road_quality_in_area is gone${RESET}"
+echo "${BOLD}5. road_quality_in_area is gone${RESET}"
 req POST /rest/v1/rpc/road_quality_in_area "" "{$BOX,\"include_fake\":true}"
 [[ $CODE == 404 ]] && pass "calling it returns 404 (function not found)" || fail "expected 404, got $CODE: ${BODY:0:300}"
 
-echo "${BOLD}5. Cleanup${RESET}"
+echo "${BOLD}6. Cleanup${RESET}"
 code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' -X DELETE "$API/rest/v1/trips?id=in.($A,$B,$C,$D)" -H "apikey: $SECRET")
 [[ $code == 2* ]] && pass "test trips deleted with the secret key" || fail "couldn't delete test trips ($code); delete trips $A $B $C $D in Studio"
 curl -s -m 5 -o /dev/null -X DELETE "$API/auth/v1/admin/users/$USER_ID" -H "apikey: $SECRET"
