@@ -1,9 +1,18 @@
 """
 File:        serial_handler.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.3.0
-Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): only L,
+Date:        2026-11-24
+Version:     0.4.0
+Change:      0.4.0 (training-live-inference-handoff.md, request G): the live
+             inference lines. PROB lines are batched with the L samples and
+             sent as prob_received (a list) right after each sample batch;
+             DET and SELFTEST go out at once (det_received,
+             selftest_received). malformed gives the per-tag counts. Two more
+             simulated-device test controls: PROB lines on/off and malformed
+             lines. The handler is shared by the Record and Live Inference
+             tabs (RecordWidget.handler_started); it still never sends
+             anything to the device.
+             0.3.0 (manual-recording-overhaul-handoff.md, request B): only L,
              BOOT, CFG, HLT and FLT lines come in. Removed: the drive log, PC
              and MARK lines, the snapshot, EVT and S signals, and the
              simulated device's record / log builds (git tag
@@ -53,7 +62,8 @@ from PyQt5.QtCore import QThread, pyqtSignal
 
 import cnn_config as cfg
 from sim_source import SimDevice, SimDisconnect
-from snapshot_protocol import BootLine, ConfigLine, FaultLine, HealthLine, LineParser, LogSample
+from snapshot_protocol import (BootLine, ConfigLine, DetLine, FaultLine, HealthLine, LineParser,
+                               LogSample, ProbLine, SelftestLine)
 
 # ============================================================================
 # Constants
@@ -104,6 +114,9 @@ class SerialHandler(QThread):
     health_received = pyqtSignal(object)            # HealthLine
     fault_received = pyqtSignal(object)             # FaultLine
     samples_received = pyqtSignal(object)           # list of LogSample, batched
+    prob_received = pyqtSignal(object)              # list of ProbLine, after each sample batch
+    det_received = pyqtSignal(object)               # DetLine
+    selftest_received = pyqtSignal(object)          # SelftestLine
     connection_changed = pyqtSignal(bool, str)      # Connected?, message
     reconnected = pyqtSignal()                      # Back after a loss: n may restart
 
@@ -119,6 +132,7 @@ class SerialHandler(QThread):
         self._sim: Optional[SimDevice] = None
         self._sim_cmds: queue.Queue = queue.Queue()   # Test controls from the GUI thread
         self._batch = []                 # LogSamples not yet sent to the GUI
+        self._prob_batch = []            # ProbLines not yet sent to the GUI
         self._batch_t = 0.0              # Monotonic time the last batch was sent
 
     def configure(self, port: Optional[PortInfo], simulated: bool) -> None:
@@ -140,6 +154,11 @@ class SerialHandler(QThread):
         """@return L lines ignored because they did not parse, this connection."""
         return self._parser.malformed_l
 
+    @property
+    def malformed(self) -> dict:
+        """@return Lines ignored because they did not parse, per tag, this connection."""
+        return dict(self._parser.malformed)
+
     def stop(self) -> None:
         """Asks the thread to finish and waits for it (at most ~3 s)."""
         self._running = False
@@ -148,8 +167,8 @@ class SerialHandler(QThread):
     def sim_command(self, *cmd) -> None:
         """
         A simulated-device test control (GUI thread). Ignored for a real port.
-        @param cmd  ("event", shape, delay_s), ("gap",), ("ok0",), ("reset",)
-                    or ("disconnect",).
+        @param cmd  ("event", shape, delay_s), ("gap",), ("ok0",), ("reset",),
+                    ("disconnect",), ("prob", on) or ("malformed",).
         """
         if self._simulated:
             self._sim_cmds.put(tuple(cmd))
@@ -185,10 +204,14 @@ class SerialHandler(QThread):
             time.sleep(min(0.05, left))
 
     def _flush_batch(self) -> None:
-        """Sends the waiting L samples to the GUI thread, if any."""
+        """Sends the waiting L samples, then the waiting PROB lines, to the GUI
+        thread, if any."""
         if self._batch:
             self.samples_received.emit(self._batch)
             self._batch = []
+        if self._prob_batch:
+            self.prob_received.emit(self._prob_batch)
+            self._prob_batch = []
         self._batch_t = time.monotonic()
 
     def _service(self, now: float) -> None:
@@ -197,7 +220,7 @@ class SerialHandler(QThread):
         test controls to the simulated device.
         @param now  Monotonic time.
         """
-        if self._batch and now - self._batch_t >= cfg.SAMPLE_BATCH_S:
+        if (self._batch or self._prob_batch) and now - self._batch_t >= cfg.SAMPLE_BATCH_S:
             self._flush_batch()
         if self._sim is not None:
             while True:
@@ -215,6 +238,10 @@ class SerialHandler(QThread):
                     self._sim.inject_reset()
                 elif cmd[0] == "disconnect":
                     self._sim.inject_disconnect()
+                elif cmd[0] == "prob":
+                    self._sim.set_prob(bool(cmd[1]))
+                elif cmd[0] == "malformed":
+                    self._sim.inject_malformed()
 
     def _on_line(self, raw: bytes) -> None:
         """
@@ -226,6 +253,9 @@ class SerialHandler(QThread):
         if isinstance(item, LogSample):
             self._batch.append(item)
             return
+        if isinstance(item, ProbLine):
+            self._prob_batch.append(item)
+            return
         self._flush_batch()             # Everything before this item goes first
         if isinstance(item, BootLine):
             self.boot_received.emit(item)
@@ -235,6 +265,10 @@ class SerialHandler(QThread):
             self.health_received.emit(item)
         elif isinstance(item, FaultLine):
             self.fault_received.emit(item)
+        elif isinstance(item, DetLine):
+            self.det_received.emit(item)
+        elif isinstance(item, SelftestLine):
+            self.selftest_received.emit(item)
 
     def _open(self) -> Optional[serial.Serial]:
         """

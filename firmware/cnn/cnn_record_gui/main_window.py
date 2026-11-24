@@ -1,9 +1,15 @@
 """
 File:        main_window.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.4.0
-Change:      0.4.0 (manual-recording-overhaul-handoff.md, request B): manual
+Date:        2026-11-24
+Version:     0.5.0
+Change:      0.5.0 (training-live-inference-handoff.md, request G): a second
+             tab, Live Inference (live_inference_widget.py), beside Record.
+             Both share the Record panel's connection (handler_started). The
+             record keys work only on the Record tab (P7), and the one serial
+             monitor moves under the open tab's plot when the tab changes.
+             The Record tab's layout and behavior are unchanged.
+             0.4.0 (manual-recording-overhaul-handoff.md, request B): manual
              clips. A top bar across the Record tab shows the session's clip
              counts per label and the long NONE minutes. The Last snapshot and
              Selected take plots become one clip plot with an info panel of
@@ -20,11 +26,12 @@ Adapted from: Python/main_window.py in ml-on-device-playground,
              LICENSE-ml-on-device-playground.txt in this folder. Kept: the
              window, the Playground tab's layout (controls and clips in a
              left column, a big live plot top right, the clip plot below it)
-             and its spacing. Changed: one tab, Record; the Codegen and Live
-             Inference tabs and the inference widget are removed; a live IMU
+             and its spacing, and a Live Inference tab (rebuilt in
+             live_inference_widget.py). Changed: no Codegen tab; a live IMU
              view, a status card, a clip info panel, a top bar and a serial
              monitor are added, and the parts can be resized with splitters.
-Description: Main window of the CNN record GUI. Record tab: the top bar, then
+Description: Main window of the CNN record GUI. Two tabs: Record and Live
+             Inference (what the board's model calls now). Record tab: the top bar, then
              on the left the Record panel, the Last clip card and Collected
              clips, the full window height (the column scrolls if the window
              is too short); on the right, Live IMU on top, the clip plot and
@@ -45,6 +52,7 @@ from PyQt5.QtWidgets import (QFrame, QLabel, QMainWindow, QScrollArea, QSplitter
 import cnn_config as cfg
 from app_styles import AppStyles, set_role
 from collected_data_widget import CollectedDataWidget
+from live_inference_widget import LiveInferenceWidget
 from live_plot import LivePlot
 from record_widget import RecordWidget
 from serial_monitor import SerialMonitor
@@ -73,7 +81,7 @@ class MainWindow(QMainWindow):
         @param gui_commit  Commit of this checkout, written into every clip.
         """
         super().__init__()
-        self.setWindowTitle("CNN Record (firmware-bench, manual clips)")
+        self.setWindowTitle("CNN Record and Live Inference (firmware-bench)")
         self.resize(AppStyles.WINDOW_START_WIDTH, AppStyles.WINDOW_START_HEIGHT)
 
         tabs = QTabWidget()
@@ -149,6 +157,12 @@ class MainWindow(QMainWindow):
         outer.addWidget(columns, 1)
         tabs.addTab(record_tab, "Record")
 
+        # ---- Live Inference tab (request G): reads the same connection.
+        self.live_tab = LiveInferenceWidget()
+        tabs.addTab(self.live_tab, "Live Inference")
+        self.tabs = tabs
+        tabs.currentChanged.connect(self._on_tab_changed)
+
         logging.getLogger().addHandler(self.serial_monitor.handler)
 
         # ---- Wiring
@@ -158,6 +172,7 @@ class MainWindow(QMainWindow):
         self.record_widget.take_deleted.connect(lambda _path: self.collected_widget.refresh())
         self.record_widget.counts_changed.connect(self.top_bar.setText)
         self.collected_widget.take_moved.connect(self.record_widget.take_moved)
+        self.record_widget.handler_started.connect(self.live_tab.attach)
         self.collected_widget.set_session(self.record_widget.ctrl.session)
         self.record_widget.refresh_counts()
 
@@ -185,6 +200,27 @@ class MainWindow(QMainWindow):
         live = int(plots * AppStyles.LIVE_PLOT_SHARE)
         self.right.setSizes([live, plots - live, monitor])
 
+    def _on_tab_changed(self, index: int) -> None:
+        """
+        The record keys work only on the Record tab (P7), and the one serial
+        monitor moves under the open tab's plot.
+        @param index  The tab now open: 0 Record, 1 Live Inference.
+        """
+        on_record = self.tabs.widget(index) is not self.live_tab
+        self.record_widget.set_keys_enabled(on_record)
+        target = self.right if on_record else self.live_tab.right
+        if self.serial_monitor.parent() is not target:
+            sizes = target.sizes()
+            target.addWidget(self.serial_monitor)      # Moves it out of the other tab
+            target.setStretchFactor(target.count() - 1, 0)
+            if not on_record and len(sizes) == 1:
+                monitor = max(AppStyles.MONITOR_MIN_HEIGHT,
+                              min(AppStyles.MONITOR_START_HEIGHT,
+                                  int(sizes[0] * AppStyles.MONITOR_START_SHARE)))
+                target.setSizes([max(0, sizes[0] - monitor), monitor])
+            elif on_record:
+                self._set_start_sizes()
+
     def closeEvent(self, event) -> None:
         """
         Saves open recordings and stops the reader thread before the window
@@ -193,4 +229,5 @@ class MainWindow(QMainWindow):
         """
         self.record_widget.shutdown()
         self.live_plot.shutdown()
+        self.live_tab.shutdown()
         super().closeEvent(event)

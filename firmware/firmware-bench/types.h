@@ -1,9 +1,14 @@
 /*
  * File:        types.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-23
- * Version:     0.1.4-bench
- * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ * Date:        2026-11-24
+ * Version:     0.1.5-bench
+ * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              live inference. New: fault codes F5-F8 (model faults: they
+ *              stop inference only, owner 2026-11-24), OUT_PROB / OUT_DET and
+ *              their payloads, four inference counters in HLT and heartbeats,
+ *              TASK_INFERENCE.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
  *              no detection and no snapshots. Removed: evt_t and its class and
  *              basis enums, snap_row_t, snap_t, OUT_S / OUT_EVT / OUT_SNAP and
  *              the S payload, BLE_EVT, snap_drops (heartbeats and HLT) and
@@ -46,13 +51,21 @@ typedef struct {
 
 // Fault codes. F1 and F2 are recoverable: imu_acq retries the IMU and the
 // supervisor reports FLT until it is back. F3 and F4 lead to the one latched
-// safe state until reset.
+// safe state until reset. F5 to F8 are model faults: inference stops until
+// reset, while sampling, the L stream and BLE go on, and the supervisor adds
+// an FLT line after each HLT (owner, 2026-11-24). Never the safe state.
 typedef enum : uint8_t {
   FAULT_NONE      = 0,
   FAULT_IMU_INIT  = 1,  // F1: begin or WHO_AM_I failed at boot (recoverable)
   FAULT_IMU_LOST  = 2,  // F2: WHO_AM_I mismatch at runtime, or no data for IMU_STALL_MS (recoverable)
   FAULT_HEARTBEAT = 3,  // F3: a task missed heartbeats for HEARTBEAT_TIMEOUT_MS
   FAULT_BLE_INIT  = 4,  // F4: BLE stack, service, or advertising failed to start
+  FAULT_MODEL_SCHEMA = 5,  // F5: model_data.h does not fit: TFLite schema version, an op
+                           // the resolver lacks, the class names, or the input/output shape
+  FAULT_ARENA     = 6,  // F6: AllocateTensors failed (TENSOR_ARENA_BYTES too small)
+  FAULT_INVOKE    = 7,  // F7: Invoke() returned an error (boot self-test or live)
+  FAULT_SELFTEST  = 8,  // F8: boot self-test outputs differ from model_data.h's by more
+                        // than SELFTEST_TOL
 } fault_code_t;
 
 // One 1 s segment summary (contract section 4.1). Times are phone epoch ms
@@ -92,7 +105,13 @@ typedef enum : uint8_t {
   OUT_HLT,              // Health line, once per second
   OUT_FLT,              // Fault line, once per second in the safe state
   OUT_BLE,              // BLE link line, on each link change
+  OUT_PROB,             // Inference result, about 2 per second (request F)
+  OUT_DET,              // Detection (request F)
 } out_tag_t;
+
+// Classes in a PROB line: POTHOLE, SPEED_BUMP, NONE (O4). inference.cpp checks
+// that model_data.h has exactly this many.
+#define OUT_PROB_CLASSES  3
 
 // Payload of an L line: one sample in raw chip axes, plus the model channels
 // after the HPF and gyro bias removal, exactly as the CNN will see them.
@@ -104,6 +123,20 @@ typedef struct {
   bool         ok;      // Gyro bias ready: false during the settle time and after an
                         // IMU recovery
 } out_l_t;
+
+// Payload of a PROB line: one inference.
+typedef struct {
+  uint32_t n;                         // Newest sample (L line n) in the window
+  float    p[OUT_PROB_CLASSES];       // Probabilities in model_data.h class order
+  uint32_t lat_us;                    // Time Invoke() took, us
+} out_prob_t;
+
+// Payload of a DET line: a detection by the board's rule (O1).
+typedef struct {
+  uint32_t n;                         // Newest sample in the window that fired
+  uint8_t  cls;                       // Class index (never NONE)
+  float    conf;                      // Its probability
+} out_det_t;
 
 // Payload of an HLT line.
 typedef struct {
@@ -117,6 +150,11 @@ typedef struct {
   uint32_t ble_fails;       // Notifications that failed or were too long
   uint32_t serial_drops;    // Lines serial_out dropped: USB TX buffer full (no host reading)
   uint32_t imu_recoveries;  // Times the IMU came back after F1/F2
+  uint32_t inferences;      // Invoke() calls on live windows since boot
+  uint32_t inf_skips;       // Hops skipped: the last inference still running, or its
+                            // window overwritten before it was copied
+  uint32_t lat_last_us;     // Last Invoke() time, us
+  uint32_t lat_max_us;      // Longest Invoke() time since boot, us
 } out_hlt_t;
 
 // Payload of an FLT line.
@@ -133,6 +171,8 @@ typedef struct {
     out_hlt_t hlt;
     out_flt_t flt;
     link_t    link;
+    out_prob_t prob;
+    out_det_t  det;
   };
 } out_msg_t;
 
@@ -166,6 +206,7 @@ typedef enum : uint8_t {
   TASK_DSP,
   TASK_SERIAL_OUT,
   TASK_BLE_LINK,
+  TASK_INFERENCE,
   TASK_COUNT,
 } task_id_t;
 
@@ -182,16 +223,21 @@ typedef enum : uint8_t {
 typedef struct {
   sys_kind_t   kind;
   task_id_t    task;            // Sender
-  fault_code_t fault;           // SYS_FAULT and SYS_IMU_DOWN only
+  fault_code_t fault;           // SYS_FAULT and SYS_IMU_DOWN; in inference heartbeats, its
+                                // model fault (FAULT_NONE while it runs)
   uint32_t     samples;         // imu_acq
   uint32_t     drdy_timeouts;   // imu_acq
   uint32_t     sample_q_drops;  // imu_acq
   uint32_t     imu_recoveries;  // imu_acq
-  uint32_t     out_q_drops;     // dsp, ble_link
+  uint32_t     out_q_drops;     // dsp, ble_link, inference
   uint32_t     ble_q_drops;     // dsp
   uint32_t     ble_sent;        // ble_link
   uint32_t     ble_fails;       // ble_link
   uint32_t     serial_drops;    // serial_out
+  uint32_t     inferences;      // inference
+  uint32_t     inf_skips;       // inference
+  uint32_t     lat_last_us;     // inference
+  uint32_t     lat_max_us;      // inference
 } sys_msg_t;
 
 // Queue and task handles, filled once in setup() and read-only afterwards.

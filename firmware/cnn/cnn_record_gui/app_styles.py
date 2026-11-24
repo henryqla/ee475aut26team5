@@ -1,9 +1,15 @@
 """
 File:        app_styles.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.2.1
-Change:      0.2.1 (manual-recording-overhaul-handoff.md, request B): the
+Date:        2026-11-24
+Version:     0.2.2
+Change:      0.2.2 (training-live-inference-handoff.md, request G): styles
+             for the Live Inference tab's probability bars (Jake's bar: dark
+             trough, rounded chunk), whose chunk color follows the state like
+             the card. New tokens PROB_TROUGH and PROB_BAR_HEIGHT. Tabs are
+             at least 130 px wide, so "Live Inference" fits when it is
+             selected (bold).
+             0.2.1 (manual-recording-overhaul-handoff.md, request B): the
              "record-key" button role (the large P / B / N, L and delete
              buttons) and its font size token; TRIGGER_LINE is now PRESS_LINE
              (the clip plot marks the key press, not a trigger).
@@ -96,6 +102,7 @@ class AppStyles:
     ACCENT_ERROR_FILL = "#2A1215"
 
     # ---- Colors: serial monitor (framework serial log)
+    PROB_TROUGH = "#18181B"       # Framework (probability bar background)
     MONITOR_BG = "#1E222A"
     MONITOR_TEXT = "#D8DEE9"
 
@@ -151,6 +158,7 @@ class AppStyles:
     WINDOW_START_HEIGHT = 900
     LEFT_COLUMN_MIN_WIDTH = 380   # Narrowest the left column may be dragged
     PLOT_MIN_HEIGHT = 160         # A dragged splitter never hides a plot
+    PROB_BAR_HEIGHT = 22          # Framework (probability bar)
     MONITOR_START_HEIGHT = 150    # Serial monitor text box at start (handoff) ...
     MONITOR_START_SHARE = 0.15    # ... or this share of the right column, if less
     MONITOR_MIN_HEIGHT = 90
@@ -308,7 +316,7 @@ QTabBar::tab {
     color: $TEXT_SECONDARY;
     border: 1px solid $BUTTON_BORDER;
     padding: 5px 22px;
-    min-width: 70px;
+    min-width: 130px;    /* Room for "Live Inference" in bold when selected */
 }
 QTabBar::tab:first {
     border-top-left-radius: ${BUTTON_RADIUS}px;
@@ -476,6 +484,31 @@ QLabel[role="tag"][state="warn"] {
 QLabel[role="tag"][state="error"] {
     color: $ACCENT_ERROR;
     border-color: $ACCENT_ERROR;
+}
+
+/* Probability bars (Live Inference): the chunk follows the state, as the card. */
+QProgressBar[role="prob"] {
+    border: 1px solid $PANEL_BORDER;
+    border-radius: 5px;
+    background-color: $PROB_TROUGH;
+    min-height: ${PROB_BAR_HEIGHT}px;
+    max-height: ${PROB_BAR_HEIGHT}px;
+}
+QProgressBar[role="prob"]::chunk {
+    background-color: $CARD_BORDER_IDLE;
+    border-radius: 4px;
+}
+QProgressBar[role="prob"][state="ok"]::chunk {
+    background-color: $ACCENT_OK;
+}
+QProgressBar[role="prob"][state="armed"]::chunk {
+    background-color: $ACCENT_ARMED;
+}
+QProgressBar[role="prob"][state="warn"]::chunk {
+    background-color: $ACCENT_WARN;
+}
+QProgressBar[role="prob"][state="error"]::chunk {
+    background-color: $ACCENT_ERROR;
 }
 
 /* Connection dot beside the connection message. */

@@ -1,9 +1,18 @@
 """
 File:        record_widget.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.4.0
-Change:      0.4.0 (manual-recording-overhaul-handoff.md, request B): a
+Date:        2026-11-24
+Version:     0.4.1
+Change:      0.4.1 (training-live-inference-handoff.md, request G): the
+             reader thread is shared with the Live Inference tab
+             (handler_started, emitted with each new SerialHandler), and the
+             record keys work only on the Record tab (set_keys_enabled, P7).
+             A model fault (FLT F5-F8: the board's inference stopped, while
+             streaming goes on; owner, 2026-11-24) shows in the device strip
+             and is logged once per connection, instead of the card's
+             DEVICE FAULT. Firmware texts name 0.1.5-bench. Recording is
+             unchanged.
+             0.4.0 (manual-recording-overhaul-handoff.md, request B): a
              one-key manual recorder. P / B / N (or their buttons) label and
              record a clip from MANUAL_PRE_S before the press to MANUAL_POST_S
              after it, with a countdown on the card and a tone at the press
@@ -91,6 +100,11 @@ _TICK_MS = 100
 # ============================================================================
 
 
+# FLT codes of model faults (firmware types.h F5-F8): they stop the board's
+# inference only (owner, 2026-11-24).
+MODEL_FAULT_CODES = ("F5", "F6", "F7", "F8")
+
+
 def _mmss(seconds: float) -> str:
     """
     @param seconds  A duration.
@@ -110,6 +124,7 @@ class RecordWidget(QGroupBox):
     take_deleted = pyqtSignal(object)     # Path of a clip Backspace moved to _deleted
     session_changed = pyqtSignal(str)     # A new valid session name
     counts_changed = pyqtSignal(str)      # The top bar's text (session clip counts)
+    handler_started = pyqtSignal(object)  # A new SerialHandler, before it starts (request G)
 
     def __init__(self, store: TakeStore, gui_commit: str, live_plot: LivePlot,
                  card: StatusCard) -> None:
@@ -129,11 +144,13 @@ class RecordWidget(QGroupBox):
         self.recorder = ClipRecorder()
         self.sounds = Sounds(self)
         self.handler: Optional[SerialHandler] = None
+        self._shortcuts = []                    # The record keys (set_keys_enabled)
         self._ports = []
         self._connected = False        # Port (or simulated device) open right now
         self._conn_message = "Not connected"
         self._boot_info = ""           # Strip text from BOOT / CFG (rich text, escaped)
         self._health_info = ""         # Strip text from HLT
+        self._model_fault = ""         # Strip text for a model fault (FLT F5-F8)
         self._l_count = 0              # L samples received on this connection
         self._rate_mark = None         # (monotonic time, _l_count) at the last HLT
         self._l_rate: Optional[float] = None   # L samples per second
@@ -271,7 +288,7 @@ class RecordWidget(QGroupBox):
         layout.addWidget(self.sim_panel)
 
         layout.addWidget(self.msg_label)
-        layout.addWidget(self._note("Firmware: firmware-bench 0.1.4-bench (it streams every "
+        layout.addWidget(self._note("Firmware: firmware-bench 0.1.5-bench (it streams every "
                                     "sample as an L line)."))
 
         # Keys: active while this window is active. A focused text box keeps
@@ -302,6 +319,16 @@ class RecordWidget(QGroupBox):
         sc = QShortcut(QKeySequence(key), self)
         sc.setAutoRepeat(False)
         sc.activated.connect(slot)
+        self._shortcuts.append(sc)
+
+    def set_keys_enabled(self, enabled: bool) -> None:
+        """
+        P7 (request G): the record keys (P, B, N, L, Backspace) work only while
+        the Record tab is open. The window calls this when the tab changes.
+        @param enabled  True on the Record tab.
+        """
+        for sc in self._shortcuts:
+            sc.setEnabled(enabled)
 
     @staticmethod
     def _note(text: str) -> QLabel:
@@ -324,7 +351,8 @@ class RecordWidget(QGroupBox):
 
     def _show_strip(self) -> None:
         """Device info strip: the BOOT settings, then the HLT rates and drops."""
-        parts = [text for text in (self._boot_info, self._health_info) if text]
+        parts = [text for text in (self._boot_info, self._health_info, self._model_fault)
+                 if text]
         self.strip.setText(" | ".join(parts) if parts else "No device info yet.")
 
     @staticmethod
@@ -430,6 +458,7 @@ class RecordWidget(QGroupBox):
                 return
             self.settings.setValue("last_port", port.device)
         self.handler = SerialHandler(self)
+        self.handler_started.emit(self.handler)     # The Live Inference tab listens too
         self.handler.boot_received.connect(self._on_boot)
         self.handler.config_received.connect(self._on_config)
         self.handler.health_received.connect(self._on_health)
@@ -446,6 +475,7 @@ class RecordWidget(QGroupBox):
         self.recorder.stream_restarted()
         self._boot_info = ""
         self._health_info = ""
+        self._model_fault = ""
         self._show_strip()
         self._l_count = 0
         self._rate_mark = None
@@ -635,7 +665,7 @@ class RecordWidget(QGroupBox):
         if boot.settings.get("rec") == "1" or ("log" in boot.settings
                                                and boot.settings.get("log") != "1"):
             parts.append(self._warn_html("this firmware sends no L lines: flash "
-                                         "firmware-bench 0.1.4-bench"))
+                                         "firmware-bench 0.1.5-bench"))
         self._boot_info = " | ".join(parts)
         self._show_strip()
         self.card.set_simulated(boot.settings.get("fw", "").startswith("sim-"))
@@ -688,6 +718,17 @@ class RecordWidget(QGroupBox):
         """
         @param flt  A FaultLine.
         """
+        if flt.code in MODEL_FAULT_CODES:
+            # The board's model stopped; sampling and the L stream go on, so
+            # clips still record. Repeated every second: logged once.
+            text = self._warn_html("inference stopped: %s %s (recording still works)"
+                                   % (html.escape(flt.code), html.escape(flt.name)))
+            if text != self._model_fault:
+                self._model_fault = text
+                _LOG.warning("FLT %s %s: the board's model stopped; streaming and recording "
+                             "go on", flt.code, flt.name)
+                self._show_strip()
+            return
         self.card.show_fault("FAULT %s" % flt.code, "DEVICE FAULT: %s %s · stays until the "
                              "next Connect" % (flt.code, flt.name))
         _LOG.warning("FLT %s %s", flt.code, flt.name)
@@ -726,6 +767,7 @@ class RecordWidget(QGroupBox):
         self.recorder.stream_restarted()
         self._boot_info = ("Device settings: waiting for BOOT or CFG (cleared on reconnect; "
                            "CFG comes every %.0f s)" % cfg.CFG_PERIOD_S)
+        self._model_fault = ""
         self._show_strip()
         _LOG.info("Reconnected")
         self._refresh()

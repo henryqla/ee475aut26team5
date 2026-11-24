@@ -24,13 +24,17 @@ relabel it or delete it.
 **L** records a **long NONE** clip of normal road: press it once to start and
 again to stop. **Backspace** deletes the last clip you saved.
 
+The **Live Inference** tab shows what the model on the board is calling right
+now: pothole, speed bump or nothing, with the board's own detections listed as
+they happen (Part 11). It only watches; it never changes the board or a clip.
+
 You can also run the program without the board. It then uses a pretend board
 (the **simulated device**), with buttons to make it misbehave on purpose. This
 is useful for learning the program and for some of the tests.
 
 The guide has three parts:
 
-- **How to use the program:** Parts 1 to 10.
+- **How to use the program:** Parts 1 to 11.
 - **Tests:** what to do and what you should see.
 - **If something goes wrong.**
 
@@ -196,8 +200,11 @@ Part 1 is done. You don't need to repeat it unless you delete the
 
 Skip this part if you only want to use the simulated device.
 
-The board needs firmware-bench version **0.1.4-bench** or later. There are no
-settings to change: this version always sends every reading.
+The board needs firmware-bench version **0.1.5-bench** or later. There are no
+settings to change: this version always sends every reading, and it also runs
+the model in `firmware\firmware-bench\model_data.h` (made by
+`..\training\train.py`) and reports what it calls (Part 11). It needs no extra
+library.
 
 1. Open the Arduino IDE. Choose **File > Open** and open
    `firmware\firmware-bench\firmware-bench.ino` inside the project folder.
@@ -341,7 +348,7 @@ decide anything; they help you decide.
 
 ## Part 6: Record on the bench
 
-1. Do Part 2 if the board doesn't have 0.1.4-bench yet.
+1. Do Part 2 if the board doesn't have 0.1.5-bench yet.
 2. Start the program, choose the board's port and click **Connect**.
 3. Set the session, for example `2026-11-23_bench`, and press Enter.
 4. **Keep the board still for 2 seconds after connecting** (and after every
@@ -414,18 +421,59 @@ first, with whatever it has collected.
 
 ---
 
+## Part 11: Watch the board's model (Live Inference tab)
+
+Connect on the Record tab as usual (Part 5 or 6), then click the **Live
+Inference** tab at the top. Both tabs use the same connection, and both keep
+updating whichever one you look at.
+
+- **Prediction** (the big card): what the model calls now.
+  - **Green**: a pothole or speed bump at or above the display cutoff.
+  - **Blue**: NONE (normal road).
+  - **Amber**: a pothole or speed bump below the cutoff (the model is unsure).
+  - **WAITING FOR STREAM**: no result yet. The board starts about 4 seconds
+    after a reset (2 s to settle, then a full 2 s window).
+  - **NO DATA**: no result for 2 seconds.
+  - **MODEL FAULT** (red): the board's model stopped (a bad `model_data.h`).
+    Streaming and recording still work; the Record tab says so in its device
+    line.
+- **Probabilities**: one bar per class, colored like the card.
+- **Display cutoff** and **Smoothing** change only this screen. The cutoff
+  starts at the board's own `DET_CONF`. Smoothing averages the last results so
+  the card flickers less (0 = off).
+- **Recent detections**: the board's own decisions (`DET` lines), newest first,
+  the last 10. These use the board's `DET_CONF` and a 2-second lockout, not the
+  display cutoff.
+- The **stats line**: inferences (the board's count, and how many reached the
+  program), results per second (about 2), the last and longest time per
+  inference, skipped windows, malformed lines, the model's version, and the
+  board's self-test result (red if it failed). **Reset counters** starts the
+  counts and the recent list over.
+- **Model channels**: the last 10 seconds of z_hp, roll and pitch, as the model
+  gets them, with a dashed green line at each detection.
+- With the simulated device, **Simulated device (test controls)** can stop its
+  results (to see NO DATA), inject a pothole or a speed bump, or send malformed
+  lines.
+
+The record keys (P, B, N, L, Backspace) do nothing on this tab, so a key press
+there never records a clip.
+
+---
+
 ## Tests
 
 There are two kinds of tests:
 
 - the **automatic checks**, which the computer runs by itself in a few seconds;
-- tests **MAN-1 to MAN-4**, which you do by hand with the program open.
+- tests **MAN-1 to MAN-4** (recording) and **LIV-1 to LIV-4** (the Live
+  Inference tab), which you do by hand with the program open.
 
-All of MAN-1 to MAN-4 are **NOT TESTED** so far. Each test says what to do, what
+All of MAN-1 to MAN-4 and LIV-1 to LIV-4 are **NOT TESTED** until the project
+owner marks them. Each test says what to do, what
 you should see, when it fails, and what to save as proof. Only the project
-owner marks a test as passed. The board's own tests (FWS-1 to FWS-4) are in
-the handoff document, and the window-cutting tests (WIN-1 to WIN-4) are in
-`..\training\README.md`.
+owner marks a test as passed. The board's own tests (FWS-1 to FWS-4, and
+INF-1 to INF-4 for live inference) are in the handoff documents, and the
+window-cutting and training tests are in `..\training\README.md`.
 
 To take a screenshot, press Windows+Shift+S and drag a box around what you
 want. Then click the preview that pops up in the corner of the screen, and save
@@ -436,8 +484,10 @@ it.
 **What they check:** the program reads the board's lines correctly; every
 press gives a clip of the right length with the right facts, even with lost
 readings, resets, `ok=0` rows or a stopped stream; presses during a recording
-are ignored; long recordings; clip files, older takes, relabel and delete; and
-that the simulated device sends what the real board does.
+are ignored; long recordings; clip files, older takes, relabel and delete;
+the live inference lines (PROB, DET, SELFTEST) and malformed ones counted; the
+Live Inference tab's card colors, cutoff, smoothing, NO DATA and recent list;
+and that the simulated device sends what the real board does.
 
 They don't open the window and need no board, but they need the add-ons (numpy).
 
@@ -456,7 +506,7 @@ PowerShell:
 ```
 
 **What you should see:** a row of dots, then a line starting with
-`Ran 62 tests in`, and `OK` on the last line.
+`Ran 84 tests in`, and `OK` on the last line.
 
 **It fails if** the last line says `FAILED` or shows errors. Copy all of the text
 from the window and send it to the project owner.
@@ -520,6 +570,52 @@ hidden; the program stays open and reconnects by itself.
 **Proof:** the clips, their headers, the program's log, and screenshots.
 
 ---
+
+### LIV-1: Build
+
+**Do:** run the automatic checks. Start the program: there are two tabs,
+Record and Live Inference.
+
+**You should see:** the checks pass; both tabs open; the serial monitor moves
+to the tab you open.
+
+**Proof:** the test output and a screenshot of each tab.
+
+### LIV-2: The model, live
+
+**Do:** connect the simulated device, open Live Inference, and use **Inject
+pothole** and **Inject speed bump**. Then connect the board (firmware-bench
+0.1.5-bench) and watch for 60 seconds while tapping it.
+
+**You should see:** the card, bars and stats update about twice a second; each
+detection appears in Recent detections and as a dashed line on the plot; the
+display cutoff starts at the board's `DET_CONF` (0.60).
+
+**Proof:** screenshots or a short screen recording.
+
+### LIV-3: Controls and keys
+
+**Do:** move the cutoff and the smoothing; press P, B, N, L and Backspace on the
+Live Inference tab; switch to Record and record a clip while the board keeps
+running the model.
+
+**You should see:** only the display changes; no clip is recorded from the Live
+Inference tab; recording on the Record tab still works, and the Live Inference
+tab has kept counting meanwhile.
+
+**Proof:** screenshots and the session folder listing.
+
+### LIV-4: Faults
+
+**Do:** with the simulated device, untick **PROB lines**, click **Send
+malformed lines**, then use **Disconnect** (Record tab, simulated USB drop-out).
+With the board, unplug the USB cable and plug it back in.
+
+**You should see:** the card says NO DATA after 2 seconds; the malformed lines
+are counted in the stats line and never shown as results; the program stays up
+and reconnects.
+
+**Proof:** screenshots and the program's log.
 
 ## If something goes wrong
 
@@ -593,11 +689,16 @@ MARK lines, the window cutter and the `manual/`, `weak/` and `background/`
 folders are gone, and so is the request-3 training code with its Training tab
 (owner, 2026-11-23). All of it is in git, tag `pre-manual-overhaul`.
 
-**Board lines** (firmware-bench 0.1.4-bench). `L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok`
+**Board lines** (firmware-bench 0.1.5-bench). `L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok`
 for every sample (4 decimals; raw chip axes with the gyro bias in, then the
 model channels with the bias removed; `ok` is 1 once the bias is ready), plus
-`BOOT` / `CFG` (settings, CFG every 5 s), `HLT` (10 fields), `FLT`, `SEG` and
-`BLE`. `snapshot_protocol.py` parses them; anything else (including EVT, S and
+`BOOT` / `CFG` (settings, CFG every 5 s; the model fields `model`, `classes`
+(`|`-separated), `window`, `hop`, `det_conf`, `det_lockout_ms`, `arena`,
+`arena_used`, `selftest`, `selftest_diff`, `inf`), `SELFTEST,result,max_diff`
+(once, after BOOT), `PROB,n,p_pothole,p_bump,p_none,lat_us` (every 0.5 s),
+`DET,n,class,conf`, `HLT` (14 fields: the 10 before plus `inferences`,
+`inf_skips`, `lat_last_us`, `lat_max_us`), `FLT` (F5 to F8 are model faults:
+inference stopped, streaming goes on), `SEG` and `BLE`. `snapshot_protocol.py` parses them; anything else (including EVT, S and
 snapshot lines from older firmware) is ignored. A CFG is not a reboot: it is
 used only while the connection has no BOOT (`RecordController.on_settings()`),
 stored as the BOOT line it repeats.
@@ -632,8 +733,21 @@ library into `%TEMP%\cnn_record_gui_sounds\`, played with `QSoundEffect`
 (QtMultimedia, part of the installed PyQt5); `QApplication.beep()` if that is
 unavailable.
 
+**Live Inference tab** (`live_inference_widget.py`, adapted from Jake's tab).
+`RecordWidget.handler_started` hands each new `SerialHandler` to it, so both
+tabs share one connection; it never sends anything. `PROB` lines come batched
+with the L samples (`prob_received`), `DET` and `SELFTEST` at once.
+`InferenceView` (no Qt) makes every display decision: the board's rule for the
+colors (an event at or above the cutoff green, NONE blue, below it amber),
+smoothing (shown = a × shown + (1 − a) × new), the cutoff taken from `det_conf`
+once per connection, NO DATA after `LIVE_INF_STALE_S`. The window disables the
+record keys on this tab (`RecordWidget.set_keys_enabled`, P7) and moves the one
+serial monitor to the open tab.
+
 **Simulated device** (`sim_source.py`). Streams what the board does, at 416
-L lines per second of device time. Test controls go from the GUI thread
+L lines per second of device time, including PROB every 0.5 s once it has a
+full window of good samples (a high probability for an injected event's class
+while its middle is in the window) and DET by the board's rule. Test controls go from the GUI thread
 through `SerialHandler.sim_command()` to the reader thread, which hands them to
 the device before its next sample.
 

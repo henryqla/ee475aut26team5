@@ -1,9 +1,16 @@
 """
 File:        snapshot_protocol.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.3.0
-Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): the
+Date:        2026-11-24
+Version:     0.4.0
+Change:      0.4.0 (training-live-inference-handoff.md, request G): the live
+             inference lines of firmware-bench 0.1.5-bench: PROB (ProbLine),
+             DET (DetLine) and SELFTEST (SelftestLine); HLT gains inferences,
+             inf_skips, lat_last_us and lat_max_us; BOOT / CFG model fields are
+             read with model_classes(). LineParser counts malformed L, PROB,
+             DET, SELFTEST and HLT lines per tag (malformed); malformed_l
+             stays.
+             0.3.0 (manual-recording-overhaul-handoff.md, request B): the
              firmware (0.1.4-bench) streams every sample and detects nothing,
              so this module parses only L, BOOT, CFG, HLT and FLT lines.
              Removed with the snapshots: SnapshotAssembler, Snapshot,
@@ -15,10 +22,11 @@ Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): the
              stays in one place.
              0.2.1: CFG lines (ConfigLine, as_boot()).
              0.2.0: L lines (log build), EVT n_trig.
-Description: Parses the Serial lines firmware-bench 0.1.4-bench prints
+Description: Parses the Serial lines firmware-bench 0.1.5-bench prints
              (serial_out.cpp). Lines starting with '#' and unknown tags (SEG,
              BLE, and any EVT, S or snapshot line from older firmware) are
-             ignored. Malformed L lines are counted and ignored. Standard
+             ignored. Malformed L, PROB, DET, SELFTEST and HLT lines are
+             counted and ignored, never shown as results. Standard
              library only (no Qt, numpy or pyserial), so it runs in the unit
              tests on any Python 3.11.
 """
@@ -44,8 +52,20 @@ from typing import Optional, Union
 L_FIELDS = ("n", "t_us", "ax", "ay", "az", "gx", "gy", "gz", "z_hp", "roll", "pitch", "ok")
 
 # Column names of the HLT line, in firmware order (serial_out.cpp print_boot()).
+# 0.1.5-bench appends the four inference counters; older firmware sends the
+# first ten only.
 HLT_FIELDS = ("t_ms", "samples", "sample_q_drops", "out_q_drops", "drdy_timeouts",
-              "ble_q_drops", "ble_sent", "ble_fails", "serial_drops", "imu_recoveries")
+              "ble_q_drops", "ble_sent", "ble_fails", "serial_drops", "imu_recoveries",
+              "inferences", "inf_skips", "lat_last_us", "lat_max_us")
+
+# SELFTEST results (serial_out.cpp selftest_text()).
+SELFTEST_RESULTS = ("pass", "fail", "not_run")
+
+# Lines whose malformed copies LineParser counts.
+COUNTED_TAGS = ("L", "PROB", "DET", "SELFTEST", "HLT")
+
+# A probability may be off [0, 1] by rounding to 4 decimals, never more.
+_PROB_SLACK = 1e-3
 
 # The live view's point values: chip axes (accel g, gyro dps, bias NOT
 # removed), then z_hp (g). Taken from an L sample's raw values and z_hp.
@@ -148,7 +168,34 @@ class LogSample:
         return ",".join(self.text)
 
 
-Item = Union[BootLine, ConfigLine, HealthLine, FaultLine, LogSample]
+@dataclass
+class ProbLine:
+    """A PROB line: one inference on the board (about 2 per second)."""
+    n: int                   # Newest sample (L line n) in the window
+    probs: tuple             # Floats, one per class, in the model's class order
+    lat_us: int              # Time Invoke() took on the board, us
+    raw: str
+
+
+@dataclass
+class DetLine:
+    """A DET line: the board's own detection (cutoff DET_CONF, 2 s lockout)."""
+    n: int                   # Newest sample in the window that fired
+    label: str               # Class name, e.g. POTHOLE
+    conf: float              # Its probability
+    raw: str
+
+
+@dataclass
+class SelftestLine:
+    """A SELFTEST line: the boot self-test result, printed once after BOOT."""
+    result: str              # One of SELFTEST_RESULTS
+    max_diff: float          # Largest difference from the stored outputs
+    raw: str
+
+
+Item = Union[BootLine, ConfigLine, HealthLine, FaultLine, LogSample, ProbLine, DetLine,
+             SelftestLine]
 
 # ============================================================================
 # Functions: line parsers
@@ -185,6 +232,48 @@ def _settings(fields: list) -> dict:
     return settings
 
 
+def model_classes(settings: dict) -> tuple:
+    """
+    @param settings  BOOT or CFG settings.
+    @return The model's class names in output order (classes=A|B|C), or ()
+            if the firmware sent none.
+    """
+    text = settings.get("classes", "")
+    return tuple(c for c in text.split("|") if c) if text else ()
+
+
+def _parse_prob(f: list, line: str) -> Optional[ProbLine]:
+    """
+    @param f     PROB,n,p1,...,pK,lat_us split on commas.
+    @param line  The line.
+    @return The ProbLine, or None if malformed.
+    """
+    if len(f) < 4:
+        return None
+    n, lat = _to_int(f[1]), _to_int(f[-1])
+    probs = [_to_finite_float(x) for x in f[2:-1]]
+    if n is None or lat is None or lat < 0 or any(
+            p is None or not -_PROB_SLACK <= p <= 1 + _PROB_SLACK for p in probs):
+        return None
+    return ProbLine(n, tuple(probs), lat, line)
+
+
+def _parse_det(f: list, line: str) -> Optional[DetLine]:
+    """
+    @param f     DET,n,label,conf split on commas.
+    @param line  The line.
+    @return The DetLine, or None if malformed.
+    """
+    if len(f) != 4:
+        return None
+    n, conf = _to_int(f[1]), _to_finite_float(f[3])
+    label = f[2]
+    if n is None or conf is None or not -_PROB_SLACK <= conf <= 1 + _PROB_SLACK or \
+            not label or not label.replace("_", "").isalnum():
+        return None
+    return DetLine(n, label, conf, line)
+
+
 def parse_line(line: str) -> Optional[Item]:
     """
     Parses one line.
@@ -208,6 +297,18 @@ def parse_line(line: str) -> Optional[Item]:
         return HealthLine(dict(zip(HLT_FIELDS, nums)), line)
     if tag == "FLT":
         return FaultLine(f[1] if len(f) > 1 else "", f[2] if len(f) > 2 else "", line)
+    if tag == "PROB":
+        # PROB,n,p_pothole,p_bump,p_none,lat_us (serial_out.cpp, print_msg)
+        return _parse_prob(f, line)
+    if tag == "DET":
+        # DET,n,class,conf
+        return _parse_det(f, line)
+    if tag == "SELFTEST":
+        # SELFTEST,pass|fail|not_run,max_diff
+        diff = _to_finite_float(f[2]) if len(f) == 3 else None
+        if diff is None or f[1] not in SELFTEST_RESULTS:
+            return None
+        return SelftestLine(f[1], diff, line)
     return None  # SEG, BLE, and lines from older firmware: not used
 
 # ============================================================================
@@ -216,10 +317,15 @@ def parse_line(line: str) -> Optional[Item]:
 
 
 class LineParser:
-    """Feeds on Serial lines, one at a time, and counts malformed L lines."""
+    """Feeds on Serial lines, one at a time, and counts malformed lines."""
 
     def __init__(self) -> None:
-        self.malformed_l = 0     # L lines ignored because they did not parse
+        self.malformed = {tag: 0 for tag in COUNTED_TAGS}   # Ignored, per tag
+
+    @property
+    def malformed_l(self) -> int:
+        """@return L lines ignored because they did not parse."""
+        return self.malformed["L"]
 
     def feed(self, line: str) -> Optional[Item]:
         """
@@ -231,6 +337,7 @@ class LineParser:
         if not line or line.startswith("#"):
             return None
         item = parse_line(line)
-        if item is None and line.split(",", 1)[0] == "L":
-            self.malformed_l += 1    # Counted and ignored
+        tag = line.split(",", 1)[0]
+        if item is None and tag in self.malformed:
+            self.malformed[tag] += 1    # Counted and ignored
         return item

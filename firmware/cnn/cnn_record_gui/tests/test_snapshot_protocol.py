@@ -1,9 +1,12 @@
 """
 File:        test_snapshot_protocol.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.3.0
-Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): the
+Date:        2026-11-24
+Version:     0.4.0
+Change:      0.4.0 (training-live-inference-handoff.md, request G): PROB, DET
+             and SELFTEST lines, HLT's inference fields, BOOT's model fields,
+             and malformed lines counted per tag.
+             0.3.0 (manual-recording-overhaul-handoff.md, request B): the
              snapshot, CRC, EVT and S line tests are removed with those lines.
              The BOOT, CFG, FLT, L and ignored-line tests are kept (fed through
              LineParser instead of the assembler); HLT has 10 fields only.
@@ -22,7 +25,8 @@ Description: Unit tests for snapshot_protocol.py: the line types firmware-bench
 import unittest
 
 import helpers  # Sets sys.path; must come before the GUI imports
-from snapshot_protocol import BootLine, ConfigLine, FaultLine, HealthLine, LineParser, LogSample
+from snapshot_protocol import (BootLine, ConfigLine, DetLine, FaultLine, HealthLine, LineParser,
+                               LogSample, ProbLine, SelftestLine, model_classes)
 
 # ============================================================================
 # Tests
@@ -101,6 +105,55 @@ class TestLogLines(unittest.TestCase):
         for line in bad:
             self.assertIsNone(parser.feed(line), line)
         self.assertEqual(parser.malformed_l, len(bad))
+
+
+class TestInferenceLines(unittest.TestCase):
+    """firmware-bench 0.1.5-bench's live inference lines (request F)."""
+
+    def test_prob(self):
+        out = LineParser().feed("PROB,1663,0.0123,0.0045,0.9832,21456\r\n")
+        self.assertIsInstance(out, ProbLine)
+        self.assertEqual((out.n, out.lat_us), (1663, 21456))
+        self.assertEqual(out.probs, (0.0123, 0.0045, 0.9832))
+
+    def test_det(self):
+        out = LineParser().feed("DET,2079,SPEED_BUMP,0.8731")
+        self.assertIsInstance(out, DetLine)
+        self.assertEqual((out.n, out.label, out.conf), (2079, "SPEED_BUMP", 0.8731))
+
+    def test_selftest(self):
+        out = LineParser().feed("SELFTEST,fail,0.012500")
+        self.assertIsInstance(out, SelftestLine)
+        self.assertEqual((out.result, out.max_diff), ("fail", 0.0125))
+
+    def test_hlt_inference_fields(self):
+        out = LineParser().feed("HLT,1000,416,0,3,0,0,1,0,7,0,120,2,21456,23100")
+        self.assertEqual((out.fields["inferences"], out.fields["inf_skips"],
+                          out.fields["lat_last_us"], out.fields["lat_max_us"]),
+                         (120, 2, 21456, 23100))
+        old = LineParser().feed("HLT,1000,416,0,3,0,0,1,0,7,0")    # 0.1.4-bench: 10 fields
+        self.assertNotIn("inferences", old.fields)
+
+    def test_boot_model_fields(self):
+        out = LineParser().feed(helpers.BOOT_INF)
+        self.assertEqual(model_classes(out.settings), ("POTHOLE", "SPEED_BUMP", "NONE"))
+        self.assertEqual((out.settings["det_conf"], out.settings["selftest"]), ("0.60", "pass"))
+        self.assertEqual(model_classes(LineParser().feed(helpers.BOOT).settings), ())
+
+    def test_malformed_counted_per_tag(self):
+        parser = LineParser()
+        bad = {"PROB": ["PROB,1,0.5,abc,0.2,3", "PROB,1,1.7,0,0,3", "PROB,1,0.5",
+                        "PROB,x,0.5,0.2,0.3,3", "PROB,1,0.5,0.2,0.3,-4"],
+               "DET": ["DET,1,,0.9", "DET,1,BAD LABEL,0.9", "DET,1,POTHOLE,2.0",
+                       "DET,1,POTHOLE"],
+               "SELFTEST": ["SELFTEST,maybe,0.1", "SELFTEST,pass"],
+               "HLT": ["HLT,1,x"]}
+        for lines in bad.values():
+            for line in lines:
+                self.assertIsNone(parser.feed(line), line)
+        for tag, lines in bad.items():
+            self.assertEqual(parser.malformed[tag], len(lines), tag)
+        self.assertEqual(parser.malformed_l, 0)
 
 
 if __name__ == "__main__":

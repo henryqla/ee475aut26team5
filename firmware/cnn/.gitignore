@@ -5,9 +5,12 @@
 # - __pycache__ / *.pyc: written by Python automatically
 # - data: recorded takes are shared outside git (team decision, 2026-11-18)
 # - logs: GUI logs; attach a specific log as test evidence when one is asked for
-# - training/runs: training run folders (owner, 2026-11-22); keep the ones
-#   worth keeping elsewhere
-# - training/sample_data: rebuilt from a fixed seed by training/make_sample_set.py
+# - training/runs: train.py and windows.py run folders (owner, 2026-11-22),
+#   including train.py --synthetic's made-up clips; keep the ones worth keeping
+#   elsewhere. firmware-bench/model_data.h, which train.py also writes, IS
+#   committed: the firmware needs it to build
+# - training/sample_data: left by the retired request-3 sample set (git tag
+#   pre-manual-overhaul), so an old copy is never committed
 .venv/
 __pycache__/
 *.pyc

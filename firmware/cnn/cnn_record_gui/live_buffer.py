@@ -1,9 +1,13 @@
 """
 File:        live_buffer.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.1.1
-Change:      0.1.1 (manual-recording-overhaul-handoff.md, request B): comments
+Date:        2026-11-24
+Version:     0.2.0
+Change:      0.2.0 (training-live-inference-handoff.md, request G): an
+             optional channel list, so the Live Inference tab can keep z_hp,
+             roll and pitch. The default (S_CHANNELS) keeps the live IMU
+             view exactly as before.
+             0.1.1 (manual-recording-overhaul-handoff.md, request B): comments
              only. The points are every LIVE_DECIMATE-th L sample now that the
              firmware sends no S lines.
 Description: The last few seconds of live points (every LIVE_DECIMATE-th L
@@ -34,12 +38,15 @@ from snapshot_protocol import S_CHANNELS, SampleLine
 class LiveBuffer:
     """Live points from the last window_s seconds of device time."""
 
-    def __init__(self, window_s: float, gap_s: float, max_points: int = 20000) -> None:
+    def __init__(self, window_s: float, gap_s: float, max_points: int = 20000,
+                 channels: tuple = S_CHANNELS) -> None:
         """
         @param window_s    Seconds of device time kept.
         @param gap_s       Samples further apart than this get a break between them.
         @param max_points  Hard limit on samples kept, whatever their times.
+        @param channels    Names of a SampleLine's values, in order.
         """
+        self.channels = tuple(channels)
         self._window_us = int(window_s * 1e6)
         self._gap_us = int(gap_s * 1e6)
         self._rows: deque = deque(maxlen=max_points)
@@ -105,9 +112,9 @@ class LiveBuffer:
         neighbours are more than gap_s apart, one NaN point is put between
         them, so a plot that skips non-finite points shows a break.
         @return (t, channels): t is a list of floats; channels maps each
-                S_CHANNELS name to a list of floats of the same length.
+                channel name to a list of floats of the same length.
         """
-        t, cols = [], {name: [] for name in S_CHANNELS}
+        t, cols = [], {name: [] for name in self.channels}
         if not self._rows:
             return t, cols
         t_last = self._rows[-1].t_us
@@ -115,10 +122,10 @@ class LiveBuffer:
         for s in self._rows:
             if prev is not None and s.t_us - prev > self._gap_us:
                 t.append(math.nan)
-                for name in S_CHANNELS:
+                for name in self.channels:
                     cols[name].append(math.nan)
             t.append((s.t_us - t_last) / 1e6)
-            for name, v in zip(S_CHANNELS, s.values):
+            for name, v in zip(self.channels, s.values):
                 cols[name].append(v)
             prev = s.t_us
         return t, cols

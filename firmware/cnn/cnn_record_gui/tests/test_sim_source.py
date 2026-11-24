@@ -1,9 +1,14 @@
 """
 File:        test_sim_source.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.3.0
-Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): rewritten
+Date:        2026-11-24
+Version:     0.4.0
+Change:      0.4.0 (training-live-inference-handoff.md, request G): BOOT has
+             firmware-bench 0.1.5-bench's fields and SELFTEST follows it; PROB
+             only after a full good window, every SIM_HOP samples; DET once per
+             lockout; a gap restarts the window; PROB lines off and malformed
+             lines (test controls); HLT inference counters.
+             0.3.0 (manual-recording-overhaul-handoff.md, request B): rewritten
              for the one-build simulated device. The snapshot fault, S line
              and EVT tests are removed with those lines; the CFG and injected
              gap tests are kept in the new device's form. New: BOOT as
@@ -23,8 +28,9 @@ import unittest
 
 import helpers  # Sets sys.path; must come before the GUI imports
 import cnn_config as cfg
-from sim_source import SimDevice, SimDisconnect
-from snapshot_protocol import BootLine, ConfigLine, HealthLine, LineParser, LogSample
+from sim_source import MALFORMED_LINES, SimDevice, SimDisconnect
+from snapshot_protocol import (BootLine, ConfigLine, DetLine, HealthLine, LineParser, LogSample,
+                               ProbLine, SelftestLine)
 
 # ============================================================================
 # Functions
@@ -72,8 +78,66 @@ class TestSimDevice(unittest.TestCase):
     def test_boot_like_the_firmware(self):
         items, _ = pull(self.stream, 1)
         self.assertIsInstance(items[0], BootLine)
-        expect = helpers.BOOT.replace("fw=0.1.4-bench", "fw=" + cfg.SIM_FW)
-        self.assertEqual(items[0].raw, expect)                 # Same fields as the firmware
+        firmware = LineParser().feed(helpers.BOOT_INF).settings
+        sim = items[0].settings
+        self.assertEqual(list(sim), list(firmware))            # Same fields, same order
+        model_keys = ("fw", "model", "arena_used", "selftest_diff")
+        self.assertEqual({k: v for k, v in sim.items() if k not in model_keys},
+                         {k: v for k, v in firmware.items() if k not in model_keys})
+        self.assertEqual((sim["fw"], sim["model"]), (cfg.SIM_FW, cfg.SIM_MODEL))
+        self.assertIsInstance(items[1], SelftestLine)          # Right after BOOT
+        self.assertEqual(items[1].result, "pass")
+
+    def test_prob_after_a_full_good_window(self):
+        items, _ = pull(self.stream, 6 * 416)
+        probs = [x for x in items if isinstance(x, ProbLine)]
+        settle = int(round(cfg.SIM_SETTLE_S * 416))
+        self.assertGreaterEqual(probs[0].n, settle + cfg.SIM_WINDOW)   # No PROB before it
+        self.assertEqual({b.n - a.n for a, b in zip(probs, probs[1:])}, {cfg.SIM_HOP})
+        self.assertTrue(all(abs(sum(p.probs) - 1.0) < 2e-4 for p in probs))
+        self.assertTrue(all(p.probs[2] == max(p.probs) for p in probs))   # Quiet: NONE
+        last_hlt = max(i for i, x in enumerate(items) if isinstance(x, HealthLine))
+        before = sum(isinstance(x, ProbLine) for x in items[:last_hlt])
+        self.assertEqual(items[last_hlt].fields["inferences"], before)   # Counted as sent
+        self.assertEqual(items[last_hlt].fields["inf_skips"], 0)
+
+    def test_det_at_most_one_per_lockout(self):
+        pull(self.stream, 5 * 416)
+        self.dev.inject_event("SPEED_BUMP", 0.5)
+        self.dev.inject_event("SPEED_BUMP", 1.0)               # Two bumps 0.5 s apart
+        items, _ = pull(self.stream, 5 * 416)
+        dets = [x for x in items if isinstance(x, DetLine)]
+        lockout = int(round(cfg.SIM_DET_LOCKOUT_MS * 416 / 1000))
+        self.assertTrue(dets)
+        self.assertEqual(dets[0].label, "SPEED_BUMP")
+        self.assertGreaterEqual(dets[0].conf, cfg.SIM_DET_CONF)
+        self.assertTrue(all(b.n - a.n >= lockout for a, b in zip(dets, dets[1:])))
+
+    def test_gap_restarts_the_window(self):
+        pull(self.stream, 5 * 416)
+        self.dev.inject_gap(cfg.SIM_GAP_SAMPLES)
+        items, _ = pull(self.stream, 3 * 416)
+        lost_at = self.dev.gaps[0][0]
+        probs = [x.n for x in items if isinstance(x, ProbLine)]
+        self.assertFalse([n for n in probs if lost_at <= n < lost_at + cfg.SIM_WINDOW])
+
+    def test_prob_off_and_malformed(self):
+        items, _ = pull(self.stream, 5 * 416)
+        last_n = l_only(items)[-1].n      # Test controls act from the next sample on
+        self.dev.set_prob(False)
+        self.dev.inject_malformed()
+        parser = LineParser()
+        seen = []
+        stream_items = 0
+        while stream_items < 3 * 416:
+            _delay, item = next(self.stream)
+            out = parser.feed(item)
+            if out is not None:
+                seen.append(out)
+            stream_items += 1
+        self.assertFalse([x for x in seen if isinstance(x, ProbLine) and x.n > last_n])  # Off
+        self.assertTrue([x for x in seen if isinstance(x, LogSample)])   # L lines go on
+        self.assertEqual(sum(parser.malformed.values()), len(MALFORMED_LINES))
 
     def test_rate_and_settle(self):
         items, seconds = pull(self.stream, 4 * 416)

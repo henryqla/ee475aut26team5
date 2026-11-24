@@ -1,9 +1,21 @@
 """
 File:        cnn_config.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.4.0
-Change:      0.4.0 (manual-recording-overhaul-handoff.md, requests B and C;
+Date:        2026-11-24
+Version:     0.6.0
+Change:      0.6.0 (training-live-inference-handoff.md, request G): the Live
+             Inference tab's settings (no-data time, smoothing G1, recent
+             detections G2, the cutoff shown before the board's arrives, its
+             refresh) and the simulated device's live inference (model name,
+             window, hop, cutoff, lockout, timing). SIM_FW is
+             sim-0.1.5-bench.
+             0.5.0 (training-live-inference-handoff.md, request E; owner,
+             2026-11-24): training and export settings for train.py: the
+             fixed model (E1), training (E2), the board's live-inference rule
+             mirrored for the streaming test (hop 0.5 s, lockout 2 s), the
+             cutoff table, the export checks (E5), model_data.h and the
+             synthetic clips.
+             0.4.0 (manual-recording-overhaul-handoff.md, requests B and C;
              owner, 2026-11-23): manual recording only. Classes are POTHOLE,
              SPEED_BUMP and NONE (O4). New: the record keys (B2), the clip
              length around a press (B1), the clip file format, the sounds,
@@ -15,11 +27,12 @@ Change:      0.4.0 (manual-recording-overhaul-handoff.md, requests B and C;
              git tag pre-manual-overhaul).
              0.3.2: WEAK_FLOOR_FRAC removed. 0.3.1: CFG_PERIOD_S. 0.3.0: drive
              log, manual Record, window cutting. 0.2.0: training and export.
-Description: Every tunable value for the CNN record GUI and the training
-             window cutter, each with its status and reason: one Python config
-             location. Firmware values live in firmware/firmware-bench/config.h,
-             not here; the few repeated here are what the simulated device
-             sends.
+Description: Every tunable value for the CNN record GUI, the training
+             window cutter and train.py, each with its status and reason: one
+             Python config location. Firmware values live in
+             firmware/firmware-bench/config.h, not here; the few repeated here
+             are what the simulated device sends, and the board's
+             live-inference rule that train.py's streaming test copies.
 """
 
 # ============================================================================
@@ -168,7 +181,7 @@ LIVE_STALE_S = 1.0
 
 # The simulated device's firmware version. Starts with "sim-" so clips recorded
 # from it can never be mistaken for real ones.
-SIM_FW = "sim-0.1.4-bench"
+SIM_FW = "sim-0.1.5-bench"
 SIM_RATE_HZ = DEFAULT_RATE_HZ
 
 # DRAFT. Fixed seed, so a simulated run is the same every time.
@@ -230,3 +243,120 @@ OLD_TAKE_MAX_WINDOW_S = 1.5
 # noisy; it never refuses to run.
 MIN_CLIPS_PER_CLASS = 30
 MIN_SESSIONS = 3
+
+# ============================================================================
+# Constants: training and export (request E)
+# ============================================================================
+
+# DECIDED (P1, owner 2026-11-24). The model takes the board's raw 2 s window
+# (z_hp, roll, pitch at 416 Hz, oldest first) and does its own scaling and
+# downsampling, so train.py always cuts windows with decimation 1, whatever
+# DECIMATE says. These are also model_data.h's MODEL_RATE_HZ, MODEL_WINDOW and
+# channel order.
+MODEL_RATE_HZ = DEFAULT_RATE_HZ
+MODEL_WINDOW = int(round(WINDOW_S * MODEL_RATE_HZ))   # 832
+MODEL_CHANNELS = ("z_hp", "roll", "pitch")
+
+# DRAFT (E1; P5: fixed, not tuned). The model after the per-channel scaling:
+# AveragePooling1D(MODEL_POOL_IN) takes 416 Hz to 104 Hz; then one Conv1D
+# (ReLU, "same" padding) per MODEL_CONV entry (filters, kernel, followed by
+# MaxPooling1D(2)?); GlobalAveragePooling1D; Dropout(MODEL_DROPOUT) while
+# training; Dense(3, softmax). About 6,100 parameters.
+MODEL_POOL_IN = 4
+MODEL_CONV = ((16, 7, True), (32, 5, True), (32, 3, False))
+MODEL_DROPOUT = 0.2
+
+# DRAFT (E1, E2). Training: Adam, batch, epochs, early stopping on the
+# validation loss with the best weights restored, and the validation share
+# (whole clips, per class, from the training sessions). TRAIN_SEED seeds the
+# validation split, the weights and the shuffling, so two runs on the same
+# clips give the same model and report.
+TRAIN_LEARNING_RATE = 0.001
+TRAIN_BATCH = 32
+TRAIN_MAX_EPOCHS = 100
+TRAIN_PATIENCE = 10
+TRAIN_SEED = 475
+VAL_FRAC = 0.15
+
+# The board's live-inference rule (request F), copied here for train.py's
+# streaming test. These must equal firmware-bench's values.
+# DRAFT (request F): the board runs the model every INFER_HOP_S (MODEL_HOP =
+# 208 samples).
+INFER_HOP_S = 0.5
+# DECIDED (owner 2026-11-24, F4 changed from 1 s): after a detection, the next
+# one is allowed once at least DET_LOCKOUT_S has passed. Must equal config.h
+# DET_LOCKOUT_MS / 1000 (2000 ms).
+DET_LOCKOUT_S = 2.0
+
+# DECIDED (P8). The report's cutoff table: streaming results at each cutoff x.
+# train.py never picks one; the owner sets DET_CONF in config.h by hand.
+CUTOFFS = tuple(round(0.50 + 0.05 * i, 2) for i in range(10))   # 0.50 .. 0.95
+
+# DRAFT (E5). Export checks. TFLM_ALLOWED_OPS is the op list request D checked
+# on the board (libcheck) and request F's resolver registers: an exported model
+# may use only these. MAX_TFLITE_BYTES: flatbuffer limit. TFLITE_MATCH_TOL:
+# largest allowed difference between a Keras and a TFLite probability.
+TFLM_ALLOWED_OPS = ("CONV_2D", "MAX_POOL_2D", "AVERAGE_POOL_2D", "MEAN", "FULLY_CONNECTED",
+                    "SOFTMAX", "RESHAPE", "EXPAND_DIMS", "SUB", "MUL")
+MAX_TFLITE_BYTES = 256 * 1024
+TFLITE_MATCH_TOL = 1e-4
+
+# model_data.h: written here on success (generated, never hand-edited), with
+# MODEL_TEST_N self-test windows (one per class) and their Keras outputs.
+MODEL_DATA_PATH = Path(__file__).resolve().parent.parent / "firmware-bench" / "model_data.h"
+MODEL_TEST_N = len(CLASSES)
+
+# Synthetic clips (python train.py --synthetic): written only inside the run
+# folder, never into DATA_DIR, so they never mix with real clips. Shapes like
+# the simulated device's. SYNTH_NO_NONE_SESSION has event clips only (for the
+# boundary tests); the default run uses SYNTH_DEFAULT_SESSIONS and holds out
+# the newest. MODEL_VERSION of a synthetic model starts with SYNTH_PREFIX.
+SYNTH_SESSIONS = ("syn_1", "syn_2", "syn_no_none")
+SYNTH_DEFAULT_SESSIONS = ("syn_1", "syn_2")
+SYNTH_NO_NONE_SESSION = "syn_no_none"
+SYNTH_CLIPS_PER_CLASS = 30
+SYNTH_LONG_NONE_S = 60.0
+SYNTH_SEED = 475
+SYNTH_PREFIX = "synthetic-"
+
+# ============================================================================
+# Constants: Live Inference tab (request G)
+# ============================================================================
+
+# The tab only reads and shows what the board's model says (PROB and DET
+# lines); its controls change the display, never the board (P6).
+# DRAFT (handoff). No PROB line for this long while connected shows NO DATA.
+LIVE_INF_STALE_S = 2.0
+
+# DRAFT (G1). Display smoothing: an exponential moving average, shown =
+# a x shown + (1 - a) x new, with a from 0 (off, the default) to
+# LIVE_INF_SMOOTH_MAX (Jake's range).
+LIVE_INF_SMOOTH_DEFAULT = 0.0
+LIVE_INF_SMOOTH_MAX = 0.85
+
+# DRAFT (G2). Recent detections listed, newest first.
+LIVE_INF_RECENT_N = 10
+
+# The display cutoff before the board's det_conf (BOOT or CFG) arrives: the
+# firmware's starting DET_CONF (F4).
+LIVE_INF_DEFAULT_CUTOFF = 0.60
+
+# DRAFT. How often the card's "time since the last update" and the NO DATA
+# check refresh (ms).
+LIVE_INF_REFRESH_MS = 250
+
+# ============================================================================
+# Constants: simulated device, live inference (request G)
+# ============================================================================
+
+# What the simulated device's BOOT says about its model, and how its PROB and
+# DET lines behave: the firmware's window, hop, starting cutoff and lockout,
+# so the tab behaves as it will with the board.
+SIM_MODEL = "sim-model"
+SIM_WINDOW = MODEL_WINDOW                                 # 832
+SIM_HOP = int(round(INFER_HOP_S * MODEL_RATE_HZ))         # 208
+SIM_DET_CONF = LIVE_INF_DEFAULT_CUTOFF
+SIM_DET_LOCKOUT_MS = int(round(DET_LOCKOUT_S * 1000))     # 2000
+SIM_INFER_LAT_US = 21000                                  # DRAFT, a made-up Invoke time
+SIM_ARENA_USED = 26000                                    # DRAFT, a made-up arena use
+SIM_SELFTEST_DIFF = 1e-6

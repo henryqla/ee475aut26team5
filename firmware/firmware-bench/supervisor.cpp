@@ -1,9 +1,17 @@
 /*
  * File:        supervisor.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-23
- * Version:     0.1.4-bench
- * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ * Date:        2026-11-24
+ * Version:     0.1.5-bench
+ * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              the inference task is a fifth heartbeat sender. Its counters
+ *              (inferences, inf_skips, last and longest Invoke time) go into
+ *              HLT, and its out_q drops into out_q_drops. A model fault
+ *              (F5-F8, carried in its heartbeat) never enters the safe state
+ *              (owner, 2026-11-24): HLT goes on, followed each second by an
+ *              FLT line with the model fault. enter_safe_state() and the F3/F4
+ *              path are unchanged.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
  *              snap_drops removed with the snapshots. Nothing else changed.
  *              0.1.2-bench: HLT carried snap_drops (record builds).
  *              0.1.1-bench: IMU recovery. F1/F2 arrive as SYS_IMU_DOWN and no longer enter
@@ -17,7 +25,9 @@
  *              and sends one line: HLT when healthy, FLT while the IMU is down
  *              (recoverable) or after a fatal fault (F3/F4), which enters the
  *              one latched safe state until reset. While faulted it also sends
- *              an IMU-down notice to ble_link every second. Repeating them
+ *              an IMU-down notice to ble_link every second. While a model
+ *              fault has stopped inference, HLT is followed by an FLT line
+ *              with that fault (F5-F8) every second. Repeating them
  *              means a monitor opened late, or a phone that connects late,
  *              still sees the fault.
  */
@@ -85,6 +95,12 @@ void supervisor_task(void *param) {
   uint32_t ble_fails = 0;
   uint32_t serial_drops = 0;
   uint32_t imu_recoveries = 0;
+  uint32_t inf_out_q_drops = 0;
+  uint32_t inferences = 0;
+  uint32_t inf_skips = 0;
+  uint32_t lat_last_us = 0;
+  uint32_t lat_max_us = 0;
+  fault_code_t model_fault = FAULT_NONE;  // F5-F8 from the inference heartbeat
   uint32_t own_out_q_drops = 0;  // HLT / FLT lines this task could not queue
 
   // Every task gets a full HEARTBEAT_TIMEOUT_MS from now before it counts as
@@ -144,6 +160,13 @@ void supervisor_task(void *param) {
         ble_fails = m.ble_fails;
       } else if (m.task == TASK_SERIAL_OUT) {
         serial_drops = m.serial_drops;
+      } else if (m.task == TASK_INFERENCE) {
+        inf_out_q_drops = m.out_q_drops;
+        inferences = m.inferences;
+        inf_skips = m.inf_skips;
+        lat_last_us = m.lat_last_us;
+        lat_max_us = m.lat_max_us;
+        model_fault = m.fault;
       }
     }
 
@@ -177,13 +200,18 @@ void supervisor_task(void *param) {
       out.hlt.t_ms = (uint32_t)(now_us / 1000);
       out.hlt.samples = samples;
       out.hlt.sample_q_drops = sample_q_drops;
-      out.hlt.out_q_drops = dsp_out_q_drops + ble_out_q_drops + own_out_q_drops;
+      out.hlt.out_q_drops = dsp_out_q_drops + ble_out_q_drops + inf_out_q_drops +
+                            own_out_q_drops;
       out.hlt.drdy_timeouts = drdy_timeouts;
       out.hlt.ble_q_drops = ble_q_drops;
       out.hlt.ble_sent = ble_sent;
       out.hlt.ble_fails = ble_fails;
       out.hlt.serial_drops = serial_drops;
       out.hlt.imu_recoveries = imu_recoveries;
+      out.hlt.inferences = inferences;
+      out.hlt.inf_skips = inf_skips;
+      out.hlt.lat_last_us = lat_last_us;
+      out.hlt.lat_max_us = lat_max_us;
     } else {
       out.tag = OUT_FLT;
       out.flt.code = safe ? fault : imu_down;  // A fatal fault outranks F1/F2
@@ -197,6 +225,16 @@ void supervisor_task(void *param) {
     }
     if (xQueueSend(ctx->out_q, &out, 0) != pdTRUE) {
       own_out_q_drops++;
+    }
+    // A model fault stops inference only: streaming goes on, so HLT went out
+    // above, and the fault follows it every second (owner, 2026-11-24).
+    if (out.tag == OUT_HLT && model_fault != FAULT_NONE) {
+      out_msg_t mf = {};
+      mf.tag = OUT_FLT;
+      mf.flt.code = model_fault;
+      if (xQueueSend(ctx->out_q, &mf, 0) != pdTRUE) {
+        own_out_q_drops++;
+      }
     }
   }
 }

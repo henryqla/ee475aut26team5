@@ -1,9 +1,12 @@
 """
 File:        helpers.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.3.0
-Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): the
+Date:        2026-11-24
+Version:     0.4.0
+Change:      0.4.0 (training-live-inference-handoff.md, request G): BOOT_INF,
+             firmware-bench 0.1.5-bench's BOOT line with the model fields.
+             BOOT stays 0.1.4-bench's (clips recorded with it stay valid).
+             0.3.0 (manual-recording-overhaul-handoff.md, request B): the
              snapshot, EVT and S line builders are gone with those lines; BOOT
              is firmware-bench 0.1.4-bench's; log_samples() can add jumps in
              n, a reset and ok=0 rows; old_take_text() writes an older
@@ -37,6 +40,13 @@ for p in (str(GUI_DIR), str(CNN_DIR)):
 BOOT = ("BOOT,fw=0.1.4-bench,odr=416,acc_fs=16,gyr_fs=500,hpf_hz=0.50,settle_ms=2000,"
         "bias_max=10.0,vert=az,roll=gy,pitch=gx,l_dec=4,tx_buf=32768,out_q=256,perf_ms=10000,"
         "imu_retry_ms=500,imu_good_reads=3,seg_ms=1000,cfg_ms=5000,ble=RoadQuality")
+
+# firmware-bench 0.1.5-bench's BOOT line (request F): 0.1.4-bench's fields, then
+# the model fields (serial_out.cpp SETTINGS_FMT), here with the synthetic model.
+BOOT_INF = (BOOT.replace("fw=0.1.4-bench", "fw=0.1.5-bench") +
+            ",model=synthetic-20261124-130048,classes=POTHOLE|SPEED_BUMP|NONE,window=832,"
+            "hop=208,det_conf=0.60,det_lockout_ms=2000,arena=65536,arena_used=27540,"
+            "selftest=pass,selftest_diff=0.000001,inf=ok")
 
 # ============================================================================
 # Functions

@@ -1,9 +1,15 @@
 /*
  * File:        dsp.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-23
- * Version:     0.1.4-bench
- * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A;
+ * Date:        2026-11-24
+ * Version:     0.1.5-bench
+ * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              every sample's z_hp, roll and pitch (the values of its L line)
+ *              also go to inference_add_sample(), which fills the inference
+ *              ring buffer and wakes the inference task every MODEL_HOP
+ *              samples without waiting. Nothing else changed: the filters,
+ *              the bias, segments and the L line are as in 0.1.4-bench.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A;
  *              owner decision O2): no detection. The thresholds, lockout
  *              window, re-arm rule, pitch / vertical lobe trackers, classifier,
  *              EVT (Serial and BLE), snapshots and S lines are removed (git tag
@@ -25,7 +31,8 @@
  *              gyro bias (measured over the settle time), high-pass the
  *              vertical acceleration, add the sample to the current 1 s
  *              segment, and send it to out_q as an L line (raw chip axes, the
- *              model channels z_hp / roll / pitch, and ok = bias ready). Each
+ *              model channels z_hp / roll / pitch, and ok = bias ready), and
+ *              hand the model channels to live inference. Each
  *              finished segment goes to out_q (Serial) and ble_q (app). Never
  *              waits: a full queue drops the item and counts it.
  */
@@ -39,6 +46,7 @@
 #include "config.h"
 #include "types.h"
 #include "dsp.h"
+#include "inference.h"
 #include "supervisor.h"
 
 // ============================================================================
@@ -317,6 +325,9 @@ void dsp_task(void *param) {
         seg.t_first_us = s.t_us;
       }
       seg_add(&seg, &s, z_hp, &car);
+
+      // Live inference gets exactly the values of the L line. It never waits.
+      inference_add_sample(s.n, s.epoch, z_hp, car.roll_dps, car.pitch_dps, bias.ready);
 
       // Every sample goes out as an L line, without waiting. A full out_q
       // drops it and counts out_q_drops, so every lost sample shows up as a

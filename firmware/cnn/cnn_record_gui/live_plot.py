@@ -1,9 +1,11 @@
 """
 File:        live_plot.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-23
-Version:     0.2.1
-Change:      0.2.1 (manual-recording-overhaul-handoff.md, request B): the
+Date:        2026-11-24
+Version:     0.2.2
+Change:      0.2.2 (training-live-inference-handoff.md, request G): the
+             waiting text names firmware-bench 0.1.5-bench. Nothing else.
+             0.2.1 (manual-recording-overhaul-handoff.md, request B): the
              firmware sends no S lines any more; the view draws every
              LIVE_DECIMATE-th L sample (~52 a second), and its texts say so.
 Adapted from: (layout only, request 7) the "Real-Time IMU Acceleration"
@@ -206,7 +208,7 @@ class LivePlot(QGroupBox):
             stale = quiet >= cfg.LIVE_STALE_S
             state = "NO L LINE FOR %.1f s" % quiet if stale else None
         elif self._connected:
-            state = "Connected: waiting for L lines (firmware-bench 0.1.4-bench)"
+            state = "Connected: waiting for L lines (firmware-bench 0.1.5-bench)"
         else:
             state = "Not connected"
         paused = self.pause_check.isChecked()

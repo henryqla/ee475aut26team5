@@ -1,9 +1,16 @@
 /*
  * File:        serial_out.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-23
- * Version:     0.1.4-bench
- * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ * Date:        2026-11-24
+ * Version:     0.1.5-bench
+ * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              PROB and DET lines; a SELFTEST line right after BOOT; BOOT and
+ *              CFG add the model fields (model, classes, window, hop,
+ *              det_conf, det_lockout_ms, arena, arena_used, selftest,
+ *              selftest_diff, inf); HLT appends inferences, inf_skips,
+ *              lat_last_us, lat_max_us; FLT names for F5-F8. The L line and
+ *              the never-wait writer are unchanged.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
  *              one build. Removed: the snapshot sender (SNB / SNR / SNE, its
  *              CRC and the wait-for-space writer), EVT and S lines and their
  *              name helpers, the record / log build branches, and snap_drops
@@ -45,6 +52,7 @@
 #include "config.h"
 #include "types.h"
 #include "dsp.h"         // dsp_axis_map() for BOOT
+#include "inference.h"   // Model facts for BOOT / CFG, class names for DET
 #include "serial_out.h"
 #include "supervisor.h"
 
@@ -52,19 +60,29 @@
 // Macros
 // ============================================================================
 
-#define LINE_MAX_CHARS  640  // Longest line (BOOT / CFG) is ~260 characters; up to
+#define LINE_MAX_CHARS  640  // Longest line (BOOT / CFG) is ~430 characters; up to
                              // 638 print whole
 
 // Every setting in use, as key=value fields: BOOT's fields after its tag, and
 // the same text again in every CFG line (print_settings()). The %s after
 // bias_max is the axis mapping, itself three fields (vert=..,roll=..,pitch=..).
-#define SETTINGS_FMT   "fw=%s,odr=%d,acc_fs=%d,gyr_fs=%d,hpf_hz=%.2f,settle_ms=%d,"           \
-                       "bias_max=%.1f,%s,l_dec=%d,tx_buf=%d,out_q=%d,perf_ms=%d,"           \
-                       "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,cfg_ms=%d,ble=%s"
+// The model fields (request F) come from inference_boot(): classes are
+// '|'-separated because commas separate the fields; inf is "ok", or the model
+// fault (F5-F8) that stopped inference.
+#define SETTINGS_FMT   "fw=%s,odr=%d,acc_fs=%d,gyr_fs=%d,hpf_hz=%.2f,settle_ms=%d,"            \
+                       "bias_max=%.1f,%s,l_dec=%d,tx_buf=%d,out_q=%d,perf_ms=%d,"              \
+                       "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,cfg_ms=%d,ble=%s,"         \
+                       "model=%s,classes=%s,window=%" PRIu32 ",hop=%" PRIu32 ","               \
+                       "det_conf=%.2f,det_lockout_ms=%d,arena=%d,arena_used=%" PRIu32 ","      \
+                       "selftest=%s,selftest_diff=%.6f,inf=%s"
 #define SETTINGS_ARGS  FW_VERSION, IMU_ODR_HZ, ACCEL_FS_G, GYRO_FS_DPS, HPF_CUTOFF_HZ,         \
                        SETTLE_MS, GYRO_BIAS_MAX_DPS, dsp_axis_map(), L_DECIMALS,               \
                        SERIAL_TX_BUF_BYTES, OUT_Q_LEN, PERF_PERIOD_MS, IMU_RETRY_MS,           \
-                       IMU_RECOVER_GOOD_READS, SEGMENT_MS, CFG_PERIOD_MS, BLE_DEVICE_NAME
+                       IMU_RECOVER_GOOD_READS, SEGMENT_MS, CFG_PERIOD_MS, BLE_DEVICE_NAME,     \
+                       inference_boot()->model_version, inference_boot()->classes,             \
+                       inference_boot()->window, inference_boot()->hop, DET_CONF,              \
+                       DET_LOCKOUT_MS, TENSOR_ARENA_BYTES, inference_boot()->arena_used,       \
+                       selftest_text(), inference_boot()->selftest_diff, inf_state_text()
 
 // Serial must be native USB in Hardware CDC mode (decided): on the bench
 // DevKit that is the "USB" connector. With other settings Serial becomes UART0
@@ -101,6 +119,8 @@ static void handle_msg(const out_msg_t *m, ser_stats_t *st);
 static void perf_if_due(ser_stats_t *st);
 static const char *fault_name(fault_code_t f);
 static const char *link_name(link_event_t w);
+static const char *selftest_text(void);
+static const char *inf_state_text(void);
 static bool print_settings(const char *tag);
 static void print_boot(void);
 static void cfg_if_due(ser_stats_t *st);
@@ -171,6 +191,10 @@ static const char *fault_name(fault_code_t f) {
     case FAULT_IMU_LOST:  return "IMU_LOST";
     case FAULT_HEARTBEAT: return "HEARTBEAT_MISSED";
     case FAULT_BLE_INIT:  return "BLE_INIT_FAILED";
+    case FAULT_MODEL_SCHEMA: return "MODEL_SCHEMA_MISMATCH";
+    case FAULT_ARENA:     return "ARENA_ALLOC_FAILED";
+    case FAULT_INVOKE:    return "INVOKE_FAILED";
+    case FAULT_SELFTEST:  return "SELFTEST_FAILED";
     default:              return "NONE";
   }
 }
@@ -194,6 +218,30 @@ static const char *link_name(link_event_t w) {
 }
 
 /**
+ * @return The boot self-test result for BOOT, CFG and SELFTEST: "pass",
+ *         "fail", or "not_run" (the model did not load).
+ */
+static const char *selftest_text(void) {
+  const inference_boot_t *b = inference_boot();
+  return !b->selftest_ran ? "not_run" : (b->selftest_pass ? "pass" : "fail");
+}
+
+/**
+ * @return "ok" while inference runs, otherwise the model fault that stopped
+ *         it, e.g. "F8". Only serial_out calls it, so one static buffer is
+ *         enough.
+ */
+static const char *inf_state_text(void) {
+  static char buf[8];
+  const fault_code_t f = inference_fault();
+  if (f == FAULT_NONE) {
+    return "ok";
+  }
+  snprintf(buf, sizeof(buf), "F%u", (unsigned)f);
+  return buf;
+}
+
+/**
  * Prints one line with every setting in use: the tag, then SETTINGS_FMT's
  * key=value fields. BOOT and CFG lines differ only in the tag.
  * @param tag  "BOOT" or "CFG".
@@ -214,11 +262,16 @@ static bool print_settings(const char *tag) {
  */
 static void print_boot(void) {
   print_settings("BOOT");
+  write_line("SELFTEST,%s,%.6f", selftest_text(), inference_boot()->selftest_diff);
   write_line("#L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok");
   write_line("#LPERF,t_ms,lines,avg_us,max_us,heap_min");
   write_line("#SEG,t_start,t_end,synced,n,rms_z,peak_z,roll_rms,pitch_rms");
   write_line("#HLT,t_ms,samples,sample_q_drops,out_q_drops,drdy_timeouts,"
-             "ble_q_drops,ble_sent,ble_fails,serial_drops,imu_recoveries");
+             "ble_q_drops,ble_sent,ble_fails,serial_drops,imu_recoveries,inferences,"
+             "inf_skips,lat_last_us,lat_max_us");
+  write_line("#PROB,n,p_pothole,p_bump,p_none,lat_us");
+  write_line("#DET,n,class,conf");
+  write_line("#SELFTEST,result,max_diff");
   write_line("#FLT,code,name");
   write_line("#BLE,what,value");
   write_line("#CFG,<the BOOT fields again, every cfg_ms>");
@@ -270,11 +323,20 @@ static bool print_msg(const out_msg_t *m) {
                         m->seg.pitch_rms);
     case OUT_HLT:
       return write_line("HLT,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
-                        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32,
+                        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
+                        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32,
                         m->hlt.t_ms, m->hlt.samples, m->hlt.sample_q_drops,
                         m->hlt.out_q_drops, m->hlt.drdy_timeouts, m->hlt.ble_q_drops,
                         m->hlt.ble_sent, m->hlt.ble_fails, m->hlt.serial_drops,
-                        m->hlt.imu_recoveries);
+                        m->hlt.imu_recoveries, m->hlt.inferences, m->hlt.inf_skips,
+                        m->hlt.lat_last_us, m->hlt.lat_max_us);
+    case OUT_PROB:
+      // Probabilities at 4 decimals in model_data.h class order (P6).
+      return write_line("PROB,%" PRIu32 ",%.4f,%.4f,%.4f,%" PRIu32, m->prob.n,
+                        m->prob.p[0], m->prob.p[1], m->prob.p[2], m->prob.lat_us);
+    case OUT_DET:
+      return write_line("DET,%" PRIu32 ",%s,%.4f", m->det.n,
+                        inference_class_name(m->det.cls), m->det.conf);
     case OUT_FLT:
       return write_line("FLT,F%u,%s", (unsigned)m->flt.code, fault_name(m->flt.code));
     case OUT_BLE:

@@ -1,11 +1,13 @@
-# CNN training and export (request 3), Python 3.11. Installed into the record
-# GUI's venv, after the GUI's own requirements (C12, owner 2026-11-22). The venv
-# is at %USERPROFILE%\venvs\ee475-cnn, outside the repo: inside it, TensorFlow's
-# deepest files go over Windows' 260-character path limit. In Command Prompt:
+# CNN training (train.py, request E of training-live-inference-handoff.md),
+# Python 3.9 to 3.11 (the team uses 3.11). train.py and windows.py need only
+# these two packages. They usually go into the record GUI's venv,
+# %USERPROFILE%\venvs\ee475-cnn, after the GUI's own requirements. Keep the
+# venv path short: inside the repo, TensorFlow's deepest files go over
+# Windows' 260-character path limit. In Command Prompt:
 #   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" -m pip install -r requirements.txt
-# The pin comes from ml-on-device-playground's requirements.txt. TensorFlow
+# The pins come from ml-on-device-playground's requirements.txt. TensorFlow
 # 2.15 uses Keras 2; newer versions switch to Keras 3 and change model export.
 # scikit-learn, seaborn and matplotlib (also in the framework's list) are not
-# needed. Installing needs owner approval (cnn-record-train-handoff.md v0.4).
+# needed. Installing needs owner approval (P4).
 tensorflow~=2.15.1
 numpy~=1.26.4
