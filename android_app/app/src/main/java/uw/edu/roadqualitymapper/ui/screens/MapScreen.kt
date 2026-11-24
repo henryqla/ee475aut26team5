@@ -1,5 +1,14 @@
 package uw.edu.roadqualitymapper.ui.screens
 
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
+import android.os.Looper
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -27,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -39,13 +49,23 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.google.android.gms.location.FusedLocationProviderClient
+import com.google.android.gms.location.LocationCallback
+import com.google.android.gms.location.LocationRequest
+import com.google.android.gms.location.LocationResult
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
 import com.google.android.gms.maps.CameraUpdateFactory
 import com.google.android.gms.maps.model.BitmapDescriptorFactory
 import com.google.android.gms.maps.model.CameraPosition
@@ -55,6 +75,9 @@ import com.google.android.gms.maps.model.LatLngBounds
 import com.google.android.gms.maps.model.RoundCap
 import com.google.android.gms.maps.model.StrokeStyle
 import com.google.android.gms.maps.model.StyleSpan
+import com.google.android.gms.tasks.CancellationTokenSource
+import com.google.android.gms.tasks.Task
+import com.google.maps.android.compose.CameraMoveStartedReason
 import com.google.maps.android.compose.ComposeMapColorScheme
 import com.google.maps.android.compose.GoogleMap
 import com.google.maps.android.compose.GoogleMapComposable
@@ -68,6 +91,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import uw.edu.roadqualitymapper.BuildConfig
@@ -91,6 +115,9 @@ import uw.edu.roadqualitymapper.ui.RoughnessScale
 import uw.edu.roadqualitymapper.ui.TileData
 import uw.edu.roadqualitymapper.ui.boxAround
 import uw.edu.roadqualitymapper.ui.headingDirection
+import uw.edu.roadqualitymapper.ui.joinPieces
+import uw.edu.roadqualitymapper.ui.linePath
+import uw.edu.roadqualitymapper.ui.metersFromPath
 import uw.edu.roadqualitymapper.ui.metersToPixels
 import uw.edu.roadqualitymapper.ui.eventMarkerHue
 import uw.edu.roadqualitymapper.ui.nextBand
@@ -101,6 +128,7 @@ import uw.edu.roadqualitymapper.ui.standInFor
 import uw.edu.roadqualitymapper.ui.tilesCovering
 import uw.edu.roadqualitymapper.ui.zoomBand
 import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
+import kotlin.coroutines.resume
 import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.roundToInt
@@ -187,6 +215,39 @@ fun MapScreen(modifier: Modifier = Modifier) {
     }
     val density = LocalDensity.current.density
     val colorMode by AppSettings.colorMode.collectAsState()
+
+    // The user's location: a glowing blue dot on the map (MyLocationDot), and where the map opens.
+    // Needs the location permission, which Start trip asks for; until then the map opens at UW
+    // without a dot. Checked again on every resume, since the permission dialog pauses the app.
+    val context = LocalContext.current
+    var hasLocation by remember { mutableStateOf(context.hasLocationPermission()) }
+    LifecycleResumeEffect(Unit) {
+        hasLocation = context.hasLocationPermission()
+        onPauseOrDispose { }
+    }
+    // Location updates for the dot, only while the app is on screen.
+    var myLocation by remember { mutableStateOf<LatLng?>(null) }
+    LifecycleResumeEffect(hasLocation) {
+        val client = LocationServices.getFusedLocationProviderClient(context)
+        val callback = object : LocationCallback() {
+            override fun onLocationResult(result: LocationResult) {
+                result.lastLocation?.let { myLocation = LatLng(it.latitude, it.longitude) }
+            }
+        }
+        if (hasLocation) client.startUpdates(callback)
+        onPauseOrDispose { client.removeLocationUpdates(callback) }
+    }
+    // Once per app run (the map tab stays alive while the app is open), and not if the user has
+    // already moved the map.
+    var centeredOnUser by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(hasLocation) {
+        if (!hasLocation || centeredOnUser) return@LaunchedEffect
+        val here = currentLocation(context) ?: return@LaunchedEffect
+        if (myLocation == null) myLocation = here
+        centeredOnUser = true
+        if (cameraPositionState.cameraMoveStartedReason == CameraMoveStartedReason.GESTURE) return@LaunchedEffect
+        cameraPositionState.move(CameraUpdateFactory.newLatLngZoom(here, DEFAULT_ZOOM))
+    }
 
     // Trips: load whole trips when the view is picked.
     LaunchedEffect(view) {
@@ -282,15 +343,23 @@ fun MapScreen(modifier: Modifier = Modifier) {
                             loading -= tile
                         }
                     }
-                    show()
+                    // Redraw only if this tile changes what's on screen: it's one of the current
+                    // tiles, or one of those is still missing (this tile may stand in for it).
+                    // A zoom-level prefetch usually isn't, and redrawing would only cost time.
+                    val (visible, ring) = wantedTiles()
+                    val current = visible + ring
+                    if (tile in current || current.any { it !in RoadQualityTiles.loaded }) show()
                 } finally {
                     queued.remove(tile)
                 }
             }
         }
 
-        snapshotFlow { cameraPositionState.isMoving }.collect { moving ->
-            if (moving) return@collect
+        // Each time the map comes to rest somewhere new. Null while it moves, so nothing loads
+        // mid-gesture. Watching the position too catches a move made before the map was ready
+        // (opening at the user's location), which never sets isMoving.
+        snapshotFlow { if (cameraPositionState.isMoving) null else cameraPositionState.position }.collect { resting ->
+            if (resting == null) return@collect
             val (visible, ring, nextBands) = wantedTiles()
             val wanted = (visible + ring + nextBands).toSet()
             // Tiles still waiting their turn that the map has moved away from: drop them, so the
@@ -330,6 +399,9 @@ fun MapScreen(modifier: Modifier = Modifier) {
     // Road quality lines each have their own width on the ground (see lineWidthM).
     val pixelsPerMeter = metersToPixels(1.0, zoom, latitude, density)
     val minLineWidthPx = MIN_ROAD_LINE_WIDTH_DP * density
+    // Road quality pieces joined into as few lines as possible (RoadLines.kt), redone only when
+    // the pieces change.
+    val roadLines = remember(pieces) { joinPieces(pieces) }
     Box(modifier.onSizeChanged { mapSize = it }) {
         GoogleMap(
             modifier = Modifier.fillMaxSize(),
@@ -339,19 +411,33 @@ fun MapScreen(modifier: Modifier = Modifier) {
             // Light or dark map with the app's theme (Settings > Theme), not the phone's.
             mapColorScheme = if (LocalDarkTheme.current) ComposeMapColorScheme.DARK else ComposeMapColorScheme.LIGHT,
             onMapLoaded = { mapLoaded = true },
+            // Tapping a road shows its roughness. The lines themselves aren't clickable, since one
+            // line covers many pieces.
+            onMapClick = { point ->
+                if (view == MapView.ROAD_QUALITY) {
+                    pieceAt(point, pieces, pixelsPerMeter, density)?.let { piece ->
+                        status = "%.3f g · %d drive(s)".format(piece.roughness, piece.drives)
+                    }
+                }
+            },
         ) {
             if (view == MapView.ROAD_QUALITY) {
-                pieces.forEach { piece ->
-                    RoadPieceOnMap(piece, max((piece.lineWidthM() * pixelsPerMeter).toFloat(), minLineWidthPx), colorMode, onClick = {
-                        status = "%.3f g · %d drive(s)".format(piece.roughness, piece.drives)
-                    })
+                // Keyed by each line's first piece, so when a tile loads, the lines already drawn
+                // stay as they are and only new or longer ones are redrawn.
+                roadLines.forEach { line ->
+                    key(line.first().pieceId) {
+                        RoadLineOnMap(line, max((line.first().lineWidthM() * pixelsPerMeter).toFloat(), minLineWidthPx), colorMode)
+                    }
                 }
                 // Only potholes and speed bumps are shown; unknown bumps stay in the data for tuning.
                 if (zoom >= MIN_EVENT_MARKER_ZOOM) {
-                    spots.filter { it.eventClass != EventClass.UNKNOWN }.forEach { EventSpotMarker(it, colorMode) }
+                    spots.filter { it.eventClass != EventClass.UNKNOWN }.forEach { spot ->
+                        key(spot.lat, spot.lon, spot.eventClass) { EventSpotMarker(spot, colorMode) }
+                    }
                 }
             }
             if (view == MapView.TRIPS) drives.forEach { drive -> DriveOnMap(drive, lineWidthPx, colorMode) }
+            myLocation?.let { MyLocationDot(it, density) }
         }
 
         NorthButton(
@@ -536,33 +622,115 @@ private fun DebugBar(
 }
 
 /**
- * Road quality view: one piece of road, drawn along its path in one color. Snapped pieces on a
- * two-way road are moved to their direction's side of the road.
+ * Road quality view: pieces of road joined end to end (joinPieces in RoadLines.kt), drawn as one
+ * line with each piece in its own color. Snapped pieces on a two-way road are moved to their
+ * direction's side of the road. Not clickable: a tap is matched to its piece in onMapClick.
  */
 @Composable
 @GoogleMapComposable
-private fun RoadPieceOnMap(piece: RoadPiece, lineWidthPx: Float, colorMode: ColorMode, onClick: () -> Unit) {
-    val points = remember(piece) {
-        val path = piece.path.map { LatLng(it.lat, it.lon) }
-        if (piece.kind == RoadPieceKind.ROAD && piece.oneway == false) {
-            shiftPathRight(path, piece.lineWidthM() / 2 + ROAD_SIDE_GAP_M)
-        } else {
-            path
+private fun RoadLineOnMap(line: List<RoadPiece>, lineWidthPx: Float, colorMode: ColorMode) {
+    val points = remember(line) { drawnPath(line.first(), linePath(line)) }
+    // One span per piece, covering that piece's steps along the line.
+    val dark = LocalDarkTheme.current
+    val spans = remember(line, colorMode, dark) {
+        line.map { piece ->
+            val color = roughnessColor(piece.roughness, colorMode, dark).toArgb()
+            StyleSpan(StrokeStyle.colorBuilder(color).build(), (piece.path.size - 1).toDouble())
         }
     }
-    if (points.size < 2) return
     Polyline(
         points = points,
-        color = roughnessColor(piece.roughness, colorMode, LocalDarkTheme.current),
+        spans = spans,
         width = lineWidthPx,
-        // Round ends and joints overlap the next piece a little, so the road looks continuous.
         startCap = RoundCap(),
         endCap = RoundCap(),
         jointType = JointType.ROUND,
-        clickable = true,
-        onClick = { onClick() },
     )
 }
+
+/**
+ * Where a path of [piece]'s kind is drawn: on a two-way road, moved to its direction's side.
+ * [path] is the piece's own path, or a whole line of pieces like it.
+ */
+private fun drawnPath(piece: RoadPiece, path: List<LatLng>): List<LatLng> =
+    if (piece.kind == RoadPieceKind.ROAD && piece.oneway == false) {
+        shiftPathRight(path, piece.lineWidthM() / 2 + ROAD_SIDE_GAP_M)
+    } else {
+        path
+    }
+
+/**
+ * The piece drawn under a tap at [point], or null if the tap missed every road. Measured from
+ * where each line is drawn, so a tap picks the right direction of a two-way road.
+ */
+private fun pieceAt(point: LatLng, pieces: List<RoadPiece>, pixelsPerMeter: Float, density: Float): RoadPiece? {
+    val toleranceM = TAP_TOLERANCE_DP * density / pixelsPerMeter
+    return pieces
+        .map { piece -> piece to metersFromPath(point, drawnPath(piece, piece.path.map { LatLng(it.lat, it.lon) })) }
+        .filter { (piece, meters) -> meters <= piece.lineWidthM() / 2 + toleranceM }
+        .minByOrNull { (_, meters) -> meters }
+        ?.first
+}
+
+/** How far from a road a tap still counts as on it, beyond the line itself. */
+private const val TAP_TOLERANCE_DP = 12
+
+/**
+ * The user's location: a bright blue dot with a soft glow around it, so it stands out from the
+ * map's flat colors. Drawn above the road lines.
+ */
+@Composable
+@GoogleMapComposable
+private fun MyLocationDot(position: LatLng, density: Float) {
+    val dark = LocalDarkTheme.current
+    val icon = remember(density, dark) { BitmapDescriptorFactory.fromBitmap(glowingDot(density, dark)) }
+    Marker(
+        state = rememberUpdatedMarkerState(position),
+        icon = icon,
+        anchor = Offset(0.5f, 0.5f),
+        zIndex = MY_LOCATION_Z_INDEX,
+        onClick = { true },   // no info window
+    )
+}
+
+private const val MY_LOCATION_Z_INDEX = 10f
+
+/** The dot's picture: glow, white ring, then a core lit from the middle, like a lamp. */
+private fun glowingDot(density: Float, dark: Boolean): Bitmap {
+    val sizePx = (GLOW_RADIUS_DP * 2 * density).toInt()
+    val center = sizePx / 2f
+    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+    val blue = if (dark) 0xFF4DA3FF.toInt() else 0xFF1A73E8.toInt()
+    val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        shader = RadialGradient(
+            center, center, center,
+            intArrayOf(withAlpha(blue, 0.55f), withAlpha(blue, 0.25f), withAlpha(blue, 0f)),
+            floatArrayOf(0.25f, 0.55f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+    }
+    canvas.drawCircle(center, center, center, glow)
+    canvas.drawCircle(center, center, RING_RADIUS_DP * density, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFFFFF.toInt() })
+    val coreRadius = CORE_RADIUS_DP * density
+    val core = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        shader = RadialGradient(
+            center, center, coreRadius,
+            intArrayOf(0xFFB8DCFF.toInt(), blue),
+            floatArrayOf(0f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+    }
+    canvas.drawCircle(center, center, coreRadius, core)
+    return bitmap
+}
+
+private const val GLOW_RADIUS_DP = 22f
+private const val RING_RADIUS_DP = 9f
+private const val CORE_RADIUS_DP = 7f
+
+private fun withAlpha(color: Int, alpha: Float): Int =
+    ((alpha * 255).toInt() shl 24) or (color and 0x00FFFFFF)
 
 /** Width on the ground: the lanes in the piece's direction for ROAD pieces, about one lane for CELL. */
 private fun RoadPiece.lineWidthM(): Double =
@@ -687,3 +855,34 @@ private fun EventMarker(colorMode: ColorMode, eventClass: EventClass, position: 
         icon = BitmapDescriptorFactory.defaultMarker(hue),
     )
 }
+
+private fun Context.hasLocationPermission() =
+    listOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)
+        .any { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+
+/**
+ * Where the phone is, or null if it can't tell. The last known location if there is one
+ * (instant), otherwise a fresh fix. Only called with the location permission.
+ */
+@SuppressLint("MissingPermission")
+private suspend fun currentLocation(context: Context): LatLng? {
+    val client = LocationServices.getFusedLocationProviderClient(context)
+    val location = client.lastLocation.awaitOrNull()
+        ?: client.getCurrentLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, CancellationTokenSource().token)
+            .awaitOrNull()
+    return location?.let { LatLng(it.latitude, it.longitude) }
+}
+
+/** The task's result, or null if it failed. */
+private suspend fun <T> Task<T>.awaitOrNull(): T? = suspendCancellableCoroutine { continuation ->
+    addOnCompleteListener { task -> continuation.resume(if (task.isSuccessful) task.result else null) }
+}
+
+/** Location updates every couple of seconds for the dot. Only called with the location permission. */
+@SuppressLint("MissingPermission")
+private fun FusedLocationProviderClient.startUpdates(callback: LocationCallback) {
+    val request = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, MY_LOCATION_INTERVAL_MS).build()
+    requestLocationUpdates(request, callback, Looper.getMainLooper())
+}
+
+private const val MY_LOCATION_INTERVAL_MS = 2_000L

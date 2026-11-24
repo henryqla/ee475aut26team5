@@ -76,6 +76,31 @@ private fun offset(point: LatLng, eastMeters: Double, northMeters: Double) = Lat
 fun shiftPathRight(path: List<LatLng>, meters: Double): List<LatLng> =
     path.indices.map { i -> shiftRight(path[i], travelDirectionAt(path, i), meters) }
 
+/** Straight-line distance between two points, in meters. */
+fun metersBetween(a: LatLng, b: LatLng): Double {
+    val north = (b.latitude - a.latitude) * METERS_PER_DEGREE_LAT
+    val east = (b.longitude - a.longitude) * METERS_PER_DEGREE_LAT * cos(Math.toRadians(a.latitude))
+    return sqrt(east * east + north * north)
+}
+
+/** How far [point] is from the nearest part of [path], in meters. */
+fun metersFromPath(point: LatLng, path: List<LatLng>): Double {
+    if (path.size == 1) return metersBetween(point, path[0])
+    val metersPerDegreeLon = METERS_PER_DEGREE_LAT * cos(Math.toRadians(point.latitude))
+    // Each vertex in meters east and north of [point], so [point] is the origin.
+    fun east(p: LatLng) = (p.longitude - point.longitude) * metersPerDegreeLon
+    fun north(p: LatLng) = (p.latitude - point.latitude) * METERS_PER_DEGREE_LAT
+    return (1 until path.size).minOfOrNull { i ->
+        val ax = east(path[i - 1]); val ay = north(path[i - 1])
+        val dx = east(path[i]) - ax; val dy = north(path[i]) - ay
+        val lengthSquared = dx * dx + dy * dy
+        // Closest point on the segment: the origin projected onto it, kept between its ends.
+        val t = if (lengthSquared > 0) (-(ax * dx + ay * dy) / lengthSquared).coerceIn(0.0, 1.0) else 0.0
+        val x = ax + t * dx; val y = ay + t * dy
+        sqrt(x * x + y * y)
+    } ?: Double.MAX_VALUE
+}
+
 /** Unit vector from [from] to [to], or null if they're the same point. */
 private fun step(from: LatLng, to: LatLng): TravelDirection? {
     val north = (to.latitude - from.latitude) * METERS_PER_DEGREE_LAT
