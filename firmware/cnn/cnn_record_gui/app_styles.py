@@ -1,8 +1,12 @@
 """
 File:        app_styles.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-21
-Version:     0.2.0
+Date:        2026-11-23
+Version:     0.2.1
+Change:      0.2.1 (manual-recording-overhaul-handoff.md, request B): the
+             "record-key" button role (the large P / B / N, L and delete
+             buttons) and its font size token; TRIGGER_LINE is now PRESS_LINE
+             (the clip plot marks the key press, not a trigger).
 Adapted from: Python/app_styles.py and Python/live_inference_widget.py in
              ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
@@ -110,7 +114,7 @@ class AppStyles:
     PEN_AZ = "#5FA8A8"
     PEN_GZ = "#B5AE62"
     RAW_PEN_WIDTH = 1
-    TRIGGER_LINE = ACCENT_WARN    # Dashed line at the trigger sample
+    PRESS_LINE = ACCENT_WARN      # Dashed line at the key press (or an old take's trigger)
 
     # ---- Fonts
     MONO_FONT = "Consolas, Menlo, Monaco, monospace"  # Framework list plus Consolas
@@ -128,6 +132,7 @@ class AppStyles:
     CARD_HEADLINE_FONT_SIZES = (36, 30, 24, 20)
     CARD_SUBLINE_FONT_SIZE = 13   # Framework hero card
     TAG_FONT_SIZE = 11            # Small outlined tags (SIMULATED, live plot state)
+    RECORD_KEY_FONT_SIZE = 17     # DRAFT. The large P / B / N, L and delete buttons
 
     # ---- Sizes and spacing (px)
     WIDGET_SPACING = 25           # Between panels (framework)
@@ -216,6 +221,11 @@ QPushButton:disabled {
 }
 QPushButton[armed="true"] {
     border: 2px solid $ACCENT_ARMED;
+}
+QPushButton[role="record-key"] {
+    font-size: ${RECORD_KEY_FONT_SIZE}px;
+    font-weight: bold;
+    padding: 12px 8px;
 }
 
 /* Inputs */

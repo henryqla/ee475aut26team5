@@ -1,16 +1,17 @@
- Bench Wiring and Expected Behavior
+# Bench Wiring and Expected Behavior
 
 - File: `WIRING.md`
 - Authors: Henry (owner); written with Claude
-- Date: 2026-11-16
-- Version: 0.2
-- Change: 2026-11-23: the board is turned so the Y arrow points to the nose (pitch = `gx`,
-  roll = `gy`, `PITCH_NOSE_DOWN_SIGN` `-1`); gestures and the sign check follow. A `CFG` line
-  repeats the `BOOT` settings every 5 s.
-  `0.1.1-bench`: Gestures now depend on direction (pitch sequence). There is no `UNKNOWN`
-  class. The IMU recovers from F1/F2 without a reset.
+- Date: 2026-11-23
+- Version: 0.3
+- Change: 0.3 (`0.1.4-bench`, manual-recording-overhaul-handoff.md, request A): the board
+  detects nothing and streams every sample as an `L` line, so the gesture and `EVT` checks
+  are gone and the expected output describes `L` lines.
+  2026-11-23: the board is turned so the Y arrow points to the nose (pitch = `gx`,
+  roll = `gy`). A `CFG` line repeats the `BOOT` settings every 5 s.
+  `0.1.1-bench`: the IMU recovers from F1/F2 without a reset.
 - Description: How to wire the ESP32-S3-DevKitC-1 to the Adafruit LSM6DSO32 breakout for the
-  `0.1.1-bench` build, and what Serial should show once it runs. Pins come from `board_pins.h`
+  `0.1.4-bench` build, and what Serial should show once it runs. Pins come from `board_pins.h`
   (`BOARD_DEVKITC1_N8R8`), the same GPIOs as the team PCB.
 
 ---
@@ -48,41 +49,33 @@ Unplug USB while wiring. The GPIO numbers are printed on the DevKit silkscreen.
 
 Lay the breakout flat with the chip facing up. At rest the `az` column reads about +1.0 g. The
 end the Y arrow points at is the car's **nose** (front), so the X arrow points to the car's
-right. Pitch is `gx` and roll is `gy` (`map_axes()` in `dsp.cpp`).
+right. Pitch is `gx` and roll is `gy` (`map_axes()` in `dsp.cpp`). `BOOT` prints the mapping
+as `vert=az,roll=gy,pitch=gx`.
 
-The class comes from the **first** pitch movement. Nose down then back up is a pothole (the
-front wheels drop in, then climb out). Nose up then back down is a speed bump. Every event is
-`POTHOLE` or `BUMP`.
+Hold still for the first 2 s after boot or after an IMU recovery: that is when the gyro bias is
+measured. The last column of every `L` line (`ok`) is 0 during that time and 1 after it.
 
-- **Pothole (`POTHOLE`, `pitch_seq` `DU`):** quickly tip the Y-arrow end down, then back to
-  flat.
-- **Speed bump (`BUMP`, `pitch_seq` `UD`):** quickly tip the Y-arrow end up, then back to flat.
-- **One-wheel pothole (`POTHOLE`, basis `roll`):** tip the board around the Y axis only (the
-  edge the X arrow points at goes up or down). Mostly `gy` moves.
-
-Tilts must be quick, about 20–30° in about 0.2 s, to pass the 60 dps threshold. Hold still for
-the first 2 s after boot or after an IMU recovery: that is when gyro bias is measured.
-
-**First run: check the sign.** Tip the Y-arrow end down quickly and watch `gx` in the `S`
-lines. It should go **negative**. If it goes positive, set `PITCH_NOSE_DOWN_SIGN` to `+1` in
-`config.h`, or every pothole will read as a bump.
+The board does not detect or classify anything. To record an event, press P, B or N in the
+record GUI (`firmware/cnn/cnn_record_gui/`); the GUI saves a clip around the press.
 
 ## Expected behavior
 
 Open the Serial monitor after flashing. The baud setting does not matter on native USB. Lines
-printed before the monitor opens wait in the buffer, so `BOOT` still appears.
+printed before the monitor opens wait in the buffer, so `BOOT` still appears. The `L` lines
+come about 416 times a second, so the Arduino Serial Monitor scrolls fast; the record GUI is the
+better way to watch them.
 
 | When | Expected Serial output |
 |---|---|
-| Monitor opens | One `BOOT,fw=0.1.1-bench,...` line with every setting, then `#` column headers, then `BLE,advertising,0` |
+| Monitor opens | One `BOOT,fw=0.1.4-bench,...` line with every setting (no thresholds), then `#` column headers, then `BLE,advertising,0` |
+| Continuously | About 416 `L` lines/s: `L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok`. `n` goes up by exactly 1 each line. Flat and still: `az` about 1.00, `ax` and `ay` about 0, gyro within a few dps of 0, `z_hp`, `roll` and `pitch` about 0 |
+| First 2 s after boot | `ok` is 0 (settle time: the gyro bias is being measured), then 1 |
 | Every second | One `HLT` line: `samples` rises by about 416 and every drop count is 0. `serial_drops` can be nonzero only from time the monitor was closed |
 | Every 5 s | One `CFG,fw=...` line: the `BOOT` settings again, so a program that connected after `BOOT` went by still gets them |
+| Every 10 s | One `#LPERF` comment line: L lines handled, their average and longest write time, and the lowest free heap |
 | Every second | One `SEG` line: `n` is 416 or 417, and `synced` is 0 until a phone writes TIME. The first `SEG` after boot is partial |
-| Continuously | About 52 `S` lines/s. Flat and still: `az` about 1.00, `ax` and `ay` about 0, gyro within a few dps of 0, `z_hp` about 0 |
-| First 2 s after boot | No events (settle time) |
-| One firm tap | One `EVT` line about 1.25 s later. A tap's class is not meaningful |
-| Nose down-up / nose up-down / roll tilt | `EVT` with `POTHOLE,...,DU,pitch` / `BUMP,...,UD,pitch` / `POTHOLE,...,-,roll`. The last two columns are `pitch_seq` (first lobe, plus the opposite one if it followed within 300 ms) and `basis` (`pitch`, `roll`, or `z` when only vertical motion was seen) |
-| Phone connects (app or nRF Connect) | Advertises as `RoadQuality`, then `BLE,connected`, `BLE,mtu,247`, `BLE,subscribed` |
+| Taps or shaking | The values in the `L` lines move. No other lines appear: there are no `EVT`, `S` or snapshot lines in this build |
+| Phone connects (app or nRF Connect) | Advertises as `RoadQuality`, then `BLE,connected`, `BLE,mtu,247`, `BLE,subscribed`. The app gets `status` and `seg` messages, never `evt` |
 
 ## Troubleshooting
 
@@ -91,7 +84,8 @@ shows `imu_ok:false`.
 
 - **IMU faults (F1, F2) recover by themselves.** The firmware retries every 0.5 s. Fix the
   wire or the power, and about 1.5–2 s later `HLT` lines return with `imu_recoveries` one
-  higher. The app gets `imu_ok:true` again, and events resume after the 2 s settle time.
+  higher. The app gets `imu_ok:true` again. `L` lines resume with `ok` 0 for the 2 s settle
+  time, then 1.
 - **F3 and F4 latch** until you press RST.
 
 | Symptom | Likely cause |

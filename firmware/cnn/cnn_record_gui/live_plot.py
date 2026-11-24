@@ -1,8 +1,11 @@
 """
 File:        live_plot.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
+Date:        2026-11-23
+Version:     0.2.1
+Change:      0.2.1 (manual-recording-overhaul-handoff.md, request B): the
+             firmware sends no S lines any more; the view draws every
+             LIVE_DECIMATE-th L sample (~52 a second), and its texts say so.
 Adapted from: (layout only, request 7) the "Real-Time IMU Acceleration"
              panel in Python/live_inference_widget.py in
              ml-on-device-playground,
@@ -13,14 +16,13 @@ Adapted from: (layout only, request 7) the "Real-Time IMU Acceleration"
              LICENSE-ml-on-device-playground.txt in this folder. Kept: a
              line of newest values above the plot with a control on its
              right.
-Description: The "Live IMU" view: a scrolling plot of the S lines the board
-             sends all the time (one sample every PRINT_EVERY_N, ~52 per
-             second), so you can see the sensor working and watch a tap
-             happen before its snapshot arrives. Accel (ax, ay, az and z_hp,
-             g) on top, gyro (gx, gy, gz, dps) below, chip axes exactly as
-             the S line sends them: the gyro still has its bias, which the
-             snapshots have removed. Display only: it never records or saves
-             anything (takes come from snapshots). Click a name in a legend
+Description: The "Live IMU" view: a scrolling plot of every LIVE_DECIMATE-th
+             L sample the board streams (~52 per second), so you can see the
+             sensor working. Accel (ax, ay, az and z_hp, g) on top, gyro (gx,
+             gy, gz, dps) below, chip axes exactly as the L line sends them:
+             the gyro still has its bias, which the clip's roll and pitch
+             columns have removed. Display only: it never records or saves
+             anything (clips take every L sample). Click a name in a legend
              to hide or show that curve. Restyled (request 7): a panel with
              a one-line readout above the plot (all seven values in its
              tooltip), a state tag and Pause beside it; each sub-plot's name
@@ -70,7 +72,7 @@ _GYR_CURVES = (("gx", "gx (pitch)", "PEN_PITCH", True),
 
 
 class LivePlot(QGroupBox):
-    """Scrolling plot of the last LIVE_WINDOW_S seconds of S lines."""
+    """Scrolling plot of the last LIVE_WINDOW_S seconds of L samples."""
 
     def __init__(self, title: str = "Live IMU") -> None:
         """
@@ -93,8 +95,8 @@ class LivePlot(QGroupBox):
         self.state_tag.hide()
         header.addWidget(self.state_tag)
         self.pause_check = QCheckBox("Pause")
-        self.pause_check.setToolTip("Freeze the plot. Lines keep arriving; untick to follow "
-                                    "live again.")
+        self.pause_check.setToolTip("Freeze the plot. Samples keep arriving and clips keep "
+                                    "recording; untick to follow live again.")
         self.pause_check.toggled.connect(self._on_pause)
         header.addWidget(self.pause_check)
         layout.addLayout(header)
@@ -109,7 +111,7 @@ class LivePlot(QGroupBox):
         acc_legend = style_plot(self.p_acc, "accel (g)", legend_cols=len(_ACC_CURVES),
                                 x_values=False)
         gyr_legend = style_plot(self.p_gyr, "gyro (dps)", legend_cols=len(_GYR_CURVES))
-        self.p_gyr.getAxis("bottom").setLabel("time before the newest line (s)",
+        self.p_gyr.getAxis("bottom").setLabel("time before the newest sample (s)",
                                               **axis_label_style())
         # Fixed time axis (y stays on auto range); a mouse zoom is kept until
         # the "A" button in the plot's corner is clicked.
@@ -123,8 +125,8 @@ class LivePlot(QGroupBox):
                 self.curves[channel] = plot.plot(pen=pen, connect="finite")
                 legend.addItem(self.curves[channel], name)
 
-        note = set_role(QLabel("S lines, chip axes, gyro bias not removed. Display only, "
-                               "never saved."), "note")
+        note = set_role(QLabel("Every %dth L sample, chip axes, gyro bias not removed. "
+                               "Display only." % cfg.LIVE_DECIMATE), "note")
         layout.addWidget(note)
 
         self.redraw_timer = QTimer(self)
@@ -139,7 +141,7 @@ class LivePlot(QGroupBox):
 
     def add_sample(self, s: SampleLine) -> None:
         """
-        One S line from the reader (GUI thread, through a Qt signal).
+        One live point (every LIVE_DECIMATE-th L sample), GUI thread.
         @param s  The sample.
         """
         self.buffer.add(s)
@@ -165,7 +167,7 @@ class LivePlot(QGroupBox):
 
     def lines_per_second(self) -> Optional[float]:
         """
-        @return S lines per second over the window, or None (too few yet).
+        @return Points drawn per second over the window, or None (too few yet).
         """
         return self.buffer.rate_hz()
 
@@ -186,7 +188,7 @@ class LivePlot(QGroupBox):
         self._readout()
 
     def _redraw(self) -> None:
-        """Every LIVE_REDRAW_MS: redraws the curves if new lines came in."""
+        """Every LIVE_REDRAW_MS: redraws the curves if new samples came in."""
         if not self._dirty or self.pause_check.isChecked():
             return
         self._dirty = False
@@ -202,9 +204,9 @@ class LivePlot(QGroupBox):
         if self._connected and self._last_wall is not None:
             quiet = time.monotonic() - self._last_wall
             stale = quiet >= cfg.LIVE_STALE_S
-            state = "NO S LINE FOR %.1f s" % quiet if stale else None
+            state = "NO L LINE FOR %.1f s" % quiet if stale else None
         elif self._connected:
-            state = "Connected: waiting for S lines"
+            state = "Connected: waiting for L lines (firmware-bench 0.1.4-bench)"
         else:
             state = "Not connected"
         paused = self.pause_check.isChecked()
@@ -222,10 +224,10 @@ class LivePlot(QGroupBox):
         rate_text = "-" if rate is None else "%.1f" % rate
         v = dict(zip(S_CHANNELS, s.values))
         # Bench mapping: roll = chip gy, pitch = chip gx (see _GYR_CURVES).
-        self.info.setText("z_hp %+.4f g   roll %+7.2f  pitch %+7.2f dps   %s lines/s   n %d"
+        self.info.setText("z_hp %+.4f g   roll %+7.2f  pitch %+7.2f dps   %s points/s   n %d"
                           % (v["z_hp"], v["gy"], v["gx"], rate_text, s.n))
         self.info.set_detail(
-            "%s lines/s  n %d  t %.3f s\n"
+            "%s points/s drawn  n %d  t %.3f s\n"
             "ax %+.4f  ay %+.4f  az %+.4f  z_hp %+.4f g\n"
             "gx %+7.2f  gy %+7.2f  gz %+7.2f dps"
             % (rate_text, s.n, s.t_us / 1e6, v["ax"], v["ay"], v["az"], v["z_hp"],

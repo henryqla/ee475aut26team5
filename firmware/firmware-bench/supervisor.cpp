@@ -1,12 +1,11 @@
 /*
  * File:        supervisor.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-18
- * Version:     0.1.2-bench
- * Change:      Record mode (cnn-record-train-handoff.md v0.4, request 1): HLT
- *              carries snap_drops, the sum of the counts from dsp and
- *              serial_out heartbeats (always 0 in product builds, where
- *              serial_out does not print it).
+ * Date:        2026-11-23
+ * Version:     0.1.4-bench
+ * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ *              snap_drops removed with the snapshots. Nothing else changed.
+ *              0.1.2-bench: HLT carried snap_drops (record builds).
  *              0.1.1-bench: IMU recovery. F1/F2 arrive as SYS_IMU_DOWN and no longer enter
  *              the safe state: imu_acq keeps running and retries. While down,
  *              FLT and IMU-down go out every second as before; on SYS_IMU_UP,
@@ -62,7 +61,7 @@ void sys_fault_and_stop(QueueHandle_t sys_q, task_id_t task, fault_code_t code) 
 
 /**
  * The one latched safe state, for fatal faults (F3, F4). Same steps, same
- * order, for every fatal code: stop sampling and detection. serial_out and ble_link keep running so the fault
+ * order, for every fatal code: stop sampling and processing (imu_acq, dsp). serial_out and ble_link keep running so the fault
  * still reaches Serial and the app. Called only by supervisor_task, only once.
  * @param ctx  Handles of the tasks to stop.
  * @return None.
@@ -86,8 +85,6 @@ void supervisor_task(void *param) {
   uint32_t ble_fails = 0;
   uint32_t serial_drops = 0;
   uint32_t imu_recoveries = 0;
-  uint32_t dsp_snap_drops = 0;   // Record mode: snapshots dsp could not fill or queue
-  uint32_t ser_snap_drops = 0;   // Record mode: snapshots serial_out abandoned mid-send
   uint32_t own_out_q_drops = 0;  // HLT / FLT lines this task could not queue
 
   // Every task gets a full HEARTBEAT_TIMEOUT_MS from now before it counts as
@@ -141,14 +138,12 @@ void supervisor_task(void *param) {
       } else if (m.task == TASK_DSP) {
         dsp_out_q_drops = m.out_q_drops;
         ble_q_drops = m.ble_q_drops;
-        dsp_snap_drops = m.snap_drops;
       } else if (m.task == TASK_BLE_LINK) {
         ble_out_q_drops = m.out_q_drops;
         ble_sent = m.ble_sent;
         ble_fails = m.ble_fails;
       } else if (m.task == TASK_SERIAL_OUT) {
         serial_drops = m.serial_drops;
-        ser_snap_drops = m.snap_drops;
       }
     }
 
@@ -189,7 +184,6 @@ void supervisor_task(void *param) {
       out.hlt.ble_fails = ble_fails;
       out.hlt.serial_drops = serial_drops;
       out.hlt.imu_recoveries = imu_recoveries;
-      out.hlt.snap_drops = dsp_snap_drops + ser_snap_drops;
     } else {
       out.tag = OUT_FLT;
       out.flt.code = safe ? fault : imu_down;  // A fatal fault outranks F1/F2

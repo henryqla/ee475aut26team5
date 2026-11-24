@@ -1,37 +1,21 @@
 /*
  * File:        serial_out.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-22
- * Version:     0.1.3-bench
- * Change:      Log build (drive-log-manual-record-handoff.md v0.2, request
- *              4): an OUT_L item prints as an L line
- *              (L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok, every float at
- *              LOG_DECIMALS) under the same whole-line-or-nothing rule; the TX
- *              buffer is LOG_TX_BUF_BYTES; BOOT adds log=1 and the log
- *              settings; the #S header becomes #L; and every
- *              LOG_PERF_PERIOD_MS a "#LPERF" comment line reports how long L
- *              lines take to format and write, and the lowest free heap
- *              (owner, 2026-11-22). Every build: EVT gains n_trig as its 13th
- *              field (L2). CFG line (2026-11-23, every build): every
- *              CFG_PERIOD_MS the BOOT settings go out again as
- *              "CFG,<BOOT's fields>" (print_settings(), cfg_if_due()), and BOOT
- *              gains cfg_ms. BOOT is sent once, right after a reset, and a PC
- *              that connects later (or reopens the port after a reset, which
- *              re-enumerates native USB) usually misses it.
- *              0.1.2-bench: BOOT adds rearm_frac and rearm_hold_ms (request 0) and rec=0/1.
- *              BOOT was 319 characters, so LINE_MAX_CHARS goes from 352 to
- *              640 and the line buffer becomes static, keeping it off this
- *              task's 4 KB stack. Record mode (request 1): an OUT_SNAP item
- *              prints as SNB, SNR x SNAP_ROWS, SNE (with a CRC-16/CCITT-FALSE
- *              of the SNR lines), waiting for TX space between lines instead
- *              of dropping them, and abandoning the snapshot after
- *              SNAP_SEND_TIMEOUT_MS without space; then the buffer goes back
- *              to snap_free_q. BOOT adds the snapshot settings, HLT adds
- *              snap_drops (record builds only). The heartbeat moved into
- *              heartbeat_if_due() so a long snapshot send keeps it going.
- *              0.1.1-bench: BOOT lists the pitch-sequence and IMU-recovery settings instead
- *              of dominance. EVT gains pitch_seq (DU, UD, D, U or -) and basis
- *              (pitch, roll or z). HLT gains imu_recoveries.
+ * Date:        2026-11-23
+ * Version:     0.1.4-bench
+ * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ *              one build. Removed: the snapshot sender (SNB / SNR / SNE, its
+ *              CRC and the wait-for-space writer), EVT and S lines and their
+ *              name helpers, the record / log build branches, and snap_drops
+ *              in HLT and heartbeats (git tag pre-manual-overhaul). BOOT and
+ *              CFG drop the thresholds, lockout, re-arm, lobe and build-flag
+ *              fields and add the axis mapping (dsp_axis_map()), bias_max and
+ *              the buffer sizes. The L line, its whole-line-or-nothing rule,
+ *              #LPERF and CFG are unchanged.
+ *              0.1.3-bench: L lines (log build), #LPERF, n_trig in EVT, CFG
+ *              lines every CFG_PERIOD_MS.
+ *              0.1.2-bench: snapshots (record build), static line buffer.
+ *              0.1.1-bench: pitch-sequence and IMU-recovery fields.
  *              0.1.0-bench: comments only.
  * Description: serial_out task (core 0, same priority as ble_link). Sole owner
  *              of Serial, which is the S3's native USB (USB Serial/JTAG), the
@@ -46,10 +30,7 @@
  *              the port, the core's default would block up to ~2 s per write.
  *              Here the write timeout is 0 and a whole line is written only if
  *              it fits in the TX buffer; otherwise it is dropped and counted
- *              (serial_drops in HLT). Lines are never cut in half. The one
- *              exception is a record-mode snapshot: a ~19 KB burst never fits
- *              at once, so its lines wait for space (this task only, core 0),
- *              up to SNAP_SEND_TIMEOUT_MS per line.
+ *              (serial_drops in HLT). Lines are never cut in half.
  */
 
 // ============================================================================
@@ -59,10 +40,11 @@
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
-#include "esp_system.h"  // esp_get_minimum_free_heap_size() for #LPERF (log builds)
+#include "esp_system.h"  // esp_get_minimum_free_heap_size() for #LPERF
 #include "esp_timer.h"
 #include "config.h"
 #include "types.h"
+#include "dsp.h"         // dsp_axis_map() for BOOT
 #include "serial_out.h"
 #include "supervisor.h"
 
@@ -70,54 +52,19 @@
 // Macros
 // ============================================================================
 
-#define LINE_MAX_CHARS  640  // Longest line (BOOT, record build) is ~508 characters; up to
+#define LINE_MAX_CHARS  640  // Longest line (BOOT / CFG) is ~260 characters; up to
                              // 638 print whole
-#define SNAP_LINE_CHARS 160  // Snapshot lines are under 64 characters; room for any float
-
-#if RECORD_MODE
-// Record-build fields at the end of BOOT (rec=1 and the snapshot settings),
-// so a capture records how it was run.
-#define BOOT_REC_FMT   ",rec=1,snap_rate=%d,snap_pre=%d,snap_post=%d,snap_rows=%d," \
-                       "snap_ch=%s,snap_dec=%d,snap_bufs=%d,snap_gap_us=%d,"         \
-                       "snap_timeout_ms=%d"
-#define BOOT_REC_ARGS  , SNAP_RATE_HZ, SNAP_N_PRE, SNAP_N_POST, SNAP_ROWS, SNAP_CHANNELS, \
-                       SNAP_DECIMALS, SNAP_BUFFERS, SNAP_MAX_GAP_US, SNAP_SEND_TIMEOUT_MS
-#else
-#define BOOT_REC_FMT   ",rec=0"
-#define BOOT_REC_ARGS
-#endif
-
-#if LOG_MODE
-// Log-build fields at the end of BOOT (log=1, the L line rate and decimals,
-// both buffer sizes and the #LPERF period), so a drive log records how it was run.
-#define BOOT_LOG_FMT   ",log=1,l_rate=%d,l_dec=%d,log_tx_buf=%d,log_out_q=%d,log_perf_ms=%d"
-#define BOOT_LOG_ARGS  , IMU_ODR_HZ, LOG_DECIMALS, LOG_TX_BUF_BYTES, LOG_OUT_Q_LEN, \
-                       LOG_PERF_PERIOD_MS
-#define TX_BUF_BYTES   LOG_TX_BUF_BYTES     // ~0.75 s of the L stream
-// z_hp, roll and pitch must print exactly as SNR rows do (handoff, request 4).
-static_assert(LOG_DECIMALS == SNAP_DECIMALS, "L lines must use the snapshot decimals");
-#else
-#define BOOT_LOG_FMT   ""
-#define BOOT_LOG_ARGS
-#define TX_BUF_BYTES   SERIAL_TX_BUF_BYTES
-#endif
 
 // Every setting in use, as key=value fields: BOOT's fields after its tag, and
-// the same text again in every CFG line (print_settings()).
-#define SETTINGS_FMT   "fw=%s,odr=%d,acc_fs=%d,gyr_fs=%d,thr_z=%.3f,thr_roll=%.1f,"         \
-                       "thr_pitch=%.1f,lockout_ms=%d,rearm_frac=%.2f,rearm_hold_ms=%d,"      \
-                       "hpf_hz=%.2f,print_every=%d,"                                         \
-                       "settle_ms=%d,nose_down_sign=%d,pitch_smooth=%d,pitch_lobe=%.1f,"     \
-                       "pitch_lobe_end=%.1f,lobe_gap_ms=%d,z_lobe=%.3f,bias_max=%.1f,"       \
-                       "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,cfg_ms=%d,ble=%s"         \
-                       BOOT_REC_FMT BOOT_LOG_FMT
-#define SETTINGS_ARGS  FW_VERSION, IMU_ODR_HZ, ACCEL_FS_G, GYRO_FS_DPS, THR_Z_G,               \
-                       THR_ROLL_DPS, THR_PITCH_DPS, LOCKOUT_MS, REARM_FRAC, REARM_HOLD_MS,     \
-                       HPF_CUTOFF_HZ,                                                          \
-                       PRINT_EVERY_N, SETTLE_MS, PITCH_NOSE_DOWN_SIGN, PITCH_SMOOTH_N,         \
-                       PITCH_LOBE_DPS, PITCH_LOBE_END_DPS, PITCH_LOBE_MAX_GAP_MS,              \
-                       Z_LOBE_G, GYRO_BIAS_MAX_DPS, IMU_RETRY_MS, IMU_RECOVER_GOOD_READS,      \
-                       SEGMENT_MS, CFG_PERIOD_MS, BLE_DEVICE_NAME BOOT_REC_ARGS BOOT_LOG_ARGS
+// the same text again in every CFG line (print_settings()). The %s after
+// bias_max is the axis mapping, itself three fields (vert=..,roll=..,pitch=..).
+#define SETTINGS_FMT   "fw=%s,odr=%d,acc_fs=%d,gyr_fs=%d,hpf_hz=%.2f,settle_ms=%d,"           \
+                       "bias_max=%.1f,%s,l_dec=%d,tx_buf=%d,out_q=%d,perf_ms=%d,"           \
+                       "imu_retry_ms=%d,imu_good_reads=%d,seg_ms=%d,cfg_ms=%d,ble=%s"
+#define SETTINGS_ARGS  FW_VERSION, IMU_ODR_HZ, ACCEL_FS_G, GYRO_FS_DPS, HPF_CUTOFF_HZ,         \
+                       SETTLE_MS, GYRO_BIAS_MAX_DPS, dsp_axis_map(), L_DECIMALS,               \
+                       SERIAL_TX_BUF_BYTES, OUT_Q_LEN, PERF_PERIOD_MS, IMU_RETRY_MS,           \
+                       IMU_RECOVER_GOOD_READS, SEGMENT_MS, CFG_PERIOD_MS, BLE_DEVICE_NAME
 
 // Serial must be native USB in Hardware CDC mode (decided): on the bench
 // DevKit that is the "USB" connector. With other settings Serial becomes UART0
@@ -132,19 +79,15 @@ static_assert(LOG_DECIMALS == SNAP_DECIMALS, "L lines must use the snapshot deci
 // Globals: types
 // ============================================================================
 
-// This task's counters and heartbeat time. Passed to the helpers that can run
-// for a while (a snapshot send), so the heartbeat keeps going.
+// This task's counters and timers.
 typedef struct {
   int64_t  last_hb_us;    // Time of the last heartbeat
   int64_t  last_cfg_us;   // Time of the last CFG line (or of boot, before the first)
   uint32_t serial_drops;  // Lines dropped: USB TX buffer full (no host reading)
-  uint32_t snap_drops;    // Record mode: snapshots abandoned mid-send
-#if LOG_MODE
   int64_t  perf_start_us; // Start of the current #LPERF period
   uint32_t l_lines;       // L lines handled (written or dropped) in this period
   uint64_t l_sum_us;      // Their total format-and-write time, us
   uint32_t l_max_us;      // The longest one, us
-#endif
 } ser_stats_t;
 
 // ============================================================================
@@ -154,19 +97,8 @@ typedef struct {
 static int vformat_line(char *buf, size_t size, const char *fmt, va_list args);
 static bool write_line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void heartbeat_if_due(const app_ctx_t *ctx, ser_stats_t *st);
-static void handle_msg(const out_msg_t *m, const app_ctx_t *ctx, ser_stats_t *st);
-#if RECORD_MODE
-static int format_line(char *buf, size_t size, const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
-static bool write_wait(const char *line, int len, const app_ctx_t *ctx, ser_stats_t *st);
-static bool send_snapshot(const snap_t *p, const app_ctx_t *ctx, ser_stats_t *st);
-#endif
-#if LOG_MODE
+static void handle_msg(const out_msg_t *m, ser_stats_t *st);
 static void perf_if_due(ser_stats_t *st);
-#endif
-static const char *class_name(evt_class_t c);
-static const char *pitch_seq_name(int8_t first, bool seq);
-static const char *basis_name(evt_basis_t b);
 static const char *fault_name(fault_code_t f);
 static const char *link_name(link_event_t w);
 static bool print_settings(const char *tag);
@@ -230,47 +162,6 @@ static bool write_line(const char *fmt, ...) {
 }
 
 /**
- * @param c  Event class.
- * @return Its name for the EVT line.
- */
-static const char *class_name(evt_class_t c) {
-  switch (c) {
-    case EVT_POTHOLE: return "POTHOLE";
-    case EVT_BUMP:    return "BUMP";
-    default:          return "UNKNOWN";
-  }
-}
-
-/**
- * @param first  First pitch lobe: +1 nose down, -1 nose up, 0 none.
- * @param seq    The opposite lobe followed within the gap.
- * @return D = nose down, U = nose up, two letters if the opposite followed,
- *         "-" if no pitch lobe.
- */
-static const char *pitch_seq_name(int8_t first, bool seq) {
-  if (first > 0) {
-    return seq ? "DU" : "D";
-  }
-  if (first < 0) {
-    return seq ? "UD" : "U";
-  }
-  return "-";
-}
-
-/**
- * @param b  What decided an event's class.
- * @return Its name for the EVT line.
- */
-static const char *basis_name(evt_basis_t b) {
-  switch (b) {
-    case BASIS_PITCH: return "pitch";
-    case BASIS_ROLL:  return "roll";
-    case BASIS_Z:     return "z";
-    default:          return "?";
-  }
-}
-
-/**
  * @param f  Fault code.
  * @return Its name for the FLT line.
  */
@@ -314,7 +205,7 @@ static bool print_settings(const char *tag) {
 
 /**
  * Prints BOOT with every setting in use, so each capture records how it was
- * run, then a '#' header naming the columns of each line type. Runs right
+ * made, then a '#' header naming the columns of each line type. Runs right
  * after Serial.begin, so the empty TX buffer (SERIAL_TX_BUF_BYTES) holds all
  * of it until a host reads the port; nothing here is dropped. A host can
  * still miss BOOT (it connects later, or opening the port discards what was
@@ -323,25 +214,11 @@ static bool print_settings(const char *tag) {
  */
 static void print_boot(void) {
   print_settings("BOOT");
-#if LOG_MODE
   write_line("#L,n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok");
   write_line("#LPERF,t_ms,lines,avg_us,max_us,heap_min");
-#else
-  write_line("#S,n,t_us,ax,ay,az,gx,gy,gz,z_hp");
-#endif
   write_line("#SEG,t_start,t_end,synced,n,rms_z,peak_z,roll_rms,pitch_rms");
-  write_line("#EVT,seq,n_peak,t_us_peak,class,peak_z_g,peak_roll_dps,peak_pitch_dps,t_ms,synced,"
-             "pitch_seq,basis,n_trig");
-#if RECORD_MODE
-  write_line("#HLT,t_ms,samples,sample_q_drops,out_q_drops,drdy_timeouts,"
-             "ble_q_drops,ble_sent,ble_fails,serial_drops,imu_recoveries,snap_drops");
-  write_line("#SNB,seq,trig_idx,rate_hz,n_pre,n_post,n_rows,channels,fw");
-  write_line("#SNR,i,c0,c1,c2");
-  write_line("#SNE,seq,n_rows,crc16");
-#else
   write_line("#HLT,t_ms,samples,sample_q_drops,out_q_drops,drdy_timeouts,"
              "ble_q_drops,ble_sent,ble_fails,serial_drops,imu_recoveries");
-#endif
   write_line("#FLT,code,name");
   write_line("#BLE,what,value");
   write_line("#CFG,<the BOOT fields again, every cfg_ms>");
@@ -376,65 +253,34 @@ static void cfg_if_due(ser_stats_t *st) {
  */
 static bool print_msg(const out_msg_t *m) {
   switch (m->tag) {
-    case OUT_S:
-      // 4 decimals for g (0.49 mg/LSB at +-16 g), 2 for dps (17.5 mdps/LSB).
-      return write_line("S,%" PRIu32 ",%" PRId64 ",%.4f,%.4f,%.4f,%.2f,%.2f,%.2f,%.4f",
-                        m->s.s.n, m->s.s.t_us, m->s.s.ax, m->s.s.ay, m->s.s.az,
-                        m->s.s.gx, m->s.s.gy, m->s.s.gz, m->s.z_hp);
+    case OUT_L:
+      // Every float at L_DECIMALS. ok as 1/0.
+      return write_line("L,%" PRIu32 ",%" PRId64 ",%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%d",
+                        m->l.s.n, m->l.s.t_us,
+                        L_DECIMALS, m->l.s.ax, L_DECIMALS, m->l.s.ay,
+                        L_DECIMALS, m->l.s.az, L_DECIMALS, m->l.s.gx,
+                        L_DECIMALS, m->l.s.gy, L_DECIMALS, m->l.s.gz,
+                        L_DECIMALS, m->l.z_hp, L_DECIMALS, m->l.roll,
+                        L_DECIMALS, m->l.pitch, m->l.ok ? 1 : 0);
     case OUT_SEG:
       // synced as 1/0. t_start / t_end are phone epoch ms when synced is 1.
       return write_line("SEG,%" PRId64 ",%" PRId64 ",%d,%" PRIu32 ",%.3f,%.3f,%.3f,%.3f",
                         m->seg.t_start_ms, m->seg.t_end_ms, m->seg.synced ? 1 : 0,
                         m->seg.n, m->seg.rms_z, m->seg.peak_z, m->seg.roll_rms,
                         m->seg.pitch_rms);
-    case OUT_EVT:
-      // n_trig last (L2), so the first 12 fields keep their place for parsers
-      // that match them by position.
-      return write_line("EVT,%" PRIu32 ",%" PRIu32 ",%" PRId64 ",%s,%.3f,%.1f,%.1f,%" PRId64
-                        ",%d,%s,%s,%" PRIu32,
-                        m->evt.seq, m->evt.n_peak, m->evt.t_us_peak,
-                        class_name(m->evt.cls), m->evt.peak_z_g,
-                        m->evt.peak_roll_dps, m->evt.peak_pitch_dps, m->evt.t_ms,
-                        m->evt.synced ? 1 : 0,
-                        pitch_seq_name(m->evt.pitch_first, m->evt.pitch_seq),
-                        basis_name(m->evt.basis), m->evt.n_trig);
-#if LOG_MODE
-    case OUT_L:
-      // Every float at LOG_DECIMALS (= SNAP_DECIMALS), with the same %.*f
-      // conversion as SNR rows, so z_hp, roll and pitch print exactly as a
-      // snapshot would. ok as 1/0.
-      return write_line("L,%" PRIu32 ",%" PRId64 ",%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%.*f,%d",
-                        m->l.s.n, m->l.s.t_us,
-                        LOG_DECIMALS, m->l.s.ax, LOG_DECIMALS, m->l.s.ay,
-                        LOG_DECIMALS, m->l.s.az, LOG_DECIMALS, m->l.s.gx,
-                        LOG_DECIMALS, m->l.s.gy, LOG_DECIMALS, m->l.s.gz,
-                        LOG_DECIMALS, m->l.model.c[0], LOG_DECIMALS, m->l.model.c[1],
-                        LOG_DECIMALS, m->l.model.c[2], m->l.ok ? 1 : 0);
-#endif
     case OUT_HLT:
-#if RECORD_MODE
-      // Record build: snap_drops appended, so the other columns keep their place.
-      return write_line("HLT,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
-                        ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
-                        ",%" PRIu32,
-                        m->hlt.t_ms, m->hlt.samples, m->hlt.sample_q_drops,
-                        m->hlt.out_q_drops, m->hlt.drdy_timeouts, m->hlt.ble_q_drops,
-                        m->hlt.ble_sent, m->hlt.ble_fails, m->hlt.serial_drops,
-                        m->hlt.imu_recoveries, m->hlt.snap_drops);
-#else
       return write_line("HLT,%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32
                         ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32 ",%" PRIu32,
                         m->hlt.t_ms, m->hlt.samples, m->hlt.sample_q_drops,
                         m->hlt.out_q_drops, m->hlt.drdy_timeouts, m->hlt.ble_q_drops,
                         m->hlt.ble_sent, m->hlt.ble_fails, m->hlt.serial_drops,
                         m->hlt.imu_recoveries);
-#endif
     case OUT_FLT:
       return write_line("FLT,F%u,%s", (unsigned)m->flt.code, fault_name(m->flt.code));
     case OUT_BLE:
       return write_line("BLE,%s,%" PRId64, link_name(m->link.what), m->link.value);
     default:
-      return true;  // Unknown tag (or OUT_SNAP in a product build): print nothing, not a drop
+      return true;  // Unknown tag: print nothing, not a drop
   }
 }
 
@@ -452,26 +298,24 @@ static void heartbeat_if_due(const app_ctx_t *ctx, ser_stats_t *st) {
     sys_msg_t hb = {};
     hb.task = TASK_SERIAL_OUT;
     hb.serial_drops = st->serial_drops;
-    hb.snap_drops = st->snap_drops;
     sys_heartbeat(ctx->sys_q, &hb);
   }
 }
 
-#if LOG_MODE
 /**
- * Every LOG_PERF_PERIOD_MS, prints one "#LPERF" comment line (owner,
- * 2026-11-22): #LPERF,t_ms,lines,avg_us,max_us,heap_min. lines is the L lines
- * handled in the period (written or dropped), avg_us and max_us their average
- * and longest format-and-write time, and heap_min the lowest free heap since
- * boot, in bytes. lines x avg_us / period is this task's share of core 0 spent
- * on L lines (LOG-3). Parsers skip '#' lines. Like any line, it is dropped
- * (and counted) if it does not fit in the TX buffer.
+ * Every PERF_PERIOD_MS, prints one "#LPERF" comment line (owner, 2026-11-22):
+ * #LPERF,t_ms,lines,avg_us,max_us,heap_min. lines is the L lines handled in
+ * the period (written or dropped), avg_us and max_us their average and
+ * longest format-and-write time, and heap_min the lowest free heap since
+ * boot, in bytes. lines x avg_us / period is this task's share of core 0
+ * spent on L lines. Parsers skip '#' lines. Like any line, it is dropped (and
+ * counted) if it does not fit in the TX buffer.
  * @param st  This task's counters; the period's L line figures are reset.
  * @return None.
  */
 static void perf_if_due(ser_stats_t *st) {
   const int64_t now_us = esp_timer_get_time();
-  if (now_us - st->perf_start_us < (int64_t)LOG_PERF_PERIOD_MS * 1000) {
+  if (now_us - st->perf_start_us < (int64_t)PERF_PERIOD_MS * 1000) {
     return;
   }
   const uint32_t avg_us = (st->l_lines > 0) ? (uint32_t)(st->l_sum_us / st->l_lines) : 0;
@@ -485,157 +329,14 @@ static void perf_if_due(ser_stats_t *st) {
   st->l_sum_us = 0;
   st->l_max_us = 0;
 }
-#endif
-
-#if RECORD_MODE
-/**
- * CRC-16/CCITT-FALSE (also listed as CRC-16/IBM-3740): polynomial 0x1021,
- * initial value 0xFFFF, no reflection, no final XOR. Bitwise, MSB first.
- * Continues from crc, so one CRC can run over several lines. constexpr so the
- * standard check value is tested at compile time (below). Written here rather
- * than using the ESP32 ROM CRC functions, whose variant would need checking.
- * Parameters: https://reveng.sourceforge.io/crc-catalogue/16.htm
- * @param crc   CRC so far (0xFFFF to start).
- * @param data  Bytes to add.
- * @param len   Number of bytes.
- * @return The updated CRC.
- */
-static constexpr uint16_t crc16_ccitt_false(uint16_t crc, const char *data, size_t len) {
-  for (size_t i = 0; i < len; i++) {
-    crc ^= (uint16_t)((uint8_t)data[i] << 8);  // Next byte into the top 8 bits
-    for (int b = 0; b < 8; b++) {
-      crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
-    }
-  }
-  return crc;
-}
-
-// Standard check value: ASCII "123456789" gives 0x29B1 (handoff, CRC-16
-// variant). The GUI checks the same value with binascii.crc_hqx.
-static_assert(crc16_ccitt_false(0xFFFF, "123456789", 9) == 0x29B1,
-              "CRC-16/CCITT-FALSE check value");
 
 /**
- * printf-style formatting into buf for a snapshot line, leaving room for the
- * '\n' (see vformat_line).
- * @param buf   Output buffer.
- * @param size  Its size in bytes.
- * @param fmt   printf-style format, without the newline.
- * @param ...   Format arguments.
- * @return Characters in buf, or -1 on an encoding error.
- */
-static int format_line(char *buf, size_t size, const char *fmt, ...) {
-  va_list args;
-  va_start(args, fmt);
-  const int len = vformat_line(buf, size, fmt, args);
-  va_end(args);
-  return len;
-}
-
-/**
- * Writes one snapshot line (with its '\n'), waiting for room in the USB TX
- * buffer instead of dropping it. Only this task waits, on core 0; it sleeps
- * SNAP_WAIT_MS (at least one tick, never spins) between checks and keeps its
- * heartbeat going, so a slow host is not mistaken for a stuck task (F3).
- * @param line  The line, '\n' included.
- * @param len   Its length.
- * @param ctx   For the heartbeat.
- * @param st    This task's counters (heartbeat time).
- * @return true if written; false if the buffer stayed too full for
- *         SNAP_SEND_TIMEOUT_MS (no host reading), so the snapshot is abandoned.
- */
-static bool write_wait(const char *line, int len, const app_ctx_t *ctx, ser_stats_t *st) {
-  const int64_t start_us = esp_timer_get_time();
-  const TickType_t nap = (pdMS_TO_TICKS(SNAP_WAIT_MS) > 0) ? pdMS_TO_TICKS(SNAP_WAIT_MS) : 1;
-  while (Serial.availableForWrite() < len) {
-    if (esp_timer_get_time() - start_us >= (int64_t)SNAP_SEND_TIMEOUT_MS * 1000) {
-      return false;
-    }
-    heartbeat_if_due(ctx, st);
-    vTaskDelay(nap);
-  }
-  // As in write_line: free space only grows while we check, so this write
-  // cannot come up short.
-  Serial.write((const uint8_t *)line, (size_t)len);
-  return true;
-}
-
-/**
- * Prints one snapshot as an uninterrupted block: SNB, then SNAP_ROWS SNR
- * lines, then SNE. Other lines wait in out_q until it is done. SNE carries
- * the CRC-16/CCITT-FALSE of the exact bytes of every SNR line, in order,
- * without line endings. If any line cannot be written within
- * SNAP_SEND_TIMEOUT_MS, the rest (and SNE) are not sent, so the GUI rejects
- * the partial snapshot. Floats are formatted here on core 0, never on core 1.
- * @param p    Full snapshot. Not returned to the free list here.
- * @param ctx  For the heartbeat.
- * @param st   This task's counters.
- * @return true if SNE went out, false if the snapshot was abandoned.
- */
-static bool send_snapshot(const snap_t *p, const app_ctx_t *ctx, ser_stats_t *st) {
-  char line[SNAP_LINE_CHARS];
-
-  int len = format_line(line, sizeof(line), "SNB,%" PRIu32 ",%" PRIu32 ",%d,%d,%d,%d,%s,%s",
-                        p->seq, p->trig_n, SNAP_RATE_HZ, SNAP_N_PRE, SNAP_N_POST,
-                        SNAP_ROWS, SNAP_CHANNELS, FW_VERSION);
-  if (len < 0) {
-    return false;
-  }
-  line[len++] = '\n';
-  if (!write_wait(line, len, ctx, st)) {
-    return false;
-  }
-
-  uint16_t crc = 0xFFFF;
-  for (int i = 0; i < SNAP_ROWS; i++) {
-    const snap_row_t *r = &p->rows[i];
-    len = format_line(line, sizeof(line), "SNR,%d,%.*f,%.*f,%.*f", i,
-                      SNAP_DECIMALS, r->c[0], SNAP_DECIMALS, r->c[1],
-                      SNAP_DECIMALS, r->c[2]);
-    if (len < 0) {
-      return false;
-    }
-    crc = crc16_ccitt_false(crc, line, (size_t)len);  // The line without '\n'
-    line[len++] = '\n';
-    if (!write_wait(line, len, ctx, st)) {
-      return false;
-    }
-  }
-
-  len = format_line(line, sizeof(line), "SNE,%" PRIu32 ",%d,%04X", p->seq, SNAP_ROWS,
-                    (unsigned)crc);
-  if (len < 0) {
-    return false;
-  }
-  line[len++] = '\n';
-  return write_wait(line, len, ctx, st);
-}
-#endif
-
-/**
- * Handles one out_q item: a snapshot (record mode) is sent and its buffer
- * returned to the free list; anything else becomes one line.
- * @param m    Item from out_q.
- * @param ctx  For snap_free_q and the heartbeat.
- * @param st   This task's counters, updated.
+ * Handles one out_q item: it becomes one line. L lines are timed for #LPERF.
+ * @param m   Item from out_q.
+ * @param st  This task's counters, updated.
  * @return None.
  */
-static void handle_msg(const out_msg_t *m, const app_ctx_t *ctx, ser_stats_t *st) {
-#if RECORD_MODE
-  if (m->tag == OUT_SNAP) {
-    if (!send_snapshot(m->snap, ctx, st)) {
-      st->snap_drops++;
-    }
-    // This task owned the buffer since it left out_q. Cannot fail: the free
-    // list has room for every buffer.
-    snap_t *p = m->snap;
-    xQueueSend(ctx->snap_free_q, &p, 0);
-    return;
-  }
-#else
-  (void)ctx;  // Used only in record builds
-#endif
-#if LOG_MODE
+static void handle_msg(const out_msg_t *m, ser_stats_t *st) {
   if (m->tag == OUT_L) {
     // Timed for #LPERF: formatting nine floats is the main cost on core 0.
     const int64_t t0_us = esp_timer_get_time();
@@ -651,7 +352,6 @@ static void handle_msg(const out_msg_t *m, const app_ctx_t *ctx, ser_stats_t *st
     }
     return;
   }
-#endif
   if (!print_msg(m)) {
     st->serial_drops++;
   }
@@ -664,8 +364,7 @@ void serial_out_task(void *param) {
   // makes every write return at once; write_line() then only writes lines
   // that fit, so nothing here ever waits on the host. No wait for a host
   // either: the board must run with no monitor attached.
-  // The log build's buffer is LOG_TX_BUF_BYTES (TX_BUF_BYTES above).
-  Serial.setTxBufferSize(TX_BUF_BYTES);
+  Serial.setTxBufferSize(SERIAL_TX_BUF_BYTES);
   Serial.setTxTimeoutMs(0);
   Serial.begin(SERIAL_BAUD);
   print_boot();
@@ -673,20 +372,15 @@ void serial_out_task(void *param) {
   ser_stats_t st = {};
   st.last_hb_us = esp_timer_get_time();
   st.last_cfg_us = st.last_hb_us;  // The first CFG goes out CFG_PERIOD_MS after BOOT
-#if LOG_MODE
   st.perf_start_us = st.last_hb_us;
-#endif
   for (;;) {
     out_msg_t m;
     // The timeout lets the heartbeat go out even when out_q stays empty.
     if (xQueueReceive(ctx->out_q, &m, pdMS_TO_TICKS(HEARTBEAT_PERIOD_MS)) == pdTRUE) {
-      handle_msg(&m, ctx, &st);
+      handle_msg(&m, &st);
     }
     heartbeat_if_due(ctx, &st);
-    // Between items only, so a CFG never lands inside a snapshot block.
     cfg_if_due(&st);
-#if LOG_MODE
     perf_if_due(&st);
-#endif
   }
 }

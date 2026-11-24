@@ -1,8 +1,12 @@
 """
 File:        status_card.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.1.0
+Date:        2026-11-23
+Version:     0.1.1
+Change:      0.1.1 (manual-recording-overhaul-handoff.md, request B): wording
+             only. The card shows the last clip ("Recent clips") and the
+             recording state (READY, RECORDING with its countdown, LONG
+             RECORDING) instead of arm states. Behavior unchanged.
 Adapted from: the "Current Classification" card in
              Python/live_inference_widget.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
@@ -15,19 +19,19 @@ Adapted from: the "Current Classification" card in
              results. Changed (record-gui-restyle-handoff.md v0.1, request
              7): it shows the latest take, or the connection and arm state,
              instead of a prediction, and adds the counters line.
-Description: The "Last take" card in the record tab's left column, so the
+Description: The "Last clip" card in the record tab's left column, so the
              answer to "did that get saved?" can be read from across the
              room. Display only: the record panel tells it what happened, and
              it decides only what to show and for how long.
 
              What it shows, most important first:
              - a device fault (red), until clear_fault() (the next Connect);
-             - a take event: saved or relabeled (green), rejected (amber),
-               label pending (sky). It stays at least HOLD_MS, then gives way
-               to ARMED, KEEP ARMED or NOT CONNECTED, but not to READY, so
-               after a single Arm the take's name stays up;
+             - a clip event: saved or relabeled (green), deleted (gray), not
+               saved because of a disk error (amber). It stays at least
+               HOLD_MS, then gives way to RECORDING, LONG RECORDING or NOT
+               CONNECTED, but not to READY, so the last clip's name stays up;
              - the base state the record panel sets: NOT CONNECTED, READY,
-               ARMED or KEEP ARMED.
+               RECORDING or LONG RECORDING.
 """
 
 # ============================================================================
@@ -48,17 +52,17 @@ from elided_label import ElidedLabel
 # ============================================================================
 
 # Card states (style sheet "state" values).
-IDLE = "idle"      # Not connected, or connected and not armed: gray
-OK = "ok"          # Take saved or relabeled: green
-ARMED = "armed"    # Armed, keep armed, label pending: sky
-WARN = "warn"      # Snapshot rejected: amber
+IDLE = "idle"      # Not connected, ready, or a clip deleted: gray
+OK = "ok"          # Clip saved or relabeled: green
+ARMED = "armed"    # Recording (a clip or a long recording): sky
+WARN = "warn"      # Clip not saved (disk error): amber
 ERROR = "error"    # Device fault: red
 
-# DRAFT (handoff U3). A take event stays on the card at least this long
-# before an armed or not-connected state replaces it, so it can be read.
+# DRAFT (handoff U3). A clip event stays on the card at least this long
+# before a recording or not-connected state replaces it, so it can be read.
 HOLD_MS = 2000
 
-# Take names in the Recent takes row (handoff: the last five).
+# Clip names in the Recent clips row (the last five).
 RECENT_MAX = 5
 
 _TAG_MARGIN = 6    # px between the SIMULATED tag and the card's corner
@@ -69,9 +73,9 @@ _TAG_MARGIN = 6    # px between the SIMULATED tag and the card's corner
 
 
 class StatusCard(QGroupBox):
-    """Headline, subline, recent takes and counters."""
+    """Headline, subline, recent clips and counters."""
 
-    def __init__(self, title: str = "Last take") -> None:
+    def __init__(self, title: str = "Last clip") -> None:
         """
         @param title  Panel heading.
         """
@@ -106,12 +110,12 @@ class StatusCard(QGroupBox):
         # Top-right corner of the card, over it (no row of its own).
         self.sim_tag = set_role(QLabel("SIMULATED", self.hero), "tag")
         set_state(self.sim_tag, WARN)
-        self.sim_tag.setToolTip("The newest snapshot came from the simulated device")
+        self.sim_tag.setToolTip("Connected to the simulated device: its clips are not real")
         self.sim_tag.hide()
         self.hero.installEventFilter(self)
 
         recent_row = QHBoxLayout()
-        recent_title = QLabel("Recent takes:")
+        recent_title = QLabel("Recent clips:")
         recent_title.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.recent = QLabel("")
         self.recent.setWordWrap(True)
@@ -131,11 +135,11 @@ class StatusCard(QGroupBox):
     def set_base(self, state: str, headline: str, subline: str,
                  keeps_take: bool = False) -> None:
         """
-        The connection and arm state, shown when nothing more important is.
+        The connection and recording state, shown when nothing more important is.
         @param state       IDLE or ARMED.
         @param headline    E.g. READY.
         @param subline     The small text under it.
-        @param keeps_take  True for READY: a take event stays up over it.
+        @param keeps_take  True for READY: a clip event stays up over it.
         """
         self._base = (state, headline, subline)
         self._base_keeps_take = keeps_take
@@ -143,9 +147,9 @@ class StatusCard(QGroupBox):
 
     def show_take(self, state: str, headline: str, subline: str) -> None:
         """
-        A take event (saved, relabeled, rejected, label pending).
-        @param state     OK, WARN or ARMED.
-        @param headline  E.g. the take's name.
+        A clip event (saved, relabeled, deleted, not saved).
+        @param state     OK, IDLE, WARN or ARMED.
+        @param headline  E.g. the clip's name.
         @param subline   The small text under it.
         """
         self._event = (state, headline, subline)
@@ -167,8 +171,8 @@ class StatusCard(QGroupBox):
 
     def set_simulated(self, simulated: bool) -> None:
         """
-        @param simulated  Whether the newest snapshot came from the simulated
-                          device (shows the SIMULATED tag).
+        @param simulated  Whether the board is the simulated device (shows
+                          the SIMULATED tag).
         """
         if simulated == self.sim_tag.isHidden():  # isHidden: works before the window shows
             self.sim_tag.setVisible(simulated)
@@ -177,7 +181,7 @@ class StatusCard(QGroupBox):
 
     def add_recent(self, name: str) -> None:
         """
-        @param name  A take just saved (file name without .csv).
+        @param name  A clip just saved (file name without .csv).
         """
         self._recent.insert(0, name)
         del self._recent[RECENT_MAX:]
@@ -185,10 +189,10 @@ class StatusCard(QGroupBox):
 
     def rename_recent(self, old: str, new: Optional[str]) -> None:
         """
-        A take was relabeled or deleted: its Recent takes entry follows, and
-        so does the card if it is showing that take.
-        @param old  Old take name.
-        @param new  New take name, or None if deleted.
+        A clip was relabeled or deleted: its Recent clips entry follows, and
+        so does the card if it is showing that clip.
+        @param old  Old clip name.
+        @param new  New clip name, or None if deleted.
         """
         if old in self._recent:
             if new is None:
@@ -204,7 +208,7 @@ class StatusCard(QGroupBox):
             self._render()
 
     def clear_recent(self) -> None:
-        """A new session: its takes are listed from scratch."""
+        """A new session: its clips are listed from scratch."""
         self._recent = []
         self._show_recent()
 
@@ -269,5 +273,5 @@ class StatusCard(QGroupBox):
         self.sim_tag.raise_()
 
     def _show_recent(self) -> None:
-        """Recent takes, newest first."""
+        """Recent clips, newest first."""
         self.recent.setText(" ← ".join(self._recent) if self._recent else "none yet")

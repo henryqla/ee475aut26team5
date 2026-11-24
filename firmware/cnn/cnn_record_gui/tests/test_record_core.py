@@ -2,14 +2,16 @@
 File:        test_record_core.py
 Authors:     Henry (owner); first draft written with Claude
 Date:        2026-11-23
-Version:     0.1.1
-Change:      0.1.1: settings from a CFG line: used only while no BOOT is
-             known, clear nothing, and go into takes as a BOOT line; a new
-             connection forgets the old BOOT.
-Description: Unit tests for record_core.py: Arm saves one snapshot, keep armed
-             saves all, disarmed snapshots are not saved, EVT pairing in
-             either order, the 5 s timeout, BOOT / reconnect clearing, CFG
-             settings, and quick labels before and after a take is written.
+Version:     0.3.0
+Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): the arm,
+             EVT matching and quick label tests are removed with those
+             features. The BOOT / CFG precedence test is kept, rewritten
+             against the new controller. New: saving a clip (header and rows),
+             a long recording saved from its rows file, a write error reported
+             and nothing lost, Backspace's delete_last(), and the session's
+             clip counts.
+Description: Unit tests for record_core.py.
+             Run from cnn_record_gui/: python -m unittest discover -s tests
 """
 
 # ============================================================================
@@ -21,44 +23,15 @@ import unittest
 from pathlib import Path
 
 import helpers  # Sets sys.path; must come before the GUI imports
+import cnn_config as cfg
+from clip_recorder import ClipRecorder
 from record_core import RecordController
-from snapshot_protocol import BootLine, Rejected, SnapshotAssembler
-from take_store import TakeStore, load_take
-
-# ============================================================================
-# Constants
-# ============================================================================
-
-W0 = 1.79e9  # A realistic wall time (time.time()) for the snapshot arrival times
+from snapshot_protocol import BootLine, LineParser
+from take_store import TakeStore, load_take, read_header
 
 # ============================================================================
 # Functions
 # ============================================================================
-
-
-def parse(lines):
-    """
-    @return Items parsed from lines.
-    """
-    asm = SnapshotAssembler(3.0, 20000)
-    out = []
-    for line in lines:
-        out.extend(asm.feed(line, 0.0))
-    return out
-
-
-def snap(seq):
-    """
-    @return A firmware-format Snapshot with this seq.
-    """
-    return parse(helpers.firmware_snapshot_lines(seq=seq)[0])[0]
-
-
-def evt(seq, cls="POTHOLE"):
-    """
-    @return An EventLine with this seq.
-    """
-    return parse([helpers.evt_line(seq=seq, cls=cls)])[0]
 
 
 def cfg_boot(fields):
@@ -66,7 +39,19 @@ def cfg_boot(fields):
     @param fields  A CFG line's text after "CFG,".
     @return The BOOT line that CFG repeats (ConfigLine.as_boot()).
     """
-    return parse(["CFG," + fields])[0].as_boot()
+    return LineParser().feed("CFG," + fields).as_boot()
+
+
+def manual_clip(label="POTHOLE"):
+    """
+    @return A full manual clip (416 + 2080 rows) from a ClipRecorder.
+    """
+    rec = ClipRecorder()
+    rec.feed(helpers.log_samples(1, 416))
+    rec.press(label, 1_790_000_000_000, 0.0)
+    clip = rec.feed(helpers.log_samples(417, 2080))
+    assert clip is not None
+    return clip
 
 # ============================================================================
 # Tests
@@ -79,99 +64,13 @@ class TestRecordController(unittest.TestCase):
         self.store = TakeStore(Path(self.tmp.name))
         self.saved = []
         self.errors = []
-        self.c = RecordController(self.store, "abc123", timeout_s=5.0,
-                                  on_saved=lambda p, cl: self.saved.append(p),
+        self.c = RecordController(self.store, "abc123",
+                                  on_saved=lambda p, clip: self.saved.append(p),
                                   on_error=self.errors.append)
         self.c.session = "s1"
-        self.c.label = "POTHOLE"
 
     def tearDown(self):
         self.tmp.cleanup()
-
-    def test_disarmed_not_saved(self):
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)
-        self.c.on_event(evt(0), 0.1)
-        self.c.tick(10.0)
-        self.assertEqual(self.saved, [])
-        self.assertEqual(self.c.counters.not_armed, 1)
-        self.assertEqual(self.c.last_rule_class, "POTHOLE")  # Still shown
-
-    def test_arm_saves_one_then_disarms(self):
-        self.c.arm()
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)
-        self.assertFalse(self.c.armed)
-        self.c.on_event(evt(0), 0.1)
-        self.c.on_snapshot(snap(1), W0 + 2.0, 2.0)
-        self.c.on_event(evt(1), 2.1)
-        self.assertEqual([p.name for p in self.saved], ["POTHOLE-1.csv"])
-        self.assertEqual(load_take(self.saved[0])[0]["seq"], "0")
-
-    def test_evt_first_then_snapshot(self):
-        self.c.arm()
-        self.c.on_event(evt(4, "BUMP"), 0.0)
-        self.c.on_snapshot(snap(4), W0 + 0.2, 0.2)
-        self.assertEqual(len(self.saved), 1)
-        self.assertEqual(load_take(self.saved[0])[0]["rule_class"], "BUMP")
-
-    def test_keep_armed_saves_all(self):
-        self.c.keep_armed = True
-        for s in range(3):
-            self.c.on_snapshot(snap(s), W0 + s, s)
-            self.c.on_event(evt(s), s + 0.1)
-        self.assertEqual(len(self.saved), 3)
-        self.assertTrue(self.c.keep_armed)
-
-    def test_timeout_saves_without_evt(self):
-        self.c.arm()
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)
-        self.c.tick(4.9)
-        self.assertEqual(self.saved, [])
-        self.c.tick(5.0)
-        self.assertEqual(len(self.saved), 1)
-        header = load_take(self.saved[0])[0]
-        self.assertEqual(header["rule_class"], "missing")
-        self.assertIn("no EVT within 5.0 s", header["evt"])
-        self.assertEqual(self.c.counters.saved_without_evt, 1)
-
-    def test_evt_without_snapshot_counted(self):
-        self.c.on_event(evt(9), 0.0)
-        self.c.tick(5.0)
-        self.assertEqual(self.c.counters.evt_without_snap, 1)
-        self.assertEqual(self.saved, [])
-
-    def test_boot_clears_and_saves_claimed(self):
-        self.c.arm()
-        self.c.on_snapshot(snap(5), W0 + 0.0, 0.0)
-        self.c.on_event(evt(6), 0.1)                    # Waiting EVT, other seq
-        self.c.on_boot(BootLine({"fw": "x"}, "BOOT,fw=x"))
-        self.assertEqual(len(self.saved), 1)            # Claimed snapshot kept
-        self.assertEqual(self.c.counters.evt_without_snap, 1)
-        # After the reboot seq 5 again must not pair with anything old.
-        self.c.arm()
-        self.c.on_snapshot(snap(5), W0 + 1.0, 1.0)
-        self.c.on_event(evt(5, "BUMP"), 1.1)
-        self.assertEqual(load_take(self.saved[1])[0]["rule_class"], "BUMP")
-        self.assertEqual(load_take(self.saved[1])[0]["boot"], "BOOT,fw=x")
-
-    def test_reconnect_clears(self):
-        self.c.arm()
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)
-        self.c.on_reconnect()
-        self.assertEqual(len(self.saved), 1)
-        self.assertIn("USB reconnected", load_take(self.saved[0])[0]["evt"])
-        self.assertIsNone(self.c.boot)
-
-    def test_cfg_settings_are_not_a_reboot(self):
-        self.c.keep_armed = True
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)          # Waiting for its EVT
-        self.assertTrue(self.c.on_settings(cfg_boot("fw=y")))
-        self.assertEqual(self.saved, [])                    # Nothing cleared
-        self.c.on_event(evt(0), 0.1)                        # Still pairs
-        self.assertEqual(len(self.saved), 1)
-        self.assertEqual(self.c.counters.saved_without_evt, 0)
-        self.c.on_snapshot(snap(1), W0 + 1.0, 1.0)
-        self.c.on_event(evt(1), 1.1)
-        self.assertEqual(load_take(self.saved[1])[0]["boot"], "BOOT,fw=y")   # Kept as BOOT
 
     def test_cfg_used_only_without_boot(self):
         boot = BootLine({"fw": "x"}, "BOOT,fw=x")
@@ -180,43 +79,91 @@ class TestRecordController(unittest.TestCase):
         self.assertIs(self.c.boot, boot)
         self.c.on_reconnect()                               # The new BOOT may be lost
         self.assertTrue(self.c.on_settings(cfg_boot("fw=y")))
-        self.assertEqual(self.c.boot.raw, "BOOT,fw=y")
+        self.assertEqual(self.c.boot.raw, "BOOT,fw=y")     # Kept as BOOT
         self.c.on_boot(boot)                                # A real reboot wins
         self.assertIs(self.c.boot, boot)
         self.c.on_new_connection()
         self.assertIsNone(self.c.boot)
 
-    def test_quick_label_before_save(self):
-        self.c.label = "UNLABELED"
-        self.c.keep_armed = True
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)           # EVT not here yet
-        self.c.quick_label("SPEED_BUMP")
-        self.c.on_event(evt(0), 0.1)
-        self.assertEqual([p.name for p in self.saved], ["SPEED_BUMP-1.csv"])
+    def test_save_clip_header_and_rows(self):
+        self.c.on_boot(LineParser().feed(helpers.BOOT))
+        path = self.c.save_clip(manual_clip("SPEED_BUMP"))
+        self.assertEqual(self.saved, [path])
+        self.assertEqual(path.name, "SPEED_BUMP-1.csv")
+        header, values = load_take(path)
+        expect = {"format": "clip_v1", "source": "manual", "label": "SPEED_BUMP",
+                  "session": "s1", "press_epoch_ms": "1790000000000", "press_n": "416",
+                  "press_row": "415", "first_n": "1", "last_n": "2496", "pre_s": "1.000",
+                  "post_s": "5.000", "rate_hz": "416", "rows": "2496", "missing_samples": "0",
+                  "resets": "0", "ok0_rows": "0", "boot": helpers.BOOT, "gui_commit": "abc123",
+                  "columns": "n,t_us,ax,ay,az,gx,gy,gz,z_hp,roll,pitch,ok"}
+        for k, v in expect.items():
+            self.assertEqual(header.get(k), v, k)
+        self.assertIn("press_pc", header)
+        self.assertEqual(len(values), 2496)
+        self.assertEqual(self.c.last_saved, path)
+        self.assertEqual(self.c.counters.saved, 1)
 
-    def test_quick_label_after_save(self):
-        self.c.label = "UNLABELED"
-        self.c.keep_armed = True
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)
-        self.c.on_event(evt(0), 0.1)
-        new = self.c.quick_label("POTHOLE")
-        self.assertEqual(new.name, "POTHOLE-1.csv")
-        self.assertEqual(load_take(new)[0]["label"], "POTHOLE")
-        self.assertFalse(self.saved[0].exists())
+    def test_boot_missing_is_written(self):
+        header = read_header(self.c.save_clip(manual_clip()))
+        self.assertTrue(header["boot"].startswith("missing"))
 
-    def test_rejected_and_health(self):
-        self.c.on_rejected(Rejected("CRC mismatch"))
-        self.assertEqual(self.c.counters.rejected, 1)
-        self.c.on_health(parse(["HLT,1,2,0,0,0,0,0,0,0,0,4"])[0])
-        self.assertEqual(self.c.counters.device_snap_drops, 4)
+    def test_long_recording_saved_from_its_rows_file(self):
+        rec = ClipRecorder()
+        body = Path(self.tmp.name) / "s1" / ".long-1.partial"
+        self.assertEqual(rec.start_long(1_790_000_000_000, 0.0, body), "")
+        rec.feed(helpers.log_samples(1, 1000))
+        clip = rec.stop_long(1_790_000_002_404)
+        path = self.c.save_clip(clip)
+        self.assertEqual(path.name, "NONE-1.csv")
+        self.assertFalse(body.exists())                    # Removed once saved
+        header, values = load_take(path)
+        self.assertEqual((header["source"], header["rows"], header["post_s"]),
+                         ("long", "1000", "%.3f" % (1000 / 416.0)))
+        self.assertEqual(header["stop_epoch_ms"], "1790000002404")
+        self.assertEqual(len(values), 1000)
 
     def test_save_error_reported_not_raised(self):
-        self.c.session = "bad name"                    # Invalid folder name
-        self.c.arm()
-        self.c.on_snapshot(snap(0), W0 + 0.0, 0.0)
-        self.c.on_event(evt(0), 0.1)
+        self.c.session = "bad name"                        # Not a valid folder name
+        self.assertIsNone(self.c.save_clip(manual_clip()))
         self.assertEqual(self.c.counters.save_errors, 1)
         self.assertEqual(len(self.errors), 1)
+        self.assertIsNone(self.c.last_saved)
+
+    def test_delete_last_once(self):
+        a = self.c.save_clip(manual_clip())
+        old, dest = self.c.delete_last()
+        self.assertEqual(old, a)
+        self.assertEqual(dest.parent.name, cfg.DELETED_DIR_NAME)
+        self.assertFalse(a.exists())
+        self.assertIsNone(self.c.delete_last())            # Once only
+        self.assertEqual(self.c.counters.deleted, 1)
+
+    def test_take_moved_follows_relabel(self):
+        a = self.c.save_clip(manual_clip())
+        b = self.store.relabel(a, "NONE")
+        self.c.take_moved(a, b)
+        self.assertEqual(self.c.last_saved, b)
+        self.c.take_moved(b, None)
+        self.assertIsNone(self.c.last_saved)
+
+    def test_session_counts(self):
+        for label in ("POTHOLE", "POTHOLE", "NONE"):
+            self.c.save_clip(manual_clip(label))
+        rec = ClipRecorder()
+        rec.start_long(1, 0.0, Path(self.tmp.name) / "s1" / ".long-2.partial")
+        rec.feed(helpers.log_samples(1, 832))
+        self.c.save_clip(rec.stop_long(2))
+        (Path(self.tmp.name) / "s1" / "FALSE_TRIGGER-1.csv").write_text(
+            helpers.old_take_text("FALSE_TRIGGER"), encoding="utf-8")
+        counts = self.c.session_counts()
+        self.assertEqual(counts.per_label, {"POTHOLE": 2, "NONE": 1})
+        self.assertEqual(counts.long_count, 1)
+        self.assertAlmostEqual(counts.long_s, 2.0, places=2)
+        self.assertEqual(counts.older, 1)
+        text = counts.text("s1")
+        for part in ("POTHOLE 2", "SPEED_BUMP 0", "NONE 1", "long NONE 1", "older takes 1"):
+            self.assertIn(part, text)
 
 
 if __name__ == "__main__":

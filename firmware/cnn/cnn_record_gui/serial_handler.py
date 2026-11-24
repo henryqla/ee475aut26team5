@@ -2,18 +2,15 @@
 File:        serial_handler.py
 Authors:     Henry (owner); first draft written with Claude
 Date:        2026-11-23
-Version:     0.2.1
-Change:      0.2.1: CFG lines (the BOOT settings, repeated by the board) go
-             out as config_received. Unlike BOOT they do not start a new run
-             in the drive log's stats: a CFG is not a reboot.
-             0.2.0 (drive-log-manual-record-handoff.md v0.2, request 5): the
-             log build. L samples go to the GUI thread in batches every
-             SAMPLE_BATCH_S, not one signal each (a batch is sent before any
-             other item, so the order is kept); this thread writes the drive
-             log (drive_log.py), taking Start log, Stop log and MARK requests
-             from the GUI through a queue, adding PC lines at a lost port and a
-             reconnect, and reporting the log's status; the simulated device
-             can run as the log build.
+Version:     0.3.0
+Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): only L,
+             BOOT, CFG, HLT and FLT lines come in. Removed: the drive log, PC
+             and MARK lines, the snapshot, EVT and S signals, and the
+             simulated device's record / log builds (git tag
+             pre-manual-overhaul). New: sim_command() passes the simulated
+             device's test controls (inject an event, a gap, a reset, ok=0
+             rows, a disconnect) from the GUI thread to this thread.
+             0.2.1: CFG lines. 0.2.0: L samples batched every SAMPLE_BATCH_S.
 Adapted from: Python/arduino_serial_handler.py in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
              codegen-classroom, commit 47092aa), itself a fork of
@@ -22,19 +19,21 @@ Adapted from: Python/arduino_serial_handler.py in ml-on-device-playground,
              LICENSE-ml-on-device-playground.txt in this folder. Kept: a
              QThread that reads lines and emits Qt signals. Changed: any port
              can be chosen (the framework skipped Espressif VID 0x303A and
-             only accepted XIAO boards); the baud comes from cnn_config;
-             lines go through SnapshotAssembler instead of IMU: / PROB:
-             parsing (S lines feed the live IMU view); it reconnects by itself after the port disappears; it
-             never sends anything to the device; the codegen_task import is
-             gone; and it can read from the simulated device instead.
+             only accepted XIAO boards); the baud comes from cnn_config; lines
+             go through LineParser instead of IMU: / PROB: parsing; it
+             reconnects by itself after the port disappears; it never sends
+             anything to the device; the codegen_task import is gone; and it
+             can read from the simulated device instead.
 Description: Background reader for the record GUI. Owns the serial port (or
-             the simulated device), splits the byte stream into lines,
-             assembles and validates snapshots, and emits one Qt signal per
-             complete item. All decisions about saving happen in the GUI
-             thread (record_core). A reset re-enumerates the S3's native USB,
-             so when the port disappears the reader keeps retrying the same
-             device (by name, or by VID / PID / serial number if Windows gives
-             it a new name) and emits reconnected when it is back.
+             the simulated device), splits the byte stream into lines, parses
+             them, and hands L samples to the GUI thread in batches every
+             SAMPLE_BATCH_S (one Qt signal per batch, not per sample; a batch
+             goes out before any other item, so the order is kept). All
+             decisions about clips happen in the GUI thread. A reset
+             re-enumerates the S3's native USB, so when the port disappears
+             the reader keeps retrying the same device (by name, or by VID /
+             PID / serial number if Windows gives it a new name) and emits
+             reconnected when it is back.
 """
 
 # ============================================================================
@@ -46,7 +45,6 @@ from __future__ import annotations
 import queue
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import serial
@@ -54,10 +52,8 @@ import serial.tools.list_ports
 from PyQt5.QtCore import QThread, pyqtSignal
 
 import cnn_config as cfg
-from drive_log import DriveLog, LogStatus
 from sim_source import SimDevice, SimDisconnect
-from snapshot_protocol import (BootLine, ConfigLine, EventLine, FaultLine, HealthLine,
-                               LogSample, Rejected, SampleLine, Snapshot, SnapshotAssembler)
+from snapshot_protocol import BootLine, ConfigLine, FaultLine, HealthLine, LineParser, LogSample
 
 # ============================================================================
 # Constants
@@ -103,18 +99,13 @@ def list_ports() -> list:
 class SerialHandler(QThread):
     """Reads one port (or the simulated device) until stop() is called."""
 
-    snapshot_received = pyqtSignal(object, float)   # Snapshot, wall time it arrived
-    snapshot_rejected = pyqtSignal(object)          # Rejected
-    event_received = pyqtSignal(object)             # EventLine
     boot_received = pyqtSignal(object)              # BootLine
     config_received = pyqtSignal(object)            # ConfigLine (BOOT's settings, repeated)
     health_received = pyqtSignal(object)            # HealthLine
     fault_received = pyqtSignal(object)             # FaultLine
-    sample_received = pyqtSignal(object)            # SampleLine (live view only)
-    samples_received = pyqtSignal(object)           # list of LogSample (log build), batched
-    log_status = pyqtSignal(object)                 # drive_log.LogStatus
+    samples_received = pyqtSignal(object)           # list of LogSample, batched
     connection_changed = pyqtSignal(bool, str)      # Connected?, message
-    reconnected = pyqtSignal()                      # Back after a loss: seq may restart
+    reconnected = pyqtSignal()                      # Back after a loss: n may restart
 
     def __init__(self, parent=None) -> None:
         """
@@ -124,66 +115,49 @@ class SerialHandler(QThread):
         self._running = False
         self._port: Optional[PortInfo] = None
         self._simulated = False
-        self._sim_build = "record"
-        self._asm = SnapshotAssembler(cfg.SNAP_STALL_TIMEOUT_S, cfg.SNAP_MAX_ROWS)
-        # Requests from the GUI thread (start / stop log, marks); only this
-        # thread touches the drive log.
-        self._cmds: queue.Queue = queue.Queue()
-        self._log: Optional[DriveLog] = None
+        self._parser = LineParser()
+        self._sim: Optional[SimDevice] = None
+        self._sim_cmds: queue.Queue = queue.Queue()   # Test controls from the GUI thread
         self._batch = []                 # LogSamples not yet sent to the GUI
         self._batch_t = 0.0              # Monotonic time the last batch was sent
-        self._status_t = 0.0             # Monotonic time the last log status was sent
 
-    def configure(self, port: Optional[PortInfo], simulated: bool,
-                  sim_build: str = "record") -> None:
+    def configure(self, port: Optional[PortInfo], simulated: bool) -> None:
         """
         Chooses the source. Call before start(), while the thread is stopped.
         @param port       The port to read (ignored if simulated).
         @param simulated  Read the simulated device instead of a port.
-        @param sim_build  The simulated device's build: "record" or "log".
         """
         self._port = port
         self._simulated = simulated
-        self._sim_build = sim_build
+
+    @property
+    def simulated(self) -> bool:
+        """@return True if this reader runs the simulated device."""
+        return self._simulated
 
     @property
     def malformed_l(self) -> int:
         """@return L lines ignored because they did not parse, this connection."""
-        return self._asm.malformed_l
+        return self._parser.malformed_l
 
     def stop(self) -> None:
-        """Asks the thread to finish and waits for it (at most ~3 s). The
-        drive log, if running, is closed with a stop PC line."""
+        """Asks the thread to finish and waits for it (at most ~3 s)."""
         self._running = False
         self.wait(3000)
 
-    def start_log(self, drives_dir: Path, info: dict) -> None:
+    def sim_command(self, *cmd) -> None:
         """
-        Asks this thread to start a drive log (GUI thread). The result comes
-        back as a log_status signal (with error set if it failed).
-        @param drives_dir  The session's drives/ folder.
-        @param info        Header values: session, gui_commit, port.
+        A simulated-device test control (GUI thread). Ignored for a real port.
+        @param cmd  ("event", shape, delay_s), ("gap",), ("ok0",), ("reset",)
+                    or ("disconnect",).
         """
-        self._cmds.put(("start", Path(drives_dir), dict(info)))
-
-    def stop_log(self) -> None:
-        """Asks this thread to close the drive log (GUI thread)."""
-        self._cmds.put(("stop",))
-
-    def write_mark(self, epoch_ms: int, last_n: int, label: str) -> None:
-        """
-        Asks this thread to write a MARK line (GUI thread). Ignored if no log
-        is running.
-        @param epoch_ms  Laptop time of the press, ms.
-        @param last_n    Latest sample count the GUI had seen.
-        @param label     A label, or manual_<LABEL> for a Record press.
-        """
-        self._cmds.put(("mark", int(epoch_ms), int(last_n), label))
+        if self._simulated:
+            self._sim_cmds.put(tuple(cmd))
 
     def run(self) -> None:
         """Thread body. Never lets an exception end the thread silently."""
         self._running = True
-        self._asm = SnapshotAssembler(cfg.SNAP_STALL_TIMEOUT_S, cfg.SNAP_MAX_ROWS)
+        self._parser = LineParser()
         try:
             if self._simulated:
                 self._run_sim()
@@ -191,18 +165,15 @@ class SerialHandler(QThread):
                 self._run_port()
         except Exception as exc:  # Report, so the GUI shows why reading stopped
             self.connection_changed.emit(False, "Reader stopped: %r" % exc)
-        self._emit(self._asm.abort("disconnected mid-snapshot"))
         self._flush_batch()
-        if self._log is not None:
-            self._close_log("")
         self.connection_changed.emit(False, "Disconnected")
 
     # ---------------------------------------------------------------- helpers
 
     def _sleep(self, seconds: float) -> None:
         """
-        Sleeps in short steps so stop() takes effect quickly; keeps serving
-        the drive log and the GUI's requests meanwhile.
+        Sleeps in short steps so stop() takes effect quickly; keeps sending
+        sample batches meanwhile.
         @param seconds  How long.
         """
         end = time.monotonic() + seconds
@@ -220,124 +191,50 @@ class SerialHandler(QThread):
             self._batch = []
         self._batch_t = time.monotonic()
 
-    def _log_pc(self, note: str) -> None:
-        """
-        @param note  PC line note (lost, reconnect), if a log is running.
-        """
-        if self._log is not None:
-            try:
-                self._log.pc(note)
-            except OSError as exc:
-                self._log_failed(exc)
-
-    def _log_failed(self, exc: Exception) -> None:
-        """
-        A write failed (disk full, drive gone): logging stops and says why.
-        @param exc  The error.
-        """
-        log = self._log
-        self._log = None
-        log.abandon()
-        self.log_status.emit(log.status(self._asm.malformed_l, "write failed: %s" % exc))
-
-    def _close_log(self, error: str) -> None:
-        """
-        Closes the drive log with its stop line and sends the final status.
-        @param error  Why, if it was not the user's Stop log.
-        """
-        log = self._log
-        self._log = None
-        try:
-            log.close()
-        except OSError as exc:
-            log.abandon()
-            error = error or "closing failed: %s" % exc
-        self.log_status.emit(log.status(self._asm.malformed_l, error))
-
     def _service(self, now: float) -> None:
         """
-        Called often: GUI requests, the sample batch, and the drive log's PC
-        lines, flushing and status.
+        Called often: sends the sample batch when it is due, and hands queued
+        test controls to the simulated device.
         @param now  Monotonic time.
         """
-        while True:
-            try:
-                cmd = self._cmds.get_nowait()
-            except queue.Empty:
-                break
-            if cmd[0] == "start" and self._log is None:
-                try:
-                    self._log = DriveLog(cmd[1], cmd[2])
-                except OSError as exc:
-                    self.log_status.emit(LogStatus(active=False, path=None,
-                                                   error="cannot create the log: %s" % exc))
-                    continue
-                self._status_t = 0.0   # Report at once
-            elif cmd[0] == "stop" and self._log is not None:
-                self._close_log("")
-            elif cmd[0] == "mark" and self._log is not None:
-                try:
-                    self._log.mark(cmd[1], cmd[2], cmd[3])
-                except OSError as exc:
-                    self._log_failed(exc)
         if self._batch and now - self._batch_t >= cfg.SAMPLE_BATCH_S:
             self._flush_batch()
-        if self._log is not None:
-            try:
-                self._log.tick()
-            except OSError as exc:
-                self._log_failed(exc)
-                return
-            if now - self._status_t >= cfg.LOG_STATUS_PERIOD_S:
-                self._status_t = now
-                self.log_status.emit(self._log.status(self._asm.malformed_l))
+        if self._sim is not None:
+            while True:
+                try:
+                    cmd = self._sim_cmds.get_nowait()
+                except queue.Empty:
+                    break
+                if cmd[0] == "event":
+                    self._sim.inject_event(cmd[1], cmd[2])
+                elif cmd[0] == "gap":
+                    self._sim.inject_gap()
+                elif cmd[0] == "ok0":
+                    self._sim.inject_ok0()
+                elif cmd[0] == "reset":
+                    self._sim.inject_reset()
+                elif cmd[0] == "disconnect":
+                    self._sim.inject_disconnect()
 
-    def _on_line(self, raw: bytes, now: float) -> None:
+    def _on_line(self, raw: bytes) -> None:
         """
-        One line from the board: into the drive log exactly as received, then
-        parsed.
-        @param raw  The line's bytes without its "\\n".
-        @param now  Monotonic time.
+        @param raw  One line's bytes without its "\\n".
         """
-        if self._log is not None:
-            try:
-                self._log.write_board(raw)
-            except OSError as exc:
-                self._log_failed(exc)
-        self._emit(self._asm.feed(raw.decode("utf-8", errors="replace"), now))
-
-    def _emit(self, items: list) -> None:
-        """
-        Emits one signal per parsed item. L samples are collected into the
-        batch instead; the batch goes out first whenever another item does,
-        so the GUI sees everything in the order it arrived.
-        @param items  Output of the assembler.
-        """
-        for x in items:
-            if isinstance(x, LogSample):
-                self._batch.append(x)
-                if self._log is not None:
-                    self._log.stats.add(x.n, x.t_us)
-                continue
-            self._flush_batch()
-            if isinstance(x, BootLine) and self._log is not None:
-                self._log.stats.new_run()   # n restarts at every BOOT
-            if isinstance(x, Snapshot):
-                self.snapshot_received.emit(x, time.time())
-            elif isinstance(x, Rejected):
-                self.snapshot_rejected.emit(x)
-            elif isinstance(x, EventLine):
-                self.event_received.emit(x)
-            elif isinstance(x, BootLine):
-                self.boot_received.emit(x)
-            elif isinstance(x, ConfigLine):
-                self.config_received.emit(x)
-            elif isinstance(x, HealthLine):
-                self.health_received.emit(x)
-            elif isinstance(x, FaultLine):
-                self.fault_received.emit(x)
-            elif isinstance(x, SampleLine):
-                self.sample_received.emit(x)
+        item = self._parser.feed(raw.decode("utf-8", errors="replace"))
+        if item is None:
+            return
+        if isinstance(item, LogSample):
+            self._batch.append(item)
+            return
+        self._flush_batch()             # Everything before this item goes first
+        if isinstance(item, BootLine):
+            self.boot_received.emit(item)
+        elif isinstance(item, ConfigLine):
+            self.config_received.emit(item)
+        elif isinstance(item, HealthLine):
+            self.health_received.emit(item)
+        elif isinstance(item, FaultLine):
+            self.fault_received.emit(item)
 
     def _open(self) -> Optional[serial.Serial]:
         """
@@ -382,7 +279,6 @@ class SerialHandler(QThread):
             waiting_reported = False
             self.connection_changed.emit(True, "Connected to %s" % ser.port)
             if not first:
-                self._log_pc("reconnect")
                 self.reconnected.emit()
             first = False
             buf = bytearray()
@@ -391,7 +287,6 @@ class SerialHandler(QThread):
                     # Up to the read timeout for the first byte, then whatever
                     # else is already waiting.
                     data = ser.read(ser.in_waiting or 1)
-                    now = time.monotonic()
                     if data:
                         buf.extend(data)
                         while True:
@@ -400,17 +295,13 @@ class SerialHandler(QThread):
                                 break
                             line = bytes(buf[:k])
                             del buf[:k + 1]
-                            self._on_line(line, now)
+                            self._on_line(line)
                         if len(buf) > _MAX_PARTIAL_LINE:
                             buf.clear()
-                    self._emit(self._asm.check_stall(now))
-                    self._service(now)
+                    self._service(time.monotonic())
             except (serial.SerialException, OSError) as exc:
-                # Unplugged or reset: the partial snapshot is discarded (and
-                # so is a partial line: it never reaches the drive log).
-                self._emit(self._asm.abort("USB lost mid-snapshot"))
+                # Unplugged or reset: a partial line is discarded.
                 self._flush_batch()
-                self._log_pc("lost")
                 self.connection_changed.emit(False, "Lost %s (%s); retrying" % (ser.port, exc))
             finally:
                 try:
@@ -423,13 +314,13 @@ class SerialHandler(QThread):
         Read loop for the simulated device, paced in real time against a
         schedule: each line is due a fixed time after the one before, so a
         coarse OS sleep (~15.6 ms steps on Windows) delays a line a little but
-        never slows the device down (S lines are only ~19 ms apart, L lines
-        2.4 ms: a late line is delivered with the next ones).
+        never slows the device down (L lines are 2.4 ms apart: a late line is
+        delivered with the next ones).
         """
-        self.connection_changed.emit(True, "Simulated device, %s build (fw %s)"
-                                     % (self._sim_build, cfg.SIM_FW))
+        self._sim = SimDevice()
+        self.connection_changed.emit(True, "Simulated device (fw %s)" % cfg.SIM_FW)
         due = time.monotonic()
-        for delay, item in SimDevice(build=self._sim_build).stream():
+        for delay, item in self._sim.stream():
             if not self._running:
                 return
             due += delay
@@ -440,20 +331,15 @@ class SerialHandler(QThread):
                     return
             elif wait < -1.0:
                 due = time.monotonic()  # Far behind (PC busy): carry on, don't burst
-            now = time.monotonic()
             if isinstance(item, SimDisconnect):
-                self._emit(self._asm.abort("USB lost mid-snapshot (simulated)"))
                 self._flush_batch()
-                self._log_pc("lost")
                 self.connection_changed.emit(False, "Simulated USB drop-out")
                 self._sleep(item.duration_s)
                 if not self._running:
                     return
                 self.connection_changed.emit(True, "Simulated device (reconnected)")
-                self._log_pc("reconnect")
                 self.reconnected.emit()
                 due = time.monotonic()
                 continue
-            self._on_line(item.encode("utf-8"), now)
-            self._emit(self._asm.check_stall(now))
-            self._service(now)
+            self._on_line(item.encode("utf-8"))
+            self._service(time.monotonic())

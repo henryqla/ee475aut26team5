@@ -1,9 +1,16 @@
 /*
  * File:        firmware-bench.ino
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-22
- * Version:     0.1.3-bench
- * Change:      0.1.3-bench (drive-log-manual-record-handoff.md v0.2, request
+ * Date:        2026-11-23
+ * Version:     0.1.4-bench
+ * Change:      0.1.4-bench (manual-recording-overhaul-handoff.md, request A;
+ *              owner decision O2): one build that streams every sample as an
+ *              L line and decides nothing. No threshold detection, no EVT
+ *              (Serial or BLE), no S lines, no snapshots, no build flags to
+ *              pick. setup() makes out_q OUT_Q_LEN (256) long and no longer
+ *              creates snapshot buffers. The removed code is in git, tag
+ *              pre-manual-overhaul.
+ *              0.1.3-bench (drive-log-manual-record-handoff.md v0.2, request
  *              4): log build. With LOG_MODE 1 in config.h, every sample goes
  *              to Serial as an L line for the record GUI's drive log and
  *              manual Record (no S lines, no snapshots); setup() then makes
@@ -26,14 +33,13 @@
  * Description: Road quality firmware, bench build. Target: ESP32-S3-DevKitC-1
  *              (ESP32-S3-WROOM-1-N8R8) with an Adafruit LSM6DSO32 breakout on
  *              SPI, wired to the same GPIOs as the team PCB (board_pins.h).
- *              Reads the IMU at 416 Hz, classifies potholes and speed bumps by
- *              thresholding, sends 1 s segment summaries and events to the
- *              Android app over BLE, and prints samples, segments, events, and
- *              health to Serial. The record build (RECORD_MODE 1 in config.h)
- *              also prints each trigger's snapshot (SNB / SNR / SNE lines) for
- *              the CNN record GUI in firmware/cnn/cnn_record_gui/. The log
- *              build (LOG_MODE 1) prints every sample as an L line instead of
- *              S lines. The two cannot both be on.
+ *              Reads the IMU at 416 Hz and prints every sample to Serial as an
+ *              L line (raw chip axes plus the CNN's model channels z_hp, roll
+ *              and pitch) for the CNN record GUI in
+ *              firmware/cnn/cnn_record_gui/, along with segments and health.
+ *              Sends 1 s segment summaries to the Android app over BLE. It
+ *              detects nothing: the passenger labels events in the GUI, and
+ *              the CNN will run on a sliding window later.
  *
  *              setup() only creates the queues and the five tasks, then deletes
  *              its own task, so loop() never runs. Each task initializes the
@@ -55,9 +61,9 @@
  *              The "UART" connector is optional: plug it in too to see ROM boot
  *              messages and configASSERT output when chasing a reboot loop.
  *
- *              Bench trips upload as REAL with fw_version 0.1.3-bench (earlier:
- *              0.1.2-bench, 0.1.1-bench, 0.1.0-bench); Ben deletes them by
- *              that version.
+ *              Bench trips upload as REAL with fw_version 0.1.4-bench (earlier:
+ *              0.1.3-bench, 0.1.2-bench, 0.1.1-bench, 0.1.0-bench); Ben deletes
+ *              them by that version.
  */
 
 // ============================================================================
@@ -79,13 +85,6 @@
 // Queue and task handles. Filled here before any task that reads them exists,
 // read-only afterwards.
 static app_ctx_t s_ctx;
-
-#if RECORD_MODE
-// The fixed snapshot buffers (~7.5 KB each, internal RAM). Never touched here
-// after setup() puts their pointers in snap_free_q; from then on whoever
-// holds a pointer owns that buffer (see snap_t in types.h).
-static snap_t s_snap_bufs[SNAP_BUFFERS];
-#endif
 
 // ============================================================================
 // Prototypes
@@ -121,12 +120,8 @@ static void start_task(TaskFunction_t fn, const char *name, UBaseType_t prio,
  */
 void setup() {
   s_ctx.sample_q = xQueueCreate(SAMPLE_Q_LEN, sizeof(imu_sample_t));
-#if LOG_MODE
-  // Log build: one item per sample, so ~0.6 s of room (L3) instead of OUT_Q_LEN.
-  s_ctx.out_q = xQueueCreate(LOG_OUT_Q_LEN, sizeof(out_msg_t));
-#else
+  // One item per sample (L lines), so ~0.6 s of room (L3).
   s_ctx.out_q = xQueueCreate(OUT_Q_LEN, sizeof(out_msg_t));
-#endif
   s_ctx.sys_q = xQueueCreate(SYS_Q_LEN, sizeof(sys_msg_t));
   s_ctx.ble_q = xQueueCreate(BLE_Q_LEN, sizeof(ble_msg_t));
   s_ctx.time_q = xQueueCreate(1, sizeof(time_sync_t));  // 1: written with xQueueOverwrite
@@ -140,21 +135,6 @@ void setup() {
   configASSERT(s_ctx.sys_q != NULL);
   configASSERT(s_ctx.ble_q != NULL);
   configASSERT(s_ctx.time_q != NULL);
-
-#if RECORD_MODE
-  // Free list of snapshot buffers: dsp takes one per trigger, serial_out puts
-  // it back after sending. Room for every buffer, so returning one never fails.
-  s_ctx.snap_free_q = xQueueCreate(SNAP_BUFFERS, sizeof(snap_t *));
-  configASSERT(s_ctx.snap_free_q != NULL);
-  for (int i = 0; i < SNAP_BUFFERS; i++) {
-    snap_t *p = &s_snap_bufs[i];
-    const BaseType_t ok = xQueueSend(s_ctx.snap_free_q, &p, 0);
-    configASSERT(ok == pdPASS);
-    (void)ok;  // Keeps the build warning-free if asserts are compiled out
-  }
-#else
-  s_ctx.snap_free_q = NULL;  // No snapshots in the product build
-#endif
 
   // serial_out first so BOOT prints as early as possible. supervisor last,
   // because it needs the imu_acq and dsp handles.

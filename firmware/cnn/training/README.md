@@ -1,322 +1,155 @@
-# CNN Training
+# CNN Training: Window Cutting
 
-This folder teaches a small computer model (a "CNN") to tell potholes, speed
-bumps and false alarms apart, using the **takes** recorded with the CNN Record
-GUI (`../cnn_record_gui/`). It then packs the model into files the firmware
-will use later.
+This folder will hold the tools that train the road-quality CNN. Right now it
+holds the first step, the **window cutter** (`windows.py`). The model training
+and export come in a later step.
 
-One **run** does everything in one go:
+The record GUI (`..\cnn_record_gui\`) saves **clips**: 6 seconds of readings
+around each key press (1 second before, 5 seconds after), plus long NONE clips
+of normal road. The model looks at shorter pieces, **windows** of 2 seconds,
+because the CNN will run on the board on a sliding window. The window cutter
+makes those windows from the clips every time training runs:
 
-1. reads every take and checks that they belong together;
-2. sets whole **sessions** aside for testing, so the model is always tested on
-   recordings it never saw;
-3. trains the model;
-4. scores it on the test sessions, next to the board's own rule-based answer;
-5. saves the model, a C header for the firmware, and a report.
+- In each **POTHOLE** or **SPEED_BUMP** clip it finds the bump (the strongest
+  movement), then cuts **5 windows** that each hold the bump somewhere between
+  20% and 80% of the window. Placing the bump at different spots teaches the
+  model to recognize an event anywhere in the window.
+- From every **NONE** clip, short or long, it cuts a window every second.
+- A window that crosses lost readings, a board reset, or readings taken before
+  the board was settled (`ok=0`) is skipped and listed.
 
-You can start a run from the GUI's **Training** tab or from Command Prompt.
-Both do exactly the same thing.
+It never changes a clip file. Everything it decides is listed in a report,
+`windows_report.csv`, so you can check any clip against its plot in the record
+GUI.
 
-The guide has these parts:
+Clips you deleted (in a session's `_deleted` folder) are never used. The label
+comes from the file name, so your relabels in the GUI count.
 
-- **Part 1:** install TensorFlow (once per computer).
-- **Part 2:** start a run.
-- **Part 3:** what a run saves.
-- **Part 4:** how to read the report.
-- **Part 5:** the made-up sample sets.
-- **Part 6:** cut takes from drive logs and manual recordings.
-- **Tests:** what to do and what you should see.
-- **If something goes wrong.**
-
-At the end, a short section for developers describes the files.
+The earlier training program (`train.py` and its Training tab) was retired on
+2026-11-23 because it was built for the old 1.5-second snapshots. It is in git
+under the tag `pre-manual-overhaul`.
 
 ---
 
 ## Before you start
 
-You need:
+- Do Part 1 of `..\cnn_record_gui\README.md` (Python 3.11 and the add-on folder
+  `%USERPROFILE%\venvs\ee475-cnn`). The window cutter needs only numpy, which
+  that installs.
+- Record some clips (Parts 5 to 7 of the record GUI's README).
 
-- the CNN Record GUI installed: `../cnn_record_gui/README.md`, Part 1. Training
-  uses the same add-on folder, `venvs\ee475-cnn` in your user folder. It lives
-  outside the project folder because TensorFlow's file names are too long for
-  Windows' 260-character path limit there; no Windows setting needs changing.
-- The project owner's OK before you install TensorFlow (Part 1). This is a
-  project rule.
-- Takes to train on. A model is only worth reporting with at least **30 takes
-  of every class** for each session type (bench or car), and a run needs at
-  least **3 sessions** (one to train on, one to decide when to stop training,
-  one to test on).
-
-Commands are typed in **Command Prompt** (Start button, type `cmd`, press
-Enter) or **PowerShell** (for example VS Code's terminal). Where the two differ,
-each command is shown for both: use the one that matches your window (in
-PowerShell, each line starts with `PS`). The GUI guide explains this in
-"Before you start".
+`requirements.txt` in this folder pins TensorFlow 2.15 for the training step
+that comes later. The window cutter doesn't need it; don't install it unless
+the project owner asks.
 
 ---
 
-## Part 1: Install TensorFlow (once per computer)
+## Part 1: Cut windows
 
-1. **Go to this folder.** In File Explorer, open the project folder, then
-   `firmware`, `cnn`, `training`. Click the address bar and press Ctrl+C. In
-   Command Prompt type `cd /d "`, in PowerShell type `cd "`; then press Ctrl+V,
-   type `"` and press Enter. The text in front of the cursor now ends with
-   `training>`.
-
-2. **Install TensorFlow.** Get the project owner's OK first, then type:
+1. Open Command Prompt or PowerShell.
+2. Go to this folder (`firmware\cnn\training`). With your own path:
 
    Command Prompt:
 
    ```
-   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" -m pip install -r requirements.txt
+   cd /d "C:\Users\you\Documents\GitHub\ee475aut26team5\firmware\cnn\training"
    ```
 
    PowerShell:
 
    ```
-   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -m pip install -r requirements.txt
+   cd "C:\Users\you\Documents\GitHub\ee475aut26team5\firmware\cnn\training"
    ```
 
-   This downloads TensorFlow 2.15, several hundred megabytes, and takes a few
-   minutes. The last line starts with `Successfully installed`.
-
-3. **Check it.** Type:
+3. Run the cutter on every session:
 
    Command Prompt:
 
    ```
-   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" -c "import tensorflow as tf; print(tf.__version__)"
+   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" windows.py
    ```
 
    PowerShell:
 
    ```
-   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -c "import tensorflow as tf; print(tf.__version__)"
+   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" windows.py
    ```
 
-   It should print `2.15.1` (after a few seconds, maybe with a few notice lines
-   first).
-
-4. **Save the list of installed versions.** Type:
-
-   Command Prompt:
+   Or only some sessions, by name (the same in both windows after the program
+   path):
 
    ```
-   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" -m pip freeze > pip-freeze.txt
+   ... windows.py --sessions 2026-11-24_bench 2026-11-30_car_route1
    ```
 
-   PowerShell:
+It prints one line with the number of windows per class, then any warnings,
+then the folder it wrote to: `runs\windows_<date>_<time>\` in this folder. That
+folder is not in git; keep the ones worth keeping elsewhere.
 
-   ```
-   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -m pip freeze | Out-File -Encoding utf8 pip-freeze.txt
-   ```
-
-   This writes `pip-freeze.txt` in this folder. The handoff asks for the
-   versions actually installed. In PowerShell, don't use `>`: it saves the file
-   as UTF-16, which many editors show with a space between every letter.
-
----
-
-## Part 2: Start a run
-
-### From the GUI
-
-1. Start the CNN Record GUI (`../cnn_record_gui/README.md`, Part 3) and click the
-   **Training** tab.
-2. **Data folder** shows where takes are read from, normally
-   `firmware\cnn\data`. **Choose folder...** picks another one, for example a
-   sample set (Part 5).
-3. In **Sessions**, untick any session you don't want. Each line shows the
-   session's type and how many labeled takes it has.
-4. Leave **Test sessions** and **Validation sessions** empty to let the program
-   choose (always the same choice for the same sessions). To choose yourself,
-   type session names separated by commas.
-5. Tick **Allow simulated takes** only for the sample sets.
-6. Press **Train**. The log on the right shows each step. The first run takes a
-   few extra seconds to load TensorFlow.
-7. When it finishes, the line under the buttons says **Done**, and whether the
-   result is reportable. **Open run folder** shows the saved files.
-
-**Stop** ends the run after the current training round and saves no model.
-
-### From the command line
-
-Go to this folder (Part 1, step 1), then type:
-
-Command Prompt:
-
-```
-"%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" train.py
-```
-
-PowerShell:
-
-```
-& "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" train.py
-```
-
-That trains on every session in `firmware\cnn\data`. Extra options, typed after
-`train.py`:
+**Options:**
 
 | Option | What it does |
 | --- | --- |
-| `--sessions A B C` | Use only these sessions |
-| `--test-sessions C` | Test on these sessions (default: chosen by the program) |
-| `--val-sessions B` | Use these to decide when to stop training (default: chosen by the program) |
-| `--data-dir FOLDER` | Read takes from another folder |
-| `--allow-sim` | Accept takes from the simulated device (sample sets only) |
-| `--out-dir FOLDER` | Save runs somewhere else (default `training\runs`) |
-
-The last line says where the run was saved.
+| `--sessions A B ...` | Use only these sessions (default: all) |
+| `--window-s 1.5` | Window length in seconds (default 2.0). At 1.5 or less, older 624-row takes are used too |
+| `--decimate 4` | Keep every 4th reading, after a filter that removes what would alias (default 1 = keep all, 416 per second) |
+| `--data-dir PATH` | Read sessions from another folder (default `firmware\cnn\data`) |
+| `--out PATH` | Write the results to this folder |
+| `--no-npz` | Write only the report |
 
 ---
 
-## Part 3: What a run saves
+## Part 2: What it writes
 
-Every run gets its own folder, `training\runs\<date>_<time>\`, for example
-`runs\2026-11-22_153000\`. Runs are not saved in Git. Copy the ones worth
-keeping somewhere safe.
+- **`windows_report.csv`**: one row per file, with these columns:
+  - `session`, `file`, `label`;
+  - `kind`: `clip`, or `take` for an older snapshot-era take;
+  - `source`: `manual` (a key press), `long` (a long NONE recording) or `take`;
+  - `rows`;
+  - `peak_s`: for POTHOLE and SPEED_BUMP clips, where the bump was found, in
+    seconds from the clip's start. The record GUI's clip plot uses the same
+    time axis, so you can check it there;
+  - `windows_cut`, `windows_skipped`, and `skip_reasons` (for example `gap:2`:
+    `gap` is lost readings, `reset` a board reset, `ok0` readings before the
+    board was settled);
+  - `note`: why a file gave fewer windows or none (too short, the bump too near
+    an end, a label that isn't a class, an unreadable file, ...).
+- **`windows.npz`**: the windows themselves, for the training step: `X`
+  (windows × samples × 3: z_hp, roll, pitch), `y` (0 = POTHOLE,
+  1 = SPEED_BUMP, 2 = NONE), `sessions` and `clip_ids` (which session and clip
+  each window came from), `classes`, `channels` and `rate_hz`.
 
-| File | What it is |
-| --- | --- |
-| `report.md` | The report: data used, training, test results, export (Part 4) |
-| `report.json` | The same numbers, for scripts |
-| `train.log` | Everything the run printed. Failed runs have it too |
-| `model_data.h` | The model and its input rules, for the firmware (next handoff) |
-| `model.tflite` | The model in the small format the firmware runs |
-| `model.keras` | The model in TensorFlow's own format |
-| `frozen_test_set.npz` | The test takes and the model's answers, to check the board gets the same answers later |
+**Warnings.** Below 30 clips of a class, or windows from fewer than 3 sessions,
+it prints a warning that test scores will be noisy. It never refuses to run.
 
----
-
-## Part 4: How to read the report
-
-- **Result: REPORTABLE / NOT REPORTABLE.** Not reportable means some class had
-  fewer than 30 takes for a session type. The model is still saved, so the
-  steps can be checked, but its numbers are too noisy to trust.
-- **Data.** The sessions used, which side of the split each one was on, and how
-  many takes of each class it had. Below that, any takes that were skipped
-  (UNLABELED, empty, unreadable) or rejected (wrong length, bad label), each
-  with the reason.
-- **Confusion matrix.** One row per true class, one column per answer. The
-  numbers on the diagonal are correct answers.
-- **Rule baseline.** The board's own rule-based answer, saved in every take,
-  scored on the same test takes. The rule has no "false trigger" answer, and an
-  `UNKNOWN` or missing answer counts as wrong.
-- **Per-class recall.** For each class, the share of its test takes that got the
-  right answer, for the model and for the rule.
-- **Metrics fingerprint.** A short code made from every number in the run. Two
-  runs on the same takes give the same code (test TRN-1).
-- **Keras vs TFLite.** How far the two model formats disagree on the test takes.
-  It should be tiny. The owner sets the allowed limit (`TFLITE_MATCH_TOL` in
-  `../cnn_config.py`); until then the report shows the difference without a
-  verdict.
-
----
-
-## Part 5: The made-up sample sets
-
-The tests use three small sets of made-up takes. Make them (or remake them)
-from this folder with:
-
-Command Prompt:
-
-```
-"%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" make_sample_set.py
-```
-
-PowerShell:
-
-```
-& "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" make_sample_set.py
-```
-
-It writes `sample_data\trn1`, `sample_data\trn3` and `sample_data\trn4` and
-prints how many files each has. The files are identical every time. They come
-from the simulated device, so a run only accepts them with `--allow-sim` (or
-**Allow simulated takes** ticked). The script only replaces folders it wrote
-itself.
-
-| Set | What's in it | Used by |
-| --- | --- | --- |
-| `trn1` | 4 bench sessions, 10 takes of each class in each | TRN-1 |
-| `trn3` | 3 sessions; 3 takes recorded with other snapshot settings, and 1 take cut short | TRN-3 |
-| `trn4` | 3 sessions with only 5 false-trigger takes, an empty file, an unreadable file and an UNLABELED take | TRN-4 |
-
----
-
-## Part 6: Cut takes from drive logs and manual recordings
-
-With the board's log build, the record GUI saves whole drives as **drive logs**
-and keeps the 6 seconds around every **Record** press
-(`../cnn_record_gui/README.md`, Part 11). `cut_windows.py` turns them into
-ordinary takes that the GUI and a training run read like any other. Run it
-after **Stop log**, from this folder, with the session's name:
-
-Command Prompt:
-
-```
-"%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" cut_windows.py --session 2026-11-25_car_route1
-```
-
-PowerShell:
-
-```
-& "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" cut_windows.py --session 2026-11-25_car_route1
-```
-
-It makes, in this order:
-
-1. **Manual recordings** in the session's `manual` folder that have no take yet.
-   Record already made a take for most of them; those are skipped.
-2. **One take per board event** (`EVT` line) in each drive log, placed exactly
-   where the board's own snapshot would be. Its label comes from the last P, B
-   or F mark pressed within 3 seconds after the event; with none, it is
-   UNLABELED (relabel it in the GUI). An event inside a manual recording that
-   has a take is skipped, so a bump is never saved twice.
-3. **One take per mark with no event**: a bump the board's threshold missed.
-   It is lined up at half the threshold in the 3 seconds before the mark. If
-   nothing reaches half, it is lined up on the biggest movement there, however
-   small. Like every take, it goes in the session folder, so training uses it
-   however weak the bump was. The mark is listed for review only if nothing
-   moved at all. Manual recordings (step 1) follow the same rule.
-4. **Background windows**: 20 "nothing happening" pieces of each log (`--background`
-   changes the number, 0 turns them off), at least 3 seconds from any event or
-   mark, in the `background` folder. They are picked once per log.
-
-**Rules:**
-
-- A piece with missing readings, a board that was still settling, or not
-  enough readings before or after is skipped and listed, never padded.
-- Running it twice adds nothing: each take records which piece of which file it
-  came from (`src_key`). A take you deleted is never made again.
-- A take whose settings differ from the session's takes is refused and listed.
-- It never changes or deletes a drive log or a manual recording.
-- Training reads only the takes directly in the session folder, so
-  `background` is left out unless moved in. Nothing is saved in `weak` any
-  more. Takes that older versions put there still count as made, so they
-  are never cut again; move them into the session folder (each under a number
-  its label hasn't used) to train on them.
-- A mark or Record press with no bump near it still gives a take, lined up on
-  noise (its header's `peak_frac` is small). Delete it in the GUI.
-- Takes cut from marks or by Record have no rule answer (`rule_class` is
-  `missing`). The report counts those as the rule being wrong, so a test set
-  with many of them makes the rule baseline look worse than it is.
-
-It prints a summary and writes `cut_report.txt` in the session folder: takes
-made per label and source, skipped pieces with reasons, items for review,
-events covered by manual recordings, refused takes, and events with no mark.
+**Splitting (decision W3, for the training step).** Hold out whole sessions,
+never single clips or windows: the windows of one clip are near copies, so a
+random split would test the model on data it has already seen. `sessions` and
+`clip_ids` are there for that.
 
 ---
 
 ## Tests
 
-Each test says what to do, what you should see, and what to save as proof.
-Only the project owner marks a test as passed.
+There are two kinds of tests:
+
+- the **automatic checks**, which the computer runs by itself in a few seconds;
+- tests **WIN-1 to WIN-4**, which you do by hand.
+
+All of WIN-1 to WIN-4 are **NOT TESTED** so far. Only the project owner marks a
+test as passed.
 
 ### Automatic checks
 
-From this folder, type:
+**What they check:** on made-up clips, the same results from two runs; the
+bump found within 25 ms of where it was put; 5 windows per event clip, each
+with the bump between 20% and 80%; NONE windows every second; a bump near the
+start, a clip shorter than a window, and an older take; windows across lost
+readings, a reset or `ok=0` rows skipped and listed; empty and unreadable files
+listed without a crash; the warning; no clip file changed; the decimation
+filter.
+
+**What to do:** in this folder:
 
 Command Prompt:
 
@@ -330,234 +163,94 @@ PowerShell:
 & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" -m unittest discover -s tests
 ```
 
-**You should see** `Ran 48 tests` and `OK` on the last line. Before TensorFlow
-is installed, the last line says `OK (skipped=2)`: the two full-run tests wait
-for TensorFlow. With TensorFlow they take about a minute. Ten of the tests
-check `cut_windows.py` (CUT-1, CUT-3 and CUT-4 cases, and manual recordings);
-they need no TensorFlow.
+**What you should see:** `Ran 14 tests in ...` and `OK` on the last line.
 
-**It fails if** the last line says `FAILED`. Send all of the text to the owner.
+### WIN-1: Same seed, same windows
 
-### TRN-1: Same seed, same numbers
+**Do:** run the automatic checks.
 
-1. Make the sample sets (Part 5).
-2. Run this twice:
+**You should see:** all pass (one of them runs the cutter twice and compares
+`X`, `y` and the clip IDs).
 
-   Command Prompt:
+**Proof:** the test output.
 
-   ```
-   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" train.py --data-dir sample_data\trn1 --allow-sim
-   ```
+### WIN-2: Finding the bump
 
-   PowerShell:
+**Do:** run the automatic checks, then run the cutter on the MAN-2 session (see
+the record GUI's README). Open `windows_report.csv`, pick 5 real POTHOLE or
+SPEED_BUMP clips, open each in the record GUI, and compare its `peak_s` with
+where the bump is in the clip plot.
 
-   ```
-   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" train.py --data-dir sample_data\trn1 --allow-sim
-   ```
+**You should see:** the automatic checks pass; each event clip gives 5 windows;
+NONE windows step by 1 second; every clip is listed in the report; for the 5
+clips you checked, `peak_s` is at the bump.
 
-**You should see** both runs end with `Done in ... Run saved in ...`. The line
-`Metrics fingerprint ...` shows the same code both times.
+**Proof:** the test output, the report, and your notes on the 5 clips.
 
-**It fails if** a run stops with an error, or the two codes differ.
+### WIN-3: Edge cases
 
-**Proof to save:** `train.log` from both run folders.
+**Do:** run the automatic checks. Optionally, run the cutter on a session that
+has older takes, with `--window-s 2.0` and then `--window-s 1.5`.
 
-### TRN-2: Train on bench sessions
+**You should see:** a bump in the first 0.3 s gives only windows that fit (in a
+2 s window it can't sit 20% in, so none); a clip shorter than the window gives
+none and is listed; an older 624-row take is skipped at 2.0 s and used at 1.5 s.
 
-Needs real bench sessions: at least 3, with 30 takes of each class in all.
-The owner sets `TFLITE_MATCH_TOL` in `../cnn_config.py` first.
+**Proof:** the test output and the report.
 
-1. Run `train.py` (or press **Train** with the bench sessions ticked).
+### WIN-4: Damaged data
 
-**You should see** in `report.md`: the confusion matrix, per-class recall, and
-the rule baseline, all for the held-out sessions; `Result: REPORTABLE`; and
-under Export, the Keras vs TFLite difference `within the tolerance`. The run
-folder holds `model.tflite`, `model_data.h` and `frozen_test_set.npz`.
+**Do:** run the automatic checks.
 
-**It fails if** a file is missing, the result is not reportable, or the
-difference is over the tolerance.
+**You should see:** windows across lost readings, a reset or `ok=0` rows are
+skipped and listed by reason; an empty file and an unreadable file are listed;
+the warning is printed; nothing crashes; no clip file changed (the test
+compares each file's fingerprint before and after).
 
-**Proof to save:** the whole run folder.
-
-### TRN-3: Mixed settings and a take of the wrong length
-
-1. Make the sample sets (Part 5).
-2. Run:
-
-   Command Prompt:
-
-   ```
-   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" train.py --data-dir sample_data\trn3 --allow-sim
-   ```
-
-   PowerShell:
-
-   ```
-   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" train.py --data-dir sample_data\trn3 --allow-sim
-   ```
-
-**You should see** the run stop, without training, after these lines:
-
-- `Rejected 1 take(s):` and `mixC_bench/SPEED_BUMP-5.csv: wrong length: 600 rows, header says 624`;
-- `Refusing a mixed set`, then two settings sets: the second has `n_pre=208`
-  and lists `mixC_bench/POTHOLE-5.csv`, `-6.csv` and `-7.csv`.
-
-**It fails if** the run trains anyway, a different file is named, or Python
-prints a traceback (lines starting with `Traceback`).
-
-**Proof to save:** the run folder's `train.log`.
-
-### TRN-4: Bad files and a thin class
-
-1. Make the sample sets (Part 5).
-2. Run:
-
-   Command Prompt:
-
-   ```
-   "%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" train.py --data-dir sample_data\trn4 --allow-sim
-   ```
-
-   PowerShell:
-
-   ```
-   & "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" train.py --data-dir sample_data\trn4 --allow-sim
-   ```
-
-**You should see** the run finish (`Done in ...`), and in the log:
-
-- `Skipped 1 UNLABELED take(s)`;
-- `Skipped 2 file(s):` listing `thinB_bench/POTHOLE-900.csv: empty file` and
-  `thinC_bench/SPEED_BUMP-900.csv: unparseable ...`;
-- `Thin class: 5 FALSE_TRIGGER take(s) in bench sessions, fewer than 30`;
-- `Result: NOT REPORTABLE`.
-
-**It fails if** the run crashes (a `Traceback`), or one of these lines is missing.
-
-**Proof to save:** the run folder's `train.log` and `report.md`.
-
-### CUT-1 to CUT-4 and MR-4: The cutter
-
-All five are **NOT TESTED** so far.
-
-- **CUT-1 (simulated):** the automatic checks include it: a take cut at each
-  event of the simulated log build must equal that event's snapshot, row for
-  row as text, with the same CRC. **Proof:** the automatic checks' output.
-- **CUT-2 (board):** run the cutter (Part 6) on the sessions of the GUI's DRV-2
-  and DRV-3 tests. **You should see** one take per event, labeled from its mark;
-  every take opens in the GUI's Collected takes; 20 files per log in
-  `background`, none within 3 seconds of an event or mark (the report lists
-  them). **Proof:** `cut_report.txt` and a screenshot.
-- **CUT-3 (edge cases):** a log with a gap across an event, an event at the very
-  start of a log, and a mark with no event; manual recordings with a tap under
-  half of the threshold, with one under a tenth, and with no movement at all.
-  **You should see** the first two skipped with reasons, the mark cut as
-  `marker_only`, the two tapped recordings cut into takes in the session folder
-  (`align=peak`), and the one with no movement listed for review. No `weak`
-  folder appears. The automatic checks include these cases. **Proof:**
-  `cut_report.txt`.
-- **CUT-4 (fault):** run the cutter twice, then on a session holding takes with
-  different settings. **You should see** the second run add nothing ("Takes
-  made: 0") and the odd takes refused and listed. **Proof:** both reports and
-  folder listings.
-- **MR-4 (consistency):** run the cutter on the GUI's MR-2 session. **You
-  should see** "Takes made: 0" from manual recordings (Record already made
-  them; the report counts them under "Already cut before"). To compare one by
-  hand, copy a file from `manual` into a new session's `manual` folder, run the
-  cutter on that session, and compare the take it makes with the GUI's (for
-  example `fc /b` in Command Prompt, or `Compare-Object (Get-Content a)
-  (Get-Content b)` in PowerShell): they are the same. **Proof:**
-  `cut_report.txt` and the comparison.
+**Proof:** the test output.
 
 ---
 
 ## If something goes wrong
 
-- **"TensorFlow is not installed"**: do Part 1.
-- **"Splitting by session needs at least 3 sessions"**: record more sessions, or
-  tick more of them.
-- **"Refusing a mixed set"**: the takes were recorded with different settings
-  (another firmware version, snapshot length or filter). Any change starts a new
-  dataset: tick only the sessions of one set. The log names the odd files.
-- **Every take rejected as "simulated take"**: those takes came from the
-  simulated device. Only the sample sets should be used that way.
-- **The pip install fails**: the add-on folder must be Python 3.11. Check with
-  `"%USERPROFILE%\venvs\ee475-cnn\Scripts\python.exe" --version` (Command
-  Prompt) or `& "$env:USERPROFILE\venvs\ee475-cnn\Scripts\python.exe" --version`
-  (PowerShell). TensorFlow 2.15 does not support 3.12 or newer.
-- **"TensorFlow could not be imported: No module named 'tensorflow.python'"**:
-  the install stopped halfway, usually because the add-on folder's path is too
-  long (an error mentioning "Long Path support" appeared during the install).
-  Use the short folder from `../cnn_record_gui/README.md`, Part 1, step 5,
-  delete its `Lib\site-packages\tensorflow` folder, and do Part 1 again.
-- **PowerShell says `Unexpected token '-m'`, or the path is not found, or a
-  folder named `%USERPROFILE%` appeared**: a Command Prompt command was typed
-  into PowerShell. Use the PowerShell version (with `&` and
-  `$env:USERPROFILE`), and delete any `%USERPROFILE%` folder it created.
+- **`No module named numpy`.** Use the program path shown above (the add-on
+  folder's Python), not plain `python`.
+- **0 windows.** Check the report's `note` column. Common reasons: the session
+  name is wrong (`--sessions`), the clips are labeled FALSE_TRIGGER or
+  UNLABELED (older takes: relabel them in the record GUI), or every clip is
+  shorter than the window.
+- **A clip says "rate ... differs".** All windows in one run must have the same
+  sample rate. Run the sessions recorded at the other rate separately.
 
 ---
 
 ## For developers
 
-**Decisions this follows** (`cnn-record-train-handoff.md` v0.4, owner answers of
-2026-11-22):
+`windows.py` (NumPy only) reads clips with `clip_file.load_clip()` from the
+record GUI's folder, so the GUI and training share one parser. Everything is
+in `build_windows(data_dir, sessions, opts) -> WindowSet`; the command line only
+writes its results.
 
-- **Split (C11).** By whole sessions: one in 5 (at least one) held out for test,
-  then one in 5 of the rest (at least one) for validation, picked with seed 475
-  unless named. Below 10 sessions that is leave-one-session-out. Then the
-  training takes alone are oversampled with random copies until every class
-  matches the largest. Copies never reach validation or test.
-- **Normalization (C10).** A Keras `Normalization` layer with the per-channel
-  mean and variance of the training takes (originals, not copies) frozen in, so
-  the firmware feeds raw g and dps.
-- **Versions (C12).** TensorFlow 2.15 (Keras 2) in the record GUI's venv, which
-  lives at `%USERPROFILE%\venvs\ee475-cnn` (owner, 2026-11-22). The deepest
-  file in the `tensorflow_intel` 2.15.1 wheel is 153 characters below
-  `site-packages`, so the venv folder must stay under about 85 characters
-  without Windows long-path support. The old `cnn_record_gui\.venv` was 90.
-- **Rule baseline.** `BUMP` read as `SPEED_BUMP`; `UNKNOWN` and missing count as
-  wrong for every class.
-- **Repeatable runs.** `tf.keras.utils.set_random_seed`,
-  `tf.config.experimental.enable_op_determinism()`, and
-  `TF_ENABLE_ONEDNN_OPTS=0` before TensorFlow loads. Early stopping keeps the
-  best epoch's weights even when it never triggers.
-- **Preprocessing settings.** Take headers don't carry the filter settings (the
-  SNB line has no room for them, and a native USB reset often loses BOOT). `fw`
-  stands in for them: **any change to the HPF, full scales or axis mapping must
-  bump `FW_VERSION`**. BOOT values are compared whenever takes kept them, and
-  `model_data.h` defines them only if known.
+- **Peak** (`find_peak`): each channel divided by its median absolute value over
+  the clip's `ok` rows (a channel whose median is 0 is left unscaled), the sum
+  of the three squares, 0 on `ok=0` rows, a `PEAK_SMOOTH_S` (21-sample) moving
+  average, then the highest point.
+- **Event windows** (`_event_starts`): every start that keeps the window inside
+  the clip and the peak between `PEAK_LO` and `PEAK_HI`; up to `K_PER_EVENT` of
+  them, all different, drawn with `numpy.random.default_rng([WINDOW_SEED,
+  crc32("<session>/<file>")])`. Seeding per clip keeps a clip's windows the same
+  when other clips are added.
+- **Damage** (`damage`): a window is skipped if, inside it, `n` goes down
+  (reset), jumps by more than 1 (gap), or any row has `ok=0`. Nothing is drawn
+  in its place. With decimation the check also covers half the filter's length
+  on each side.
+- **Decimation** (`lowpass_taps`): a windowed-sinc FIR (Hamming window,
+  `DECIMATE_TAPS_PER_FACTOR × factor + 1` taps, cut-off at
+  `DECIMATE_CUTOFF_FRAC` of the new Nyquist frequency, unity gain at 0 Hz), run
+  over the whole clip, then every `factor`-th sample.
+- **Older takes** (`take_format=1`, 3 columns, no `n` or `ok`) are used only at
+  `OLD_TAKE_MAX_WINDOW_S` or less, and are never damage-checked (their snapshots
+  were checked on the board).
 
-**model_data.h** holds: generation time, script version, commit, sessions and
-take counts; `CNN_MODEL_VERSION`; the input contract, each macro named after
-the `config.h` setting it must equal (`CNN_N_ROWS` = `SNAP_ROWS`,
-`CNN_HPF_CUTOFF_HZ` = `HPF_CUTOFF_HZ`, ...); the class names in output order;
-the TFLite op list (`CNN_OPS`, for a trimmed op resolver); and the model as a
-16-byte-aligned `static` array, so include it from one `.cpp` only. The op list
-uses TensorFlow's `Interpreter._get_ops_details()`, which has no public
-equivalent in 2.15; if a future version drops it, the list comes out empty and
-the report says so.
-
-**Code.**
-
-| File | What it does |
-| --- | --- |
-| `train.py` | The run: load, split, train, score, export, report; also the command line |
-| `take_loader.py` | Reads and checks take files (uses `take_store.load_take` from the GUI) |
-| `dataset_split.py` | Session split and oversampling |
-| `eval_metrics.py` | Confusion matrix, recall, accuracy, rule baseline |
-| `cnn_model.py` | The CNN, normalization inside (imports TensorFlow) |
-| `model_export.py` | TFLite conversion, op list, frozen test set, `model_data.h` |
-| `make_sample_set.py` | Writes the made-up sample sets |
-| `cut_windows.py` | Cuts takes from drive logs and manual recordings (standard library only; the alignment and take format come from `../cnn_record_gui/take_cut.py`, shared with the GUI's Record button) |
-| `requirements.txt` | TensorFlow pin, installed into the GUI's venv |
-| `../cnn_config.py` | Every adjustable setting, in the "training and export" section |
-| `../cnn_record_gui/training_widget.py` | The GUI's Training tab |
-| `tests/` | The automatic checks |
-
-**Credits.** `cnn_model.py`, `model_export.py`, `dataset_split.py`, `train.py`
-and the GUI's `training_widget.py` adapt parts of `Python/training_widget.py`
-from
-[jake-g/ml-on-device-playground](https://github.com/jake-g/ml-on-device-playground),
-a fork of [anandghanw/ml-on-device-playground](https://github.com/anandghanw/ml-on-device-playground),
-under the MIT license. See `LICENSE-ml-on-device-playground.txt`; each adapted
-file says in its header what it came from and what changed.
+All settings are in `..\cnn_config.py` under "training windows (request C)",
+each marked DRAFT until the owner sets it.

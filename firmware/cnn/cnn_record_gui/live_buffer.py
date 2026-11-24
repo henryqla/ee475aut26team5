@@ -1,10 +1,13 @@
 """
 File:        live_buffer.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-18
-Version:     0.1.0
-Description: The last few seconds of S lines (one IMU sample every
-             PRINT_EVERY_N), for the live IMU view. Keeps samples by device
+Date:        2026-11-23
+Version:     0.1.1
+Change:      0.1.1 (manual-recording-overhaul-handoff.md, request B): comments
+             only. The points are every LIVE_DECIMATE-th L sample now that the
+             firmware sends no S lines.
+Description: The last few seconds of live points (every LIVE_DECIMATE-th L
+             sample, as SampleLine), for the live IMU view. Keeps samples by device
              time, starts over when device time goes backwards (a reset or a
              different board), and gives the plot its series with a break
              (NaN) wherever lines are missing. Display only: nothing here is
@@ -29,7 +32,7 @@ from snapshot_protocol import S_CHANNELS, SampleLine
 
 
 class LiveBuffer:
-    """S lines from the last window_s seconds of device time."""
+    """Live points from the last window_s seconds of device time."""
 
     def __init__(self, window_s: float, gap_s: float, max_points: int = 20000) -> None:
         """
@@ -79,7 +82,7 @@ class LiveBuffer:
 
     def rate_hz(self) -> Optional[float]:
         """
-        @return S lines per second of device time over the last second, or
+        @return Points per second of device time over the last second, or
                 None with fewer than two samples in it.
         """
         if len(self._rows) < 2:

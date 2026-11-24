@@ -1,15 +1,18 @@
 """
 File:        take_store.py
 Authors:     Henry (owner); first draft written with Claude
-Date:        2026-11-22
-Version:     0.2.0
-Change:      0.2.0 (drive-log-manual-record-handoff.md v0.2, requests 5 and
-             6; one-press-manual-takes-handoff.md v0.1, request 8): one
-             shared writer, write_take(), for snapshot takes, manual takes,
-             raw manual recordings and cut takes, into the session folder or
-             its manual/, weak/ or background/ subfolder; header_text() and
-             read_header(); src_keys() lists the source windows a session
-             already has a take for, so nothing is cut twice.
+Date:        2026-11-23
+Version:     0.3.0
+Change:      0.3.0 (manual-recording-overhaul-handoff.md, request B): files
+             are clips (clip_file.py builds their text). Removed with the
+             snapshots, the cutter and the drive log: save_take(), src_keys(),
+             RULE_FIELDS and the manual/, weak/ and background/ subfolders
+             (git tag pre-manual-overhaul). Labels are the three classes (O4);
+             older takes named FALSE_TRIGGER or UNLABELED are still listed,
+             loaded, relabeled and deleted. New: write_take_streamed() writes a
+             long recording from its rows file without holding it in memory.
+             relabel() now copies line by line, for the same reason.
+             0.2.0: one shared writer for every take kind; read_header().
 Adapted from: the save / load / delete logic of Python/collected_data_widget.py
              in ml-on-device-playground,
              https://github.com/jake-g/ml-on-device-playground (branch
@@ -19,18 +22,17 @@ Adapted from: the save / load / delete logic of Python/collected_data_widget.py
              LICENSE-ml-on-device-playground.txt in this folder. Rewritten:
              CSV with a header instead of np.savetxt, session folders, relabel,
              and atomic writes.
-Description: Take files (C9, DECIDED): one CSV per take, one folder per
+Description: Clip files (C9, DECIDED): one CSV per clip, one folder per
              session, at <DATA_DIR>/<session>/<LABEL>-<n>.csv. Each file starts
-             with "# key=value" header lines (every SNB setting, the matching
-             EVT's rule class and peaks, the BOOT line, the PC time and the
-             commit), then one row per sample, "c0,c1,c2", exactly as the
-             firmware printed them. np.loadtxt(path, delimiter=",") reads the
-             rows directly ('#' lines are comments). Standard library only.
+             with "# key=value" header lines, then one row per sample.
+             Standard library only.
 
              Writes go to a temporary file that is then renamed, so a crash or
-             a pulled cable never leaves a half-written take. Numbers are never
-             reused within a session (deleted takes count), and Delete moves a
-             take into <session>/_deleted/ rather than destroying it.
+             a pulled cable never leaves a half-written clip. Numbers are never
+             reused within a session (deleted clips count), and delete moves a
+             clip into <session>/_deleted/ rather than destroying it. Nothing
+             here deletes, hides or changes a clip on its own (O3): every
+             relabel and delete is the owner's action in the GUI.
 """
 
 # ============================================================================
@@ -42,6 +44,7 @@ from __future__ import annotations
 import datetime
 import os
 import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -59,9 +62,8 @@ _SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _WINDOWS_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {"COM%d" % i for i in range(1, 10)} \
     | {"LPT%d" % i for i in range(1, 10)}
 
-# EVT fields copied into the take header as rule_<name> (the rule baseline).
-RULE_FIELDS = ("class", "peak_z_g", "peak_roll_dps", "peak_pitch_dps", "pitch_seq",
-               "basis", "n_peak", "t_us_peak")
+# Copy buffer for long files (bytes).
+_COPY_CHUNK = 1 << 20
 
 # ============================================================================
 # Functions
@@ -70,9 +72,9 @@ RULE_FIELDS = ("class", "peak_z_g", "peak_roll_dps", "peak_pitch_dps", "pitch_se
 
 def checkout_commit(path: Path) -> str:
     """
-    The commit of the git checkout holding path, for take headers. This is
-    the PC's checkout, not necessarily what is flashed: the take's fw field
-    identifies the firmware.
+    The commit of the git checkout holding path, for clip headers. This is
+    the PC's checkout, not necessarily what is flashed: the BOOT line in the
+    header identifies the firmware.
     @param path  Any path inside the repository.
     @return The commit hash, with "-dirty" if there are uncommitted changes,
             or "unknown" if git is not available.
@@ -93,7 +95,7 @@ def iso_time(wall: float) -> str:
     @param wall  Seconds since the epoch (time.time()).
     @return Local time with its UTC offset, ms resolution, ISO 8601; or the
             raw epoch seconds if the platform cannot convert it (Windows
-            refuses times before 1970), so a take is never lost over a
+            refuses times before 1970), so a clip is never lost over a
             timestamp.
     """
     try:
@@ -113,7 +115,7 @@ def _clean(value) -> str:
 
 def header_text(pairs: list) -> str:
     """
-    The "# key=value" header of a take or recording file.
+    The "# key=value" header of a clip file.
     @param pairs  (key, value) in file order.
     @return The header lines, each ending in a newline.
     """
@@ -122,8 +124,8 @@ def header_text(pairs: list) -> str:
 
 def read_header(path: Path) -> dict:
     """
-    Reads only the "# key=value" lines at the top of a take or recording
-    file, stopping at the first data row (cheap for listing many files).
+    Reads only the "# key=value" lines at the top of a clip or take file,
+    stopping at the first data row (cheap for listing many files).
     @param path  The file.
     @return Each header key mapped to its value.
     @raise OSError if the file cannot be read.
@@ -144,7 +146,7 @@ def read_header(path: Path) -> dict:
 
 def parse_take_name(path: Path) -> Optional[tuple]:
     """
-    @param path  A take file path.
+    @param path  A clip or take file path.
     @return (label, n) from <LABEL>-<n>.csv, or None if the name is not one.
     """
     if path.suffix != ".csv":
@@ -157,8 +159,9 @@ def parse_take_name(path: Path) -> Optional[tuple]:
 
 def load_take(path: Path) -> tuple:
     """
-    Reads a take file.
-    @param path  The take file.
+    Reads a clip or take file with the standard library (small files and
+    tests; the GUI and the window cutter use clip_file.load_clip()).
+    @param path  The file.
     @return (header, values): header maps each "# key=value" key to its
             value; values is a list of float tuples, one per row.
     @raise ValueError if a data row does not parse.
@@ -188,7 +191,7 @@ def load_take(path: Path) -> tuple:
 
 
 class TakeStore:
-    """Creates, lists, relabels and deletes take files under one data folder."""
+    """Creates, lists, relabels and deletes clip files under one data folder."""
 
     def __init__(self, data_dir: Path = cfg.DATA_DIR) -> None:
         """
@@ -207,19 +210,11 @@ class TakeStore:
                              "(e.g. 2026-11-14_car_route1)" % name)
 
     @staticmethod
-    def validate_label(label: str, subdir: str = "") -> None:
+    def validate_label(label: str) -> None:
         """
-        @param label   Take label.
-        @param subdir  The session subfolder it goes to ("" for the session
-                       folder itself).
-        @raise ValueError if it is not one of cfg.LABELS, or, in background/,
-               not cfg.BACKGROUND_LABEL.
+        @param label  Clip label.
+        @raise ValueError if it is not one of cfg.LABELS.
         """
-        if subdir == cfg.BACKGROUND_DIR_NAME:
-            if label != cfg.BACKGROUND_LABEL:
-                raise ValueError("Background windows are labeled %s, not %r"
-                                 % (cfg.BACKGROUND_LABEL, label))
-            return
         if label not in cfg.LABELS:
             raise ValueError("Label %r is not one of %s" % (label, ", ".join(cfg.LABELS)))
 
@@ -243,7 +238,9 @@ class TakeStore:
     def list_takes(self, session: str) -> list:
         """
         @param session  A valid session name.
-        @return The session's take files, oldest first (relabel keeps the time).
+        @return The session's clip and take files, oldest first (relabel
+                keeps the file time). Any <LABEL>-<n>.csv name counts, so
+                older takes labeled FALSE_TRIGGER or UNLABELED are listed too.
         """
         folder = self.session_dir(session)
         if not folder.is_dir():
@@ -256,7 +253,7 @@ class TakeStore:
         @param folder  A session folder.
         @param label   A label.
         @return One more than the highest number used for this label in the
-                session, deleted takes included, so a number is never reused.
+                session, deleted clips included, so a number is never reused.
         """
         highest = 0
         for sub in (folder, folder / cfg.DELETED_DIR_NAME):
@@ -268,131 +265,92 @@ class TakeStore:
                     highest = max(highest, parsed[1])
         return highest + 1
 
+    def _new_path(self, folder: Path, label: str) -> Path:
+        """
+        @param folder  A session folder (exists).
+        @param label   A label.
+        @return The next free <label>-<n>.csv path in it.
+        """
+        n = self._next_number(folder, label)
+        path = folder / ("%s-%d.csv" % (label, n))
+        while path.exists():  # Only if a file appeared since the scan
+            n += 1
+            path = folder / ("%s-%d.csv" % (label, n))
+        return path
+
     @staticmethod
-    def _write_atomic(path: Path, text: str) -> None:
+    def _tmp_for(path: Path) -> Path:
+        """
+        @param path  Final file path.
+        @return The temporary file it is written to first (hidden, not *.csv).
+        """
+        return path.with_name("." + path.name + ".tmp")
+
+    @classmethod
+    def _write_atomic(cls, path: Path, text: str) -> None:
         """
         Writes text to a temporary file next to path, then renames it into
         place, so path is either absent or complete.
         @param path  Final file path.
         @param text  Full file contents.
         """
-        tmp = path.with_name("." + path.name + ".tmp")
+        tmp = cls._tmp_for(path)
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
 
-    def write_take(self, session: str, label: str, text: str, subdir: str = "") -> Path:
+    def write_take(self, session: str, label: str, text: str) -> Path:
         """
-        Writes one finished take or recording under the next free number:
-        <session>/<subdir>/<LABEL>-<n>.csv. The one writer for every take
-        file (snapshot takes, manual takes and recordings, cut takes).
+        Writes one finished clip under the next free number:
+        <session>/<LABEL>-<n>.csv.
         @param session  Session name.
-        @param label    Its label (cfg.LABELS; cfg.BACKGROUND_LABEL in background/).
+        @param label    Its label (cfg.LABELS).
         @param text     Full file contents (header and rows).
-        @param subdir   "" for the session folder, or cfg.MANUAL_DIR_NAME,
-                        cfg.WEAK_DIR_NAME or cfg.BACKGROUND_DIR_NAME.
-        @return The new file's path.
-        @raise ValueError for a bad session, label or subfolder; OSError if
-               writing fails.
-        """
-        if subdir not in ("", cfg.MANUAL_DIR_NAME, cfg.WEAK_DIR_NAME, cfg.BACKGROUND_DIR_NAME):
-            raise ValueError("Not a take subfolder: %r" % subdir)
-        self.validate_label(label, subdir)
-        folder = self.session_dir(session)
-        if subdir:
-            folder = folder / subdir
-        folder.mkdir(parents=True, exist_ok=True)
-        n = self._next_number(folder, label)
-        path = folder / ("%s-%d.csv" % (label, n))
-        while path.exists():  # Only if a file appeared since the scan
-            n += 1
-            path = folder / ("%s-%d.csv" % (label, n))
-        self._write_atomic(path, text)
-        return path
-
-    def src_keys(self, session: str) -> set:
-        """
-        The source windows the session already has a take for: the src_key
-        of every take in the session folder, weak/ and background/, and in
-        their _deleted/ folders (owner, 2026-11-22: a deleted take is never
-        cut again). Raw recordings in manual/ are sources, not takes.
-        @param session  A valid session name.
-        @return The set of src_key values.
-        """
-        base = self.session_dir(session)
-        keys = set()
-        for sub in ("", cfg.WEAK_DIR_NAME, cfg.BACKGROUND_DIR_NAME):
-            folder = base / sub if sub else base
-            for f in (folder, folder / cfg.DELETED_DIR_NAME):
-                if not f.is_dir():
-                    continue
-                for p in f.glob("*.csv"):
-                    try:
-                        key = read_header(p).get("src_key")
-                    except OSError:
-                        continue
-                    if key:
-                        keys.add(key)
-        return keys
-
-    def save_take(self, session: str, label: str, snap, evt, boot_raw: Optional[str],
-                  gui_commit: str, received_wall: float, evt_missing_reason: str = "") -> Path:
-        """
-        Writes one take from a snapshot.
-        @param session             Session name.
-        @param label               Take label.
-        @param snap                snapshot_protocol.Snapshot.
-        @param evt                 Its snapshot_protocol.EventLine, or None if missing.
-        @param boot_raw            Latest BOOT line on this connection, or None.
-        @param gui_commit          Commit of this checkout.
-        @param received_wall       Wall time the snapshot arrived (time.time()).
-        @param evt_missing_reason  Why evt is None, recorded in the header.
         @return The new file's path.
         @raise ValueError for a bad session or label; OSError if writing fails.
         """
         self.validate_label(label)
-        self.session_dir(session)  # Checks the name before anything is built
+        folder = self.session_dir(session)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = self._new_path(folder, label)
+        self._write_atomic(path, text)
+        return path
 
-        # The trigger came about n_post samples before the snapshot finished
-        # filling; the send time is not subtracted, so this is an estimate.
-        trigger_wall = received_wall - snap.n_post / float(snap.rate_hz)
-        lines = [
-            ("take_format", cfg.TAKE_FORMAT_VERSION),
-            ("label", label),
-            ("session", session),
-            ("pc_received", iso_time(received_wall)),
-            ("pc_trigger_est", iso_time(trigger_wall)),
-            ("gui_commit", gui_commit),
-            ("fw", snap.fw),
-            ("seq", snap.seq),
-            ("trig_idx", snap.trig_idx),
-            ("rate_hz", snap.rate_hz),
-            ("n_pre", snap.n_pre),
-            ("n_post", snap.n_post),
-            ("n_rows", snap.n_rows),
-            ("channels", snap.channels),
-            ("crc16", snap.crc16),
-        ]
-        for name in RULE_FIELDS:
-            value = evt.fields.get(name, "missing") if evt is not None else "missing"
-            lines.append(("rule_" + name, value))
-        lines.append(("evt", evt.raw if evt is not None
-                      else "missing (%s)" % (evt_missing_reason or "no EVT")))
-        lines.append(("boot", boot_raw if boot_raw else "missing (not seen on this connection)"))
-        lines.append(("columns", snap.channels.replace("/", ",")))
-
-        text = header_text(lines)
-        text += "".join("%s,%s,%s\n" % row for row in snap.rows)
-        return self.write_take(session, label, text)
+    def write_take_streamed(self, session: str, label: str, head: str, body_path: Path) -> Path:
+        """
+        Writes one clip whose rows are in a file (a long recording), copying
+        them in chunks so the recording is never held in memory. The rows
+        file is left in place; the caller removes it once this succeeded.
+        @param session    Session name.
+        @param label      Its label (cfg.LABELS).
+        @param head       The "# key=value" header text.
+        @param body_path  File holding the data rows, each ending in "\\n".
+        @return The new file's path.
+        @raise ValueError for a bad session or label; OSError if writing fails.
+        """
+        self.validate_label(label)
+        folder = self.session_dir(session)
+        folder.mkdir(parents=True, exist_ok=True)
+        path = self._new_path(folder, label)
+        tmp = self._tmp_for(path)
+        with open(tmp, "w", encoding="utf-8", newline="\n") as out:
+            out.write(head)
+            with open(body_path, "r", encoding="utf-8", newline="") as src:
+                shutil.copyfileobj(src, out, _COPY_CHUNK)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+        return path
 
     def relabel(self, path: Path, new_label: str) -> Path:
         """
-        Moves a take under a new label: new name <NEW>-<n>.csv in the same
+        Moves a clip under a new label: new name <NEW>-<n>.csv in the same
         session, header label updated and the change recorded. Keeps the
-        original file time, so the take stays in recording order.
-        @param path       Existing take file.
+        original file time, so the clip stays in recording order. Works for
+        older takes too (any old label).
+        @param path       Existing clip file.
         @param new_label  One of cfg.LABELS.
         @return The new path (path itself if the label is unchanged).
         @raise ValueError for a bad label or file name; OSError if moving fails.
@@ -400,37 +358,35 @@ class TakeStore:
         self.validate_label(new_label)
         parsed = parse_take_name(path)
         if parsed is None:
-            raise ValueError("Not a take file: %s" % path.name)
+            raise ValueError("Not a clip file: %s" % path.name)
         old_label = parsed[0]
         if old_label == new_label:
             return path
 
-        out = []
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("# label="):
-                    out.append("# label=%s\n" % new_label)
-                    out.append("# relabeled=%s>%s at %s\n" % (
-                        old_label, new_label, iso_time(datetime.datetime.now().timestamp())))
-                else:
-                    out.append(line)
-
-        folder = path.parent
-        n = self._next_number(folder, new_label)
-        new_path = folder / ("%s-%d.csv" % (new_label, n))
-        while new_path.exists():
-            n += 1
-            new_path = folder / ("%s-%d.csv" % (new_label, n))
+        new_path = self._new_path(path.parent, new_label)
+        tmp = self._tmp_for(new_path)
         st = path.stat()
-        self._write_atomic(new_path, "".join(out))
+        stamp = iso_time(datetime.datetime.now().timestamp())
+        # Line by line, so a long recording is never held in memory.
+        with open(path, "r", encoding="utf-8", newline="") as src, \
+                open(tmp, "w", encoding="utf-8", newline="\n") as out:
+            for line in src:
+                if line.startswith("# label="):
+                    out.write("# label=%s\n" % new_label)
+                    out.write("# relabeled=%s>%s at %s\n" % (old_label, new_label, stamp))
+                else:
+                    out.write(line)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, new_path)
         os.utime(new_path, (st.st_atime, st.st_mtime))
         os.remove(path)  # After the new file is complete: a crash leaves both, never neither
         return new_path
 
     def delete(self, path: Path) -> Path:
         """
-        Moves a take into its session's _deleted folder.
-        @param path  Existing take file.
+        Moves a clip into its session's _deleted folder.
+        @param path  Existing clip file.
         @return Where it went.
         @raise OSError if moving fails.
         """
