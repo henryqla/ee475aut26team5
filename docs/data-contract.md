@@ -399,6 +399,12 @@ the same millisecond, so a re-sent segment is recognized and skipped.
 | `geog` | generated `geography(Point, 4326)` | Computed from `lon`/`lat` |
 | `received_at` | `timestamptz` | Filled in by the database |
 
+A label tap is matched to the device's event closest in time from 5 s before to 2 s after the
+tap. With no device event there, the app saves the tap as its own event: `event_class` =
+`UNKNOWN`, `conf` = 0, `roll_peak` = `pitch_peak` = 0, and `peak_z` = the largest segment
+`peak_z` in that window (0 only if no segments arrived). Events saved before Nov 22 2026 have
+`peak_z` = 0 for such taps.
+
 Deleting a trip deletes its segments and events too. Only Ben does this (e.g. to clear fake data);
 the app can't delete anything.
 
@@ -430,6 +436,17 @@ works out the epoch ms from the date the user picks, in the phone's time zone.
 Result columns are confirmed with Scott (Oct 2026).
 Like table reads, a call returns at most 1000 rows; results come in a fixed order, so the app can
 read further pages with `range(...)`, the same way it pages segments.
+
+**Tiles.** The box is half-open: `south` ≤ lat < `north`, `west` ≤ lon < `east`. Each row belongs
+to the one box that holds its point: a ROAD row its middle (`lat`, `lon`), a CELL row the centre
+of its grid cell, a merged event its merged position. So when the app loads the map as tiles
+that share edges, every row comes back from exactly one tile, even when its line or its merged
+hits cross the edge, and the whole row comes back (lines are not cut at the edge; events near
+the edge are merged with hits just over it, up to ~200 m away). For this to work, neighbouring
+tiles must send the **exact same number** for their shared edge (e.g. both computed as
+`k × tile size`, not one of them by adding to the other). A line whose middle is in a tile that
+isn't loaded isn't drawn, even if part of it is on screen; loading one tile past the screen edge
+avoids that. ROAD lines are at most `piece_m` long (CELL lines about the cell size).
 - `events_in_area(...)`: events merged into one when they are within **10 m** of each other, have
   the same class, and headings within ~45° (so potholes on opposite sides of a road stay
   separate). The class is `user_label` if set (except `UNKNOWN`, see General rules), otherwise
@@ -448,8 +465,9 @@ read further pages with `range(...)`, the same way it pages segments.
   The map shows "hit by `hits` of `passes` drives". This is a different shape from `RoadEvent`,
   so the app will need a small model for it.
 
-- `road_quality_snapped(...)`: road quality for the Road quality view (it replaced the old
-  grid-cell function `road_quality_in_area`, removed Nov 2026). Drives are snapped to
+- `road_quality_snapped(...)`: road quality for the Road quality view (`piece_m` 15 / 60 / 240
+  by zoom; line width and side offset from `lanes_dir`, as in §8). It replaced the old grid-cell
+  function `road_quality_in_area`, removed Nov 2026. Drives are snapped to
   OpenStreetMap roads on the server (Valhalla
   map matching, run on the laptop once a trip has its `end_time`), so lines lie on the road and
   follow its curves, and every drive over the same piece of road and direction is combined.
@@ -465,9 +483,9 @@ read further pages with `range(...)`, the same way it pages segments.
     upload and switches to ROAD rows
     within seconds of the app setting `end_time` (or 30 min after its last segment if
     `end_time` never arrives).
-  - `roughness` is the **age-weighted** median over drives of `rms_z` × `scale_factor`: a drive
-    14 days old counts half as much as one from today, 28 days a quarter, so repairs and new
-    damage show up.
+  - `roughness` is the **age-weighted** median over drives of the speed-adjusted roughness
+    (§8: each segment's `rms_z` scaled to 25 mph) × `scale_factor`: a drive 14 days old counts
+    half as much as one from today, 28 days a quarter, so repairs and new damage show up.
   - Events are not snapped to roads: `events_in_area` merges them by distance, as before.
 
   Result, one row per piece, in a fixed order (by `piece_id`) for paging:
@@ -500,9 +518,9 @@ read further pages with `range(...)`, the same way it pages segments.
   heading are merged by distance and class only. Rows with no location are stored but not shown.
 - 10 m is a starting value: GPS is typically off by 3–5 m per fix. Measure the real spread by
   driving over the same speed bump ~10 times, and adjust.
-- **Timing:** the first version is written (raw `rms_z` × `scale_factor`, no speed
-  normalization); speed normalization after the calibration drives. Result columns only change
-  through this file.
+- **Speed adjustment:** done (Nov 2026). Both ROAD and CELL rows use the §8 formula per
+  segment, before the per-drive average, the median over drives and `scale_factor`.
+  Result columns only change through this file.
 
 ---
 
@@ -510,11 +528,43 @@ read further pages with `range(...)`, the same way it pages segments.
 
 - Segments drawn as lines colored by (normalized) roughness, like Google Maps traffic:
   **green** (new pavement) → **yellow** → **light red** (≈ I-5) → **dark red** (worse).
-- Numeric thresholds are **TBD** from calibration drives (new construction = green baseline,
-  I-5 = light red) and will be listed here once measured, so both maps use identical values.
+- **Speed adjustment.** The same road reads rougher the faster it's driven, so every segment's
+  `rms_z` is scaled to what it would read at **25 mph**, before averaging or coloring:
+
+  ```
+  road     = sqrt(max(rms_z² − 0.015², 0))           -- remove the noise floor
+  speed    = max(speed_mps, 4.4704)                   -- below 10 mph counts as 10 mph
+  adjusted = road × (11.176 / speed) ^ 0.56           -- 11.176 m/s = 25 mph
+  ```
+
+  - 0.015 g: what the device reads with the car still and the engine running. It doesn't grow
+    with speed, and RMS values from independent sources add as squares, so it's removed that way.
+  - 0.56: from the Nov 22 2026 speed test (Escape, 21 passes of one straight road at 10–50 mph,
+    steady-speed segments only; fit of log roughness vs log speed over the per-pass medians,
+    R² 0.84). Doubling speed reads about 1.47× rougher. Close to the textbook random-road
+    model's √speed. Only tested on a smooth road; assumed to hold on rough roads.
+  - Segments with no `speed_mps` (no GPS fix): noise floor removed, no speed scaling.
+  - The app applies this to its own trip lines and the Drive screen. **The map SQL functions
+    should apply it per segment, before the median over drives** (and before `scale_factor`).
+    `rms_z` stays raw in the database.
+- Numeric thresholds (g, speed-adjusted to 25 mph as above), with colors blended in between.
+  Set Nov 2026 from Scott's anchors at ~20 mph (green below 0.08, yellow from 0.10, reds from
+  0.17, darkest at 0.24: the red brick road at 47.6564–47.6744, −122.0789), scaled to 25 mph.
+  Both maps use these values:
+
+  | Color | Roughness at 25 mph |
+  |---|---|
+  | green | ≤ 0.09 |
+  | yellow | 0.11 |
+  | light red | 0.19 |
+  | dark red | ≥ 0.27 |
 - Each direction of a road is drawn on its own side (offset to the right of travel, as US traffic
   drives on the right). Zoomed out, the two directions overlap.
-- Lines are about 5 m wide on the ground, so they widen as you zoom in.
+- Line width on the ground, so lines widen as you zoom in (at least 4 dp wide when zoomed out):
+  - `ROAD` rows: `lanes_dir` × 3.3 m × 0.9, covering every lane in that direction (the grade is
+    still one per direction). Two-way roads: each direction moved right of the centre line by
+    width ÷ 2 + 0.25 m, so the directions never overlap; one-way roads: no offset.
+  - `CELL` rows: 3.5 m, no offset.
 - Distinct markers for pothole and speed bump.
 - Grading is per direction, **not per lane**: phone GPS can't reliably tell lanes apart.
 
@@ -554,7 +604,7 @@ read further pages with `range(...)`, the same way it pages segments.
 **Team**
 - [ ] Confirm IMU rate 416 Hz (the IMU has no 400 Hz rate, §4.1) and 1 s segment windows
 - [ ] Vehicle list and IDs (truck, Camry, Escape)
-- [ ] Where speed normalization happens (proposal: in the SQL functions, after calibration drives)
+- [ ] Where speed normalization happens (proposal: in the SQL functions, per segment, formula in §8)
 - [ ] Web map owner and timing (after the app → Supabase → map pipeline works)
 - [ ] Per-direction (not per-lane) grading is acceptable for the project
 
@@ -590,4 +640,10 @@ Earlier v0.3 changes:
 - Column types, primary keys, and app-made UUIDs for the tables (§7).
 - `fw` starting with `fake` marks a test device; its trips are `FAKE_DEVICE` (§4.3).
 - `road_quality_in_area`: each segment counts along the stretch of road it drove, so pieces meet even at highway speed; `length_m` is now the road driven inside the piece (no longer always 15); new optional `cell_m` piece size (default 15, between 5 and 1000) (§7).
+- `road_quality_snapped` with `lanes_dir`: OK from Scott; the app's Road quality view switched to it from `road_quality_in_area` (`piece_m` 15 / 60 / 240 m by zoom, "© OpenStreetMap contributors" under the map legend) (§7). Line width and side offset now come from `lanes_dir` instead of a fixed 5 m (§8).
 - Map functions: `road_quality_snapped` and `events_in_area` take optional `since_ms` / `until_ms` (epoch ms) to show only drives whose trip started in that range, e.g. recent test drives; old `road_quality_in_area` removed now that the app uses `road_quality_snapped` (§7).
+- First numeric map color thresholds: green 0.05, yellow 0.12, light red 0.25, dark red 0.50 g, from the first clean drive; to be retuned after speed normalization (§8).
+- Label taps match device events from 5 s before to 2 s after the tap (was: only before); a tap with no device event gets `peak_z` from the segments around it instead of 0 (§7).
+- Speed adjustment: roughness scaled to 25 mph, `road × (25 mph ÷ speed)^0.56` after removing a 0.015 g noise floor, from the Nov 22 speed test; the app applies it to trip lines and the Drive screen, the SQL functions should too (§7, §8).
+- Map color thresholds retuned to speed-adjusted values: green 0.09, yellow 0.11, light red 0.19, dark red 0.27 g (was 0.05 / 0.12 / 0.25 / 0.50, unadjusted) (§8).
+- Map functions: `road_quality_snapped` roughness is now speed-adjusted to 25 mph per segment (§8 formula), before the median over drives and before `scale_factor`; `rms_z` stays raw in the table. Each row and each merged event now comes from exactly one tile: the box is half-open and a row belongs to the box holding its point (ROAD: middle of the line; CELL: centre of the grid cell; event: merged position) (§7).

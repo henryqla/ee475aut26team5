@@ -17,8 +17,9 @@ data class RecordingStatus(
     val segments: Int = 0,            // saved this trip
     val segmentsWithoutLocation: Int = 0,
     val events: Int = 0,
-    val lastRoughness: Double? = null, // g, rms_z of the newest segment
+    val lastRoughness: Double? = null, // g, rms_z of the newest segment, scaled to 25 mph
     val lastLabel: String? = null,    // what the last Pothole!/Speed bump! tap did
+    val nextUploadAt: Long? = null,   // epoch millis of the next automatic upload during a trip
     val error: String? = null,        // why recording couldn't start, if it couldn't
 )
 

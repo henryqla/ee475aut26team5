@@ -1,19 +1,25 @@
 package uw.edu.roadqualitymapper.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.RadioButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -21,44 +27,111 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import uw.edu.roadqualitymapper.R
 import uw.edu.roadqualitymapper.data.AppSettings
 import uw.edu.roadqualitymapper.data.ColorMode
-import uw.edu.roadqualitymapper.ui.ScreenTitle
+import uw.edu.roadqualitymapper.data.ThemeChoice
+import uw.edu.roadqualitymapper.ui.theme.LocalDarkTheme
+import uw.edu.roadqualitymapper.ui.components.AppCard
+import uw.edu.roadqualitymapper.ui.components.AppIcon
+import uw.edu.roadqualitymapper.ui.components.SectionLabel
 
-/** Opened from the gear on the Connect tab. Back (the arrow or the phone's back) returns there. */
+/** Opened from ☰ in the top bar. Back (the arrow or the phone's back) returns to the tabs. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit, modifier: Modifier = Modifier) {
+fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val colorMode by AppSettings.colorMode.collectAsState()
+    val keepScreenOn by AppSettings.keepScreenOn.collectAsState()
+    val dark = LocalDarkTheme.current
     BackHandler(onBack = onBack)
 
-    Column(
-        modifier
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Box(Modifier.fillMaxWidth()) {
-            ScreenTitle("Settings")
-            IconButton(onClick = onBack, modifier = Modifier.align(Alignment.CenterStart)) {
-                Text("←", style = MaterialTheme.typography.headlineSmall)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) { AppIcon(R.drawable.ic_arrow_left, contentDescription = "Back") }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+            )
+        },
+    ) { innerPadding ->
+        Column(
+            Modifier
+                .padding(innerPadding)
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SectionLabel("Display", Modifier.padding(start = 4.dp, top = 4.dp))
+            AppCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    SettingText("Theme", null, Modifier.padding(vertical = 10.dp))
+                    // Until one is picked, the phone's dark mode decides, and that one shows as selected.
+                    ThemeChoice.entries.forEach { choice ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        ChoiceRow(
+                            title = choice.label,
+                            detail = null,
+                            selected = (choice == ThemeChoice.DARK) == dark,
+                            onClick = { AppSettings.setTheme(context, choice) },
+                        )
+                    }
+                }
+            }
+            AppCard(contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(0.dp)) {
+                    SettingText("Color-blind mode", "Changes road and marker colors", Modifier.padding(vertical = 10.dp))
+                    ColorMode.entries.forEach { mode ->
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        ChoiceRow(
+                            title = mode.label,
+                            detail = mode.detail,
+                            selected = colorMode == mode,
+                            onClick = { AppSettings.setColorMode(context, mode) },
+                        )
+                    }
+                }
+            }
+
+            SectionLabel("Recording", Modifier.padding(start = 4.dp, top = 12.dp))
+            AppCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SettingText("Keep screen on", "While a trip is recording", Modifier.weight(1f))
+                    Switch(checked = keepScreenOn, onCheckedChange = { AppSettings.setKeepScreenOn(context, it) })
+                }
             }
         }
+    }
+}
 
-        Text("Color-blind mode", style = MaterialTheme.typography.titleMedium)
-        ColorMode.entries.forEach { mode ->
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .selectable(
-                        selected = colorMode == mode,
-                        onClick = { AppSettings.setColorMode(context, mode) },
-                    ),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                RadioButton(selected = colorMode == mode, onClick = null)
-                Text(mode.label, Modifier.padding(start = 8.dp))
-            }
+@Composable
+private fun SettingText(title: String, detail: String?, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(title, style = MaterialTheme.typography.titleSmall)
+        detail?.let {
+            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/** One option in a pick-one list: its name, and a check when it's the chosen one. */
+@Composable
+private fun ChoiceRow(title: String, detail: String?, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SettingText(title, detail, Modifier.weight(1f))
+        if (selected) {
+            AppIcon(R.drawable.ic_circle_check, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary)
+        } else {
+            AppIcon(R.drawable.ic_circle, contentDescription = null, tint = MaterialTheme.colorScheme.outline)
         }
     }
 }

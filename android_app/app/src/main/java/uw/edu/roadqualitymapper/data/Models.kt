@@ -73,17 +73,32 @@ data class Drive(
 )
 
 /**
- * One ~15 m piece of road in one direction of travel, combined over every drive that covered it
- * (contract §7, road_quality_in_area). This is what the Road quality map draws.
+ * One piece of road in one direction of travel, combined over every drive that covered it
+ * (contract §7, road_quality_snapped). This is what the Road quality map draws.
  */
 data class RoadPiece(
-    val lat: Double,
+    val pieceId: String,             // stable id from the server
+    val kind: RoadPieceKind,
+    val path: List<PathPoint>,       // in the direction of travel; drawn as one line
+    val lat: Double,                 // middle of the piece
     val lon: Double,
-    val headingDeg: Double,          // direction of travel, clockwise from north
-    val roughness: Double,           // g, median over drives, after the vehicle's scale factor
+    val headingDeg: Double?,         // direction of travel, clockwise from north
+    val lengthM: Double,             // length of the line
+    val roughness: Double,           // g, age-weighted median over drives, after the vehicle's scale factor
     val drives: Int,                 // how many drives this is based on
-    val lengthM: Double,             // length of road it stands for
+    val weight: Double,              // sum of the drives' age weights (1.0 = one drive from today)
+    val lastT: Long,                 // epoch millis of the newest drive
+    val oneway: Boolean?,            // ROAD only: one-way road (each side of a divided highway); null for CELL
+    val lanesDir: Int?,              // ROAD only: lanes in this direction (1–8), only for the drawn width; null for CELL
+    val roadName: String?,           // ROAD only: OpenStreetMap road name, may be null
 )
+
+enum class RoadPieceKind {
+    ROAD,   // snapped to an OpenStreetMap road; the path lies on the road's center line
+    CELL,   // not on a matched road (parking lot, road missing from OSM, trip not matched yet)
+}
+
+data class PathPoint(val lat: Double, val lon: Double)
 
 /** A pothole or speed bump, with nearby hits from all drives merged into one (events_in_area). */
 data class EventSpot(

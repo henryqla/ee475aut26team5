@@ -1,0 +1,174 @@
+/*
+ * File:        firmware-bench.ino
+ * Authors:     Henry (owner); first draft written with Claude
+ * Date:        2026-11-22
+ * Version:     0.1.3-bench
+ * Change:      0.1.3-bench (drive-log-manual-record-handoff.md v0.2, request
+ *              4): log build. With LOG_MODE 1 in config.h, every sample goes
+ *              to Serial as an L line for the record GUI's drive log and
+ *              manual Record (no S lines, no snapshots); setup() then makes
+ *              out_q LOG_OUT_Q_LEN long. Every build: the Serial EVT line
+ *              gains n_trig, the trigger's sample count.
+ *              0.1.2-bench (cnn-record-train-handoff.md v0.4): re-arm rule,
+ *              so a lockout's tail cannot fire a second event (request 0).
+ *              Record mode (request 1): with RECORD_MODE 1 in config.h, each
+ *              trigger's snapshot of the model channels goes to Serial for
+ *              the CNN record GUI; setup() also creates snap_free_q and its
+ *              buffers.
+ *              0.1.1-bench: pothole / speed bump by pitch sequence (nose down
+ *              then up = pothole), never UNKNOWN; the IMU recovers from F1/F2
+ *              (power loss or a loose wire) without a reset. Now differs from
+ *              road_quality_fw in dsp, imu_acq, supervisor, ble_link, and the
+ *              BOOT / EVT / HLT line formats.
+ *              0.1.0-bench (devkit-bench-handoff.md v0.2): a copy of
+ *              road_quality_fw 0.2.0-draft (commit 4276b56) for a breadboarded
+ *              ESP32-S3-DevKitC-1 and Adafruit LSM6DSO32 breakout.
+ * Description: Road quality firmware, bench build. Target: ESP32-S3-DevKitC-1
+ *              (ESP32-S3-WROOM-1-N8R8) with an Adafruit LSM6DSO32 breakout on
+ *              SPI, wired to the same GPIOs as the team PCB (board_pins.h).
+ *              Reads the IMU at 416 Hz, classifies potholes and speed bumps by
+ *              thresholding, sends 1 s segment summaries and events to the
+ *              Android app over BLE, and prints samples, segments, events, and
+ *              health to Serial. The record build (RECORD_MODE 1 in config.h)
+ *              also prints each trigger's snapshot (SNB / SNR / SNE lines) for
+ *              the CNN record GUI in firmware/cnn/cnn_record_gui/. The log
+ *              build (LOG_MODE 1) prints every sample as an L line instead of
+ *              S lines. The two cannot both be on.
+ *
+ *              setup() only creates the queues and the five tasks, then deletes
+ *              its own task, so loop() never runs. Each task initializes the
+ *              peripheral it owns. Core 1: imu_acq, dsp. Core 0: serial_out,
+ *              ble_link, supervisor.
+ *
+ *              Build: Arduino IDE 2.3.10, esp32 core 3.3.10, board "ESP32S3 Dev
+ *              Module", Flash Size 8MB (N8 module), PSRAM Disabled, USB CDC On
+ *              Boot Enabled, USB Mode "Hardware CDC and JTAG", Upload Mode
+ *              "UART0 / Hardware CDC". serial_out.cpp refuses to build with
+ *              other USB settings. Libraries: Adafruit LSM6DS 4.7.4, Adafruit
+ *              BusIO 1.17.4, Adafruit Unified Sensor 1.1.15, NimBLE-Arduino
+ *              2.5.2.
+ *
+ *              Serial and upload use native USB (GPIO19/20), the DevKit's "USB"
+ *              connector. If the port does not appear, hold BOOT and press RST
+ *              to enter download mode. A reset re-enumerates USB; BOOT and the
+ *              headers wait in the TX buffer until a monitor opens the port.
+ *              The "UART" connector is optional: plug it in too to see ROM boot
+ *              messages and configASSERT output when chasing a reboot loop.
+ *
+ *              Bench trips upload as REAL with fw_version 0.1.3-bench (earlier:
+ *              0.1.2-bench, 0.1.1-bench, 0.1.0-bench); Ben deletes them by
+ *              that version.
+ */
+
+// ============================================================================
+// Includes
+// ============================================================================
+
+#include "config.h"
+#include "types.h"
+#include "imu_acq.h"
+#include "dsp.h"
+#include "serial_out.h"
+#include "ble_link.h"
+#include "supervisor.h"
+
+// ============================================================================
+// Globals
+// ============================================================================
+
+// Queue and task handles. Filled here before any task that reads them exists,
+// read-only afterwards.
+static app_ctx_t s_ctx;
+
+#if RECORD_MODE
+// The fixed snapshot buffers (~7.5 KB each, internal RAM). Never touched here
+// after setup() puts their pointers in snap_free_q; from then on whoever
+// holds a pointer owns that buffer (see snap_t in types.h).
+static snap_t s_snap_bufs[SNAP_BUFFERS];
+#endif
+
+// ============================================================================
+// Prototypes
+// ============================================================================
+
+static void start_task(TaskFunction_t fn, const char *name, UBaseType_t prio,
+                       BaseType_t core, TaskHandle_t *handle);
+
+// ============================================================================
+// Implementations
+// ============================================================================
+
+/**
+ * Creates one task pinned to a core, with the shared context as its parameter.
+ * @param fn      Task entry function.
+ * @param name    Task name (shows in debug tools).
+ * @param prio    FreeRTOS priority.
+ * @param core    Core to pin to (0 or 1).
+ * @param handle  Receives the task handle, or NULL if not needed.
+ * @return None. Halts via configASSERT if the task could not be created.
+ */
+static void start_task(TaskFunction_t fn, const char *name, UBaseType_t prio,
+                       BaseType_t core, TaskHandle_t *handle) {
+  const BaseType_t ok = xTaskCreatePinnedToCore(fn, name, TASK_STACK_BYTES,
+                                                &s_ctx, prio, handle, core);
+  configASSERT(ok == pdPASS);
+  (void)ok;  // Keeps the build warning-free if asserts are compiled out
+}
+
+/**
+ * Creates the queues and tasks, then deletes the Arduino loop task.
+ * @return Never returns (its task is deleted).
+ */
+void setup() {
+  s_ctx.sample_q = xQueueCreate(SAMPLE_Q_LEN, sizeof(imu_sample_t));
+#if LOG_MODE
+  // Log build: one item per sample, so ~0.6 s of room (L3) instead of OUT_Q_LEN.
+  s_ctx.out_q = xQueueCreate(LOG_OUT_Q_LEN, sizeof(out_msg_t));
+#else
+  s_ctx.out_q = xQueueCreate(OUT_Q_LEN, sizeof(out_msg_t));
+#endif
+  s_ctx.sys_q = xQueueCreate(SYS_Q_LEN, sizeof(sys_msg_t));
+  s_ctx.ble_q = xQueueCreate(BLE_Q_LEN, sizeof(ble_msg_t));
+  s_ctx.time_q = xQueueCreate(1, sizeof(time_sync_t));  // 1: written with xQueueOverwrite
+  // These fail only if the heap is exhausted at boot: a build problem, not a
+  // runtime fault, and no task exists yet to report it. configASSERT prints
+  // the file and line on the core's primary console (UART0, GPIO43/44) and
+  // reboots. Native USB is only its secondary console, so on the PCB this may
+  // show only as a reboot loop.
+  configASSERT(s_ctx.sample_q != NULL);
+  configASSERT(s_ctx.out_q != NULL);
+  configASSERT(s_ctx.sys_q != NULL);
+  configASSERT(s_ctx.ble_q != NULL);
+  configASSERT(s_ctx.time_q != NULL);
+
+#if RECORD_MODE
+  // Free list of snapshot buffers: dsp takes one per trigger, serial_out puts
+  // it back after sending. Room for every buffer, so returning one never fails.
+  s_ctx.snap_free_q = xQueueCreate(SNAP_BUFFERS, sizeof(snap_t *));
+  configASSERT(s_ctx.snap_free_q != NULL);
+  for (int i = 0; i < SNAP_BUFFERS; i++) {
+    snap_t *p = &s_snap_bufs[i];
+    const BaseType_t ok = xQueueSend(s_ctx.snap_free_q, &p, 0);
+    configASSERT(ok == pdPASS);
+    (void)ok;  // Keeps the build warning-free if asserts are compiled out
+  }
+#else
+  s_ctx.snap_free_q = NULL;  // No snapshots in the product build
+#endif
+
+  // serial_out first so BOOT prints as early as possible. supervisor last,
+  // because it needs the imu_acq and dsp handles.
+  start_task(serial_out_task, "serial_out", PRIO_SERIAL_OUT, CORE_IO, NULL);
+  start_task(ble_link_task, "ble_link", PRIO_BLE_LINK, CORE_IO, NULL);
+  start_task(dsp_task, "dsp", PRIO_DSP, CORE_SAMPLING, &s_ctx.dsp_task);
+  start_task(imu_acq_task, "imu_acq", PRIO_IMU_ACQ, CORE_SAMPLING, &s_ctx.imu_acq_task);
+  start_task(supervisor_task, "supervisor", PRIO_SUPERVISOR, CORE_IO, NULL);
+
+  vTaskDelete(NULL);  // loop() never runs
+}
+
+/**
+ * Never runs: setup() deletes the loop task. Defined only so the sketch builds.
+ * @return None.
+ */
+void loop() {}

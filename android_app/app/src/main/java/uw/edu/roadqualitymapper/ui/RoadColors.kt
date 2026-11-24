@@ -6,16 +6,21 @@ import uw.edu.roadqualitymapper.data.ColorMode
 import uw.edu.roadqualitymapper.data.EventClass
 
 /**
- * Roughness anchors, in g (RMS vertical acceleration), like Google Maps traffic colors.
- * Placeholders until the calibration drives: new pavement should come out at SMOOTH (green)
- * and I-5 at I5 (light red). Keep in sync with the data contract so the web map matches.
+ * Roughness anchors, in g (RMS vertical acceleration) scaled to 25 mph (speedAdjustedRoughness),
+ * like Google Maps traffic colors. Set Nov 2026 from Scott's anchors at ~20 mph (green below
+ * 0.08, yellow from 0.10, red from 0.17, darkest at 0.24: the red brick road), scaled to 25 mph.
+ * I5 is the light red anchor (the name is from the original plan to anchor it on I-5).
+ * Keep in sync with data contract §8 so the web map matches.
  */
 object RoughnessScale {
-    const val SMOOTH = 0.03
-    const val MODERATE = 0.06
-    const val I5 = 0.10
-    const val VERY_ROUGH = 0.20
+    const val SMOOTH = 0.09
+    const val MODERATE = 0.11
+    const val I5 = 0.19
+    const val VERY_ROUGH = 0.27
 }
+
+/** Red-green palettes add a light blue halfway between smooth and moderate. */
+private const val SMOOTH_TO_MODERATE_MIDPOINT = (RoughnessScale.SMOOTH + RoughnessScale.MODERATE) / 2
 
 /**
  * A color as hue (degrees), saturation, and value (brightness), all 0–1 except hue.
@@ -29,12 +34,41 @@ private val ModerateYellow = HsvColor(hue = 47f, saturation = 0.90f, value = 0.9
 private val I5LightRed = HsvColor(hue = 3f, saturation = 0.74f, value = 0.91f)
 private val VeryRoughDarkRed = HsvColor(hue = 0f, saturation = 0.92f, value = 0.48f)
 
-/** The road color for [roughness] in the chosen color mode. */
-fun roughnessColor(roughness: Double, mode: ColorMode): Color = when (mode) {
-    ColorMode.OFF -> standardColor(roughness)
-    ColorMode.PROTANOPIA, ColorMode.DEUTERANOPIA -> blendStops(roughness, RedGreenSafeStops)
-    ColorMode.TRITANOPIA -> blendStops(roughness, BlueYellowSafeStops)
+/**
+ * The road color for [roughness] in the chosen color mode, on a light or [dark] map.
+ * On a light map the rough end gets darker; on a dark map, where dark red would disappear, it
+ * gets brighter and more vivid instead. Same order of colors either way.
+ */
+fun roughnessColor(roughness: Double, mode: ColorMode, dark: Boolean): Color = when (mode) {
+    ColorMode.OFF -> if (dark) blendStops(roughness, StandardDarkMapStops) else standardColor(roughness)
+    ColorMode.RED_GREEN -> blendStops(roughness, if (dark) RedGreenSafeDarkMapStops else RedGreenSafeStops)
+    ColorMode.BLUE_YELLOW -> blendStops(roughness, if (dark) BlueYellowSafeDarkMapStops else BlueYellowSafeStops)
 }
+
+/** Dark map, color-blind mode off: green, yellow, light red, then vivid red. */
+private val StandardDarkMapStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF34C77B),       // green
+    RoughnessScale.MODERATE to Color(0xFFFFD54A),     // yellow
+    RoughnessScale.I5 to Color(0xFFFF7A6B),           // light red
+    RoughnessScale.VERY_ROUGH to Color(0xFFFF2D55),   // vivid red
+)
+
+/** Dark map, red-green: lighter blues than on a light map, ending in a bright red-orange. */
+private val RedGreenSafeDarkMapStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF6FA8F5),       // blue
+    SMOOTH_TO_MODERATE_MIDPOINT to Color(0xFFA7D3F0),                       // light blue
+    RoughnessScale.MODERATE to Color(0xFFFFD54A),     // yellow
+    RoughnessScale.I5 to Color(0xFFFF9E40),           // orange
+    RoughnessScale.VERY_ROUGH to Color(0xFFFF5A36),   // red-orange
+)
+
+/** Dark map, blue-yellow: green, salmon, red, then vivid red. */
+private val BlueYellowSafeDarkMapStops = listOf(
+    RoughnessScale.SMOOTH to Color(0xFF2EC27E),       // green
+    RoughnessScale.MODERATE to Color(0xFFF7B09A),     // salmon
+    RoughnessScale.I5 to Color(0xFFF0605A),           // red
+    RoughnessScale.VERY_ROUGH to Color(0xFFFF2A55),   // vivid red
+)
 
 /**
  * For red-green color blindness (protanopia and deuteranopia both): blue for smooth, through
@@ -43,7 +77,7 @@ fun roughnessColor(roughness: Double, mode: ColorMode): Color = when (mode) {
  */
 private val RedGreenSafeStops = listOf(
     RoughnessScale.SMOOTH to Color(0xFF4575B4),       // blue
-    0.045 to Color(0xFF74ADD1),                       // light blue
+    SMOOTH_TO_MODERATE_MIDPOINT to Color(0xFF74ADD1),                       // light blue
     RoughnessScale.MODERATE to Color(0xFFF5C518),     // yellow
     RoughnessScale.I5 to Color(0xFFF46D43),           // orange-red
     RoughnessScale.VERY_ROUGH to Color(0xFFA50026),   // dark red
@@ -106,7 +140,7 @@ private fun HsvColor.toColor(): Color = Color.hsv(hue, saturation, value)
  */
 fun eventMarkerHue(eventClass: EventClass, mode: ColorMode): Float = when (eventClass) {
     EventClass.POTHOLE -> when (mode) {
-        ColorMode.PROTANOPIA, ColorMode.DEUTERANOPIA -> BitmapDescriptorFactory.HUE_ORANGE
+        ColorMode.RED_GREEN -> BitmapDescriptorFactory.HUE_ORANGE
         else -> BitmapDescriptorFactory.HUE_VIOLET
     }
     EventClass.SPEED_BUMP -> BitmapDescriptorFactory.HUE_AZURE
