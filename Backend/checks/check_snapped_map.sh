@@ -174,8 +174,12 @@ done
 
 req POST /rest/v1/rpc/road_quality_snapped "" "{$BOX,\"include_fake\":true}"
 expect "before matching: shown with the cell method (CELL rows only)" 'len(cell) > 0 and road == []'
+# Each drive's first and last segment reaches speed x 1 s / 2 past its point: 5 m for A and B,
+# only 1 m for D (2 m/s), so the cells at the two ends of the drive have only A and B in them.
 expect "before matching: cells use the speed-adjusted, age-weighted median (D: 0.9 at 10 mph, about 1.50)" \
-    'fwd(cell) and all(r["drives"] == 3 and abs(r["roughness"] - adj(0.9, 2)) < 0.01 for r in fwd(cell))'
+    '[r for r in fwd(cell) if r["drives"] == 3] and all(abs(r["roughness"] - adj(0.9, 2)) < 0.01 for r in fwd(cell) if r["drives"] == 3)'
+expect "before matching: end cells only A and B reach (D is slower) have 2 drives, median A (about 0.105)" \
+    'sum(r["drives"] != 3 for r in fwd(cell)) <= 4 and all(r["drives"] == 2 and abs(r["roughness"] - adj(0.1, 10)) < 0.01 for r in fwd(cell) if r["drives"] != 3)'
 tiles "before matching: the box cut into 4 tiles returns every CELL row exactly once" '"include_fake":true'
 
 echo "${BOLD}4. End the trips; the matcher should match them within a minute${RESET}"
