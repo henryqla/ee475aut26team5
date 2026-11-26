@@ -1,19 +1,41 @@
 /*
  * File:        supervisor.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-03
- * Version:     0.2.0-draft
- * Change:      BLE. Watches ble_link's heartbeat, adds BLE counters to HLT,
- *              and in the safe state tells ble_link the IMU is down each
- *              second, so the app sees imu_ok:false. Adds serial_out's
- *              dropped-line count to HLT.
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner
+ *              approved this file's edit, 2026-11-25): the inference task now
+ *              also sends evt messages to ble_q and reports its drops in its
+ *              heartbeat's ble_q_drops. HLT's ble_q_drops is now dsp's plus
+ *              inference's, so a lost evt shows in HLT (B14, BLE-6). Nothing
+ *              else changed.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              the inference task is a fifth heartbeat sender. Its counters
+ *              (inferences, inf_skips, last and longest Invoke time) go into
+ *              HLT, and its out_q drops into out_q_drops. A model fault
+ *              (F5-F8, carried in its heartbeat) never enters the safe state
+ *              (owner, 2026-11-24): HLT goes on, followed each second by an
+ *              FLT line with the model fault. enter_safe_state() and the F3/F4
+ *              path are unchanged.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ *              snap_drops removed with the snapshots. Nothing else changed.
+ *              0.1.2-bench: HLT carried snap_drops (record builds).
+ *              0.1.1-bench: IMU recovery. F1/F2 arrive as SYS_IMU_DOWN and no longer enter
+ *              the safe state: imu_acq keeps running and retries. While down,
+ *              FLT and IMU-down go out every second as before; on SYS_IMU_UP,
+ *              HLT resumes and ble_link gets one IMU-up notice (retried each
+ *              second until it fits in ble_q). HLT gains imu_recoveries.
+ *              0.2.0-draft: BLE counters and IMU-down notices.
  * Description: supervisor task (core 0, lowest of our priorities). Wakes once
  *              per second with vTaskDelayUntil, drains sys_q without waiting,
- *              and either sends an HLT line or, after any fault, enters the one
- *              safe state. In the safe state it sends an FLT line and an
- *              IMU-down notice to ble_link every second until reset. Repeating
- *              them means a monitor opened late, or a phone that connects
- *              late, still sees the fault.
+ *              and sends one line: HLT when healthy, FLT while the IMU is down
+ *              (recoverable) or after a fatal fault (F3/F4), which enters the
+ *              one latched safe state until reset. While faulted it also sends
+ *              an IMU-down notice to ble_link every second. While a model
+ *              fault has stopped inference, HLT is followed by an FLT line
+ *              with that fault (F5-F8) every second. Repeating them
+ *              means a monitor opened late, or a phone that connects late,
+ *              still sees the fault.
  */
 
 // ============================================================================
@@ -54,8 +76,8 @@ void sys_fault_and_stop(QueueHandle_t sys_q, task_id_t task, fault_code_t code) 
 }
 
 /**
- * The one safe state. Same steps, same order, for every fault code: stop
- * sampling and detection. serial_out and ble_link keep running so the fault
+ * The one latched safe state, for fatal faults (F3, F4). Same steps, same
+ * order, for every fatal code: stop sampling and processing (imu_acq, dsp). serial_out and ble_link keep running so the fault
  * still reaches Serial and the app. Called only by supervisor_task, only once.
  * @param ctx  Handles of the tasks to stop.
  * @return None.
@@ -74,10 +96,18 @@ void supervisor_task(void *param) {
   uint32_t drdy_timeouts = 0;
   uint32_t dsp_out_q_drops = 0;
   uint32_t ble_out_q_drops = 0;
-  uint32_t ble_q_drops = 0;
+  uint32_t dsp_ble_q_drops = 0;  // Segments dsp could not queue for BLE
+  uint32_t inf_ble_q_drops = 0;  // Events the inference task could not queue for BLE
   uint32_t ble_sent = 0;
   uint32_t ble_fails = 0;
   uint32_t serial_drops = 0;
+  uint32_t imu_recoveries = 0;
+  uint32_t inf_out_q_drops = 0;
+  uint32_t inferences = 0;
+  uint32_t inf_skips = 0;
+  uint32_t lat_last_us = 0;
+  uint32_t lat_max_us = 0;
+  fault_code_t model_fault = FAULT_NONE;  // F5-F8 from the inference heartbeat
   uint32_t own_out_q_drops = 0;  // HLT / FLT lines this task could not queue
 
   // Every task gets a full HEARTBEAT_TIMEOUT_MS from now before it counts as
@@ -88,8 +118,10 @@ void supervisor_task(void *param) {
     last_heard_us[i] = start_us;
   }
 
-  fault_code_t fault = FAULT_NONE;  // First fault reported wins
-  bool safe = false;
+  fault_code_t fault = FAULT_NONE;     // First fatal fault reported wins
+  bool safe = false;                   // Latched safe state (fatal faults only)
+  fault_code_t imu_down = FAULT_NONE;  // F1/F2 while imu_acq is retrying
+  bool imu_up_pending = false;         // IMU-up notice not yet queued for ble_link
   TickType_t last_wake = xTaskGetTickCount();
 
   for (;;) {
@@ -109,20 +141,40 @@ void supervisor_task(void *param) {
         }
         continue;
       }
+      if (m.kind == SYS_IMU_DOWN) {
+        // Processed in order, so a down and an up in one drain end up "up".
+        imu_down = m.fault;
+        imu_up_pending = false;
+        continue;
+      }
+      if (m.kind == SYS_IMU_UP) {
+        imu_down = FAULT_NONE;
+        imu_up_pending = true;
+        continue;
+      }
       last_heard_us[m.task] = now_us;
       if (m.task == TASK_IMU_ACQ) {
         samples = m.samples;
         sample_q_drops = m.sample_q_drops;
         drdy_timeouts = m.drdy_timeouts;
+        imu_recoveries = m.imu_recoveries;
       } else if (m.task == TASK_DSP) {
         dsp_out_q_drops = m.out_q_drops;
-        ble_q_drops = m.ble_q_drops;
+        dsp_ble_q_drops = m.ble_q_drops;
       } else if (m.task == TASK_BLE_LINK) {
         ble_out_q_drops = m.out_q_drops;
         ble_sent = m.ble_sent;
         ble_fails = m.ble_fails;
       } else if (m.task == TASK_SERIAL_OUT) {
         serial_drops = m.serial_drops;
+      } else if (m.task == TASK_INFERENCE) {
+        inf_out_q_drops = m.out_q_drops;
+        inf_ble_q_drops = m.ble_q_drops;
+        inferences = m.inferences;
+        inf_skips = m.inf_skips;
+        lat_last_us = m.lat_last_us;
+        lat_max_us = m.lat_max_us;
+        model_fault = m.fault;
       }
     }
 
@@ -142,30 +194,55 @@ void supervisor_task(void *param) {
     }
 
     out_msg_t out = {};
-    if (!safe) {
+    if (!safe && imu_down == FAULT_NONE) {
+      if (imu_up_pending) {
+        // Once, to the front, zero wait. If ble_q is full, try again next
+        // second, so the app is never left showing imu_ok:false.
+        ble_msg_t up = {};
+        up.tag = BLE_IMU_UP;
+        if (xQueueSendToFront(ctx->ble_q, &up, 0) == pdTRUE) {
+          imu_up_pending = false;
+        }
+      }
       out.tag = OUT_HLT;
       out.hlt.t_ms = (uint32_t)(now_us / 1000);
       out.hlt.samples = samples;
       out.hlt.sample_q_drops = sample_q_drops;
-      out.hlt.out_q_drops = dsp_out_q_drops + ble_out_q_drops + own_out_q_drops;
+      out.hlt.out_q_drops = dsp_out_q_drops + ble_out_q_drops + inf_out_q_drops +
+                            own_out_q_drops;
       out.hlt.drdy_timeouts = drdy_timeouts;
-      out.hlt.ble_q_drops = ble_q_drops;
+      out.hlt.ble_q_drops = dsp_ble_q_drops + inf_ble_q_drops;
       out.hlt.ble_sent = ble_sent;
       out.hlt.ble_fails = ble_fails;
       out.hlt.serial_drops = serial_drops;
+      out.hlt.imu_recoveries = imu_recoveries;
+      out.hlt.inferences = inferences;
+      out.hlt.inf_skips = inf_skips;
+      out.hlt.lat_last_us = lat_last_us;
+      out.hlt.lat_max_us = lat_max_us;
     } else {
       out.tag = OUT_FLT;
-      out.flt.code = fault;
+      out.flt.code = safe ? fault : imu_down;  // A fatal fault outranks F1/F2
 
       // Repeated every second and harmless to repeat: ble_link only acts on
-      // the first. To the front of the queue, zero wait, so a full queue or a
-      // stopped ble_link (F3, F4) never blocks this task.
+      // the first of each outage. To the front of the queue, zero wait, so a
+      // full queue or a stopped ble_link (F3, F4) never blocks this task.
       ble_msg_t down = {};
       down.tag = BLE_IMU_DOWN;
       xQueueSendToFront(ctx->ble_q, &down, 0);
     }
     if (xQueueSend(ctx->out_q, &out, 0) != pdTRUE) {
       own_out_q_drops++;
+    }
+    // A model fault stops inference only: streaming goes on, so HLT went out
+    // above, and the fault follows it every second (owner, 2026-11-24).
+    if (out.tag == OUT_HLT && model_fault != FAULT_NONE) {
+      out_msg_t mf = {};
+      mf.tag = OUT_FLT;
+      mf.flt.code = model_fault;
+      if (xQueueSend(ctx->out_q, &mf, 0) != pdTRUE) {
+        own_out_q_drops++;
+      }
     }
   }
 }

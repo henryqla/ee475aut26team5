@@ -1,15 +1,36 @@
 /*
  * File:        types.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-03
- * Version:     0.2.0-draft
- * Change:      BLE. Segment and event payloads shared by out_q and ble_q,
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): every DET also becomes a contract evt message. Back
+ *              from f3f5e43 (tag pre-manual-overhaul), slimmer: evt_class_t,
+ *              evt_t (only the fields the BLE message needs: no Serial EVT line
+ *              fields, no classifier fields), BLE_EVT and evt in ble_msg_t.
+ *              The inference task now also sends to ble_q, so ble_q_drops in
+ *              sys_msg_t is filled by dsp and inference.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              live inference. New: fault codes F5-F8 (model faults: they
+ *              stop inference only, owner 2026-11-24), OUT_PROB / OUT_DET and
+ *              their payloads, four inference counters in HLT and heartbeats,
+ *              TASK_INFERENCE.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A):
+ *              no detection and no snapshots. Removed: evt_t and its class and
+ *              basis enums, snap_row_t, snap_t, OUT_S / OUT_EVT / OUT_SNAP and
+ *              the S payload, BLE_EVT, snap_drops (heartbeats and HLT) and
+ *              snap_free_q. out_l_t is in every build and carries the model
+ *              channels as named floats.
+ *              0.1.3-bench: OUT_L and out_l_t (log builds), n_trig in evt_t.
+ *              0.1.2-bench: snapshot types, OUT_SNAP, snap_drops, snap_free_q.
+ *              0.1.1-bench: sample epoch, SYS_IMU_DOWN / SYS_IMU_UP,
+ *              BLE_IMU_UP, imu_recoveries.
+ *              0.2.0-draft: BLE. Segment payloads shared by out_q and ble_q,
  *              ble_q and time_q items, link events, F4, ble_link in the
- *              heartbeat table, named heartbeat counters. serial_drops for
- *              native USB Serial on the PCB.
- * Description: Queue item structs, Serial line tags, event classes, fault codes,
- *              and the context struct that hands queue and task handles to every
- *              task. Tasks share nothing else.
+ *              heartbeat table, named heartbeat counters, serial_drops.
+ * Description: Queue item structs, fault codes, and the context struct that
+ *              hands queue and task handles to every task. Tasks share nothing
+ *              else.
  */
 
 #ifndef TYPES_H
@@ -28,26 +49,30 @@
 // One IMU sample in chip axes. Item type of sample_q (imu_acq -> dsp).
 typedef struct {
   uint32_t n;           // Sample count since boot, from 0. Data-ready samples only
+  uint32_t epoch;       // 0 at boot, +1 each time the IMU is re-initialized after
+                        // F1/F2. dsp restarts its filters when this changes
   int64_t  t_us;        // esp_timer_get_time() when imu_acq woke for this sample
   float    ax, ay, az;  // Acceleration, g
   float    gx, gy, gz;  // Angular rate, dps
 } imu_sample_t;
 
-// Event class, decided at the end of the lockout window.
-typedef enum : uint8_t {
-  EVT_UNKNOWN = 0,
-  EVT_POTHOLE,          // Roll-dominant
-  EVT_BUMP,             // Pitch-dominant
-} evt_class_t;
-
-// Fault codes. Every fault leads to the same safe state; the code is only
-// reported, never branched on.
+// Fault codes. F1 and F2 are recoverable: imu_acq retries the IMU and the
+// supervisor reports FLT until it is back. F3 and F4 lead to the one latched
+// safe state until reset. F5 to F8 are model faults: inference stops until
+// reset, while sampling, the L stream and BLE go on, and the supervisor adds
+// an FLT line after each HLT (owner, 2026-11-24). Never the safe state.
 typedef enum : uint8_t {
   FAULT_NONE      = 0,
-  FAULT_IMU_INIT  = 1,  // F1: begin or WHO_AM_I failed at boot
-  FAULT_IMU_LOST  = 2,  // F2: WHO_AM_I mismatch at runtime, or no data for IMU_STALL_MS
+  FAULT_IMU_INIT  = 1,  // F1: begin or WHO_AM_I failed at boot (recoverable)
+  FAULT_IMU_LOST  = 2,  // F2: WHO_AM_I mismatch at runtime, or no data for IMU_STALL_MS (recoverable)
   FAULT_HEARTBEAT = 3,  // F3: a task missed heartbeats for HEARTBEAT_TIMEOUT_MS
   FAULT_BLE_INIT  = 4,  // F4: BLE stack, service, or advertising failed to start
+  FAULT_MODEL_SCHEMA = 5,  // F5: model_data.h does not fit: TFLite schema version, an op
+                           // the resolver lacks, the class names, or the input/output shape
+  FAULT_ARENA     = 6,  // F6: AllocateTensors failed (TENSOR_ARENA_BYTES too small)
+  FAULT_INVOKE    = 7,  // F7: Invoke() returned an error (boot self-test or live)
+  FAULT_SELFTEST  = 8,  // F8: boot self-test outputs differ from model_data.h's by more
+                        // than SELFTEST_TOL
 } fault_code_t;
 
 // One 1 s segment summary (contract section 4.1). Times are phone epoch ms
@@ -63,19 +88,28 @@ typedef struct {
   float    pitch_rms;   // RMS of pitch rate, dps
 } seg_t;
 
-// One event (contract section 4.2), plus the local fields the Serial EVT line
-// prints. Peaks are magnitudes.
+// Event class in the evt message (contract 4.2). The model picks POTHOLE or
+// SPEED_BUMP; EVT_UNKNOWN stays only because the contract defines it and is
+// never sent (B4): a model class with no contract name sends no evt.
+typedef enum : uint8_t {
+  EVT_UNKNOWN = 0,
+  EVT_POTHOLE,
+  EVT_BUMP,
+} evt_class_t;
+
+// One event (contract section 4.2), made by the inference task from the window
+// that caused a DET (B1 to B5). Peaks are magnitudes, as before the overhaul.
+// The phone time is fixed here, from the time dsp stored with the peak sample,
+// so the event keeps the offset of the segment that holds its peak (CR-4).
 typedef struct {
-  uint32_t    seq;             // Event number for the Serial EVT line, 0 at every
-                               // boot. BLE messages get their own seq in ble_link
-  uint32_t    n_peak;          // Sample count at the event's largest peak
-  int64_t     t_us_peak;       // Local timestamp of that sample
-  int64_t     t_ms;            // Same instant in phone epoch ms if synced, else local ms
-  bool        synced;          // Offset in use when the peak was recorded (CR-4)
-  evt_class_t cls;
+  int64_t     t_ms;            // Peak sample's time: phone epoch ms if synced, else local ms
+  uint32_t    n_peak;          // Sample count (L line n) of the peak sample
+  float       conf;            // The model's probability for cls, 0 to 1
   float       peak_z_g;        // Largest |z_hp| in the window, g
   float       peak_roll_dps;   // Largest |roll rate| in the window, dps
   float       peak_pitch_dps;  // Largest |pitch rate| in the window, dps
+  bool        synced;          // Offset in use when the peak was recorded (CR-4)
+  evt_class_t cls;
 } evt_t;
 
 // BLE link changes, reported by the NimBLE callbacks and printed on Serial.
@@ -97,19 +131,43 @@ typedef struct {
 
 // Type tag of an out_q item. One item becomes one Serial line.
 typedef enum : uint8_t {
-  OUT_S = 0,            // Sample line, every PRINT_EVERY_N samples
-  OUT_EVT,              // Event line, at the end of each lockout window
+  OUT_L = 0,            // Every sample, printed as an L line
   OUT_SEG,              // Segment line, once per second
   OUT_HLT,              // Health line, once per second
   OUT_FLT,              // Fault line, once per second in the safe state
   OUT_BLE,              // BLE link line, on each link change
+  OUT_PROB,             // Inference result, about 2 per second (request F)
+  OUT_DET,              // Detection (request F)
 } out_tag_t;
 
-// Payload of an S line.
+// Classes in a PROB line: POTHOLE, SPEED_BUMP, NONE (O4). inference.cpp checks
+// that model_data.h has exactly this many.
+#define OUT_PROB_CLASSES  3
+
+// Payload of an L line: one sample in raw chip axes, plus the model channels
+// after the HPF and gyro bias removal, exactly as the CNN will see them.
 typedef struct {
-  imu_sample_t s;       // The sample, chip axes
+  imu_sample_t s;       // The sample, chip axes (gyro bias still in)
   float        z_hp;    // High-passed vertical acceleration, g
-} out_s_t;
+  float        roll;    // Roll rate, dps, bias removed
+  float        pitch;   // Pitch rate, dps, bias removed
+  bool         ok;      // Gyro bias ready: false during the settle time and after an
+                        // IMU recovery
+} out_l_t;
+
+// Payload of a PROB line: one inference.
+typedef struct {
+  uint32_t n;                         // Newest sample (L line n) in the window
+  float    p[OUT_PROB_CLASSES];       // Probabilities in model_data.h class order
+  uint32_t lat_us;                    // Time Invoke() took, us
+} out_prob_t;
+
+// Payload of a DET line: a detection by the board's rule (O1).
+typedef struct {
+  uint32_t n;                         // Newest sample in the window that fired
+  uint8_t  cls;                       // Class index (never NONE)
+  float    conf;                      // Its probability
+} out_det_t;
 
 // Payload of an HLT line.
 typedef struct {
@@ -118,10 +176,16 @@ typedef struct {
   uint32_t sample_q_drops;  // Samples imu_acq could not queue
   uint32_t out_q_drops;     // Lines dsp, ble_link and supervisor could not queue
   uint32_t drdy_timeouts;   // Times imu_acq waited DRDY_TIMEOUT_MS with no INT1
-  uint32_t ble_q_drops;     // Segments and events dsp could not queue for BLE
+  uint32_t ble_q_drops;     // Segments (dsp) and events (inference) ble_q had no room for
   uint32_t ble_sent;        // Notifications sent
   uint32_t ble_fails;       // Notifications that failed or were too long
   uint32_t serial_drops;    // Lines serial_out dropped: USB TX buffer full (no host reading)
+  uint32_t imu_recoveries;  // Times the IMU came back after F1/F2
+  uint32_t inferences;      // Invoke() calls on live windows since boot
+  uint32_t inf_skips;       // Hops skipped: the last inference still running, or its
+                            // window overwritten before it was copied
+  uint32_t lat_last_us;     // Last Invoke() time, us
+  uint32_t lat_max_us;      // Longest Invoke() time since boot, us
 } out_hlt_t;
 
 // Payload of an FLT line.
@@ -133,24 +197,26 @@ typedef struct {
 typedef struct {
   out_tag_t tag;            // Says which union member is valid
   union {
-    out_s_t   s;
-    evt_t     evt;
+    out_l_t   l;
     seg_t     seg;
     out_hlt_t hlt;
     out_flt_t flt;
     link_t    link;
+    out_prob_t prob;
+    out_det_t  det;
   };
 } out_msg_t;
 
 // Type tag of a ble_q item.
 typedef enum : uint8_t {
   BLE_SEG = 0,          // From dsp: send as a seg message
-  BLE_EVT,              // From dsp: send as an evt message
   BLE_LINK,             // From the NimBLE callbacks: link changed
-  BLE_IMU_DOWN,         // From supervisor, each second in the safe state
+  BLE_IMU_DOWN,         // From supervisor, each second while faulted
+  BLE_IMU_UP,           // From supervisor, once when the IMU recovers
+  BLE_EVT,              // From inference: send as an evt message (request H)
 } ble_tag_t;
 
-// Item type of ble_q (dsp, NimBLE callbacks, supervisor -> ble_link).
+// Item type of ble_q (dsp, inference, NimBLE callbacks, supervisor -> ble_link).
 typedef struct {
   ble_tag_t tag;            // Says which union member is valid
   union {
@@ -173,13 +239,16 @@ typedef enum : uint8_t {
   TASK_DSP,
   TASK_SERIAL_OUT,
   TASK_BLE_LINK,
+  TASK_INFERENCE,
   TASK_COUNT,
 } task_id_t;
 
 // Kind of a sys_q item.
 typedef enum : uint8_t {
   SYS_HEARTBEAT = 0,
-  SYS_FAULT,
+  SYS_FAULT,            // Fatal: the sender has stopped (F3, F4)
+  SYS_IMU_DOWN,         // imu_acq lost the IMU (fault = F1 or F2) and is retrying
+  SYS_IMU_UP,           // imu_acq re-initialized the IMU; samples resume
 } sys_kind_t;
 
 // Item type of sys_q (every task -> supervisor). Each sender fills only the
@@ -187,15 +256,21 @@ typedef enum : uint8_t {
 typedef struct {
   sys_kind_t   kind;
   task_id_t    task;            // Sender
-  fault_code_t fault;           // SYS_FAULT only
+  fault_code_t fault;           // SYS_FAULT and SYS_IMU_DOWN; in inference heartbeats, its
+                                // model fault (FAULT_NONE while it runs)
   uint32_t     samples;         // imu_acq
   uint32_t     drdy_timeouts;   // imu_acq
   uint32_t     sample_q_drops;  // imu_acq
-  uint32_t     out_q_drops;     // dsp, ble_link
-  uint32_t     ble_q_drops;     // dsp
+  uint32_t     imu_recoveries;  // imu_acq
+  uint32_t     out_q_drops;     // dsp, ble_link, inference
+  uint32_t     ble_q_drops;     // dsp (segments), inference (events)
   uint32_t     ble_sent;        // ble_link
   uint32_t     ble_fails;       // ble_link
   uint32_t     serial_drops;    // serial_out
+  uint32_t     inferences;      // inference
+  uint32_t     inf_skips;       // inference
+  uint32_t     lat_last_us;     // inference
+  uint32_t     lat_max_us;      // inference
 } sys_msg_t;
 
 // Queue and task handles, filled once in setup() and read-only afterwards.

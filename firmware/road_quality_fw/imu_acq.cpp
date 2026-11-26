@@ -1,16 +1,24 @@
 /*
  * File:        imu_acq.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-03
- * Version:     0.2.0-draft
- * Change:      Heartbeat sent as a sys_msg_t with named counters. PCB target
- *              (same pins). No change to acquisition.
+ * Date:        2026-11-16
+ * Version:     0.1.1-bench
+ * Change:      IMU recovery. F1 and F2 no longer stop this task for good: it
+ *              reports SYS_IMU_DOWN, retries every IMU_RETRY_MS (heartbeats
+ *              keep going), and once WHO_AM_I reads right IMU_RECOVER_GOOD_READS
+ *              times in a row, re-runs the full init (a power-cycled chip comes
+ *              back with its sensors off and INT1 unrouted, and WHO_AM_I alone
+ *              cannot tell). Then it reports SYS_IMU_UP and bumps the sample
+ *              epoch so dsp restarts its filters.
+ *              0.1.0-bench: comments only, for the LSM6DSO32 breakout.
  * Description: imu_acq task (core 1, highest of our priorities). Sole owner of
- *              the SPI bus and the LSM6DSO32X. Initializes the IMU, then for
+ *              the SPI bus and the IMU (bench: LSM6DSO32 breakout; PCB:
+ *              LSM6DSO32X). Initializes the IMU, then for
  *              each INT1 data-ready notification reads one sample, stamps it
  *              with the sample count and esp_timer microseconds, and sends it
  *              to sample_q without waiting. Once per second it re-reads
- *              WHO_AM_I and sends a heartbeat. Detects F1 and F2.
+ *              WHO_AM_I and sends a heartbeat. Detects F1 and F2 and recovers
+ *              from both.
  */
 
 // ============================================================================
@@ -30,8 +38,10 @@
 // Macros
 // ============================================================================
 
-// WHO_AM_I (register 0Fh) value from the LSM6DSO32X datasheet. The library's
-// LSM6DSO32_CHIP_ID is the same 0x6C, so begin_SPI() accepts the X variant.
+// WHO_AM_I (register 0Fh). 0x6C for both the plain LSM6DSO32 (bench breakout)
+// and the LSM6DSO32X (PCB). The library's LSM6DSO32_CHIP_ID is the same 0x6C
+// (Adafruit LSM6DS 4.7.4, Adafruit_LSM6DSO32.h line 23), so begin_SPI()
+// accepts either chip.
 #define IMU_WHO_AM_I  0x6C
 
 // config.h values -> library enums. An unsupported value fails the build
@@ -84,6 +94,14 @@ static ImuDevice s_imu;
 // This task's handle, for the ISR. Written once, before the ISR is attached.
 static TaskHandle_t s_imu_task = NULL;
 
+// Counters this task reports in its heartbeat. Owned by imu_acq_task.
+typedef struct {
+  uint32_t n;               // Data-ready samples so far
+  uint32_t sample_q_drops;
+  uint32_t drdy_timeouts;
+  uint32_t recoveries;      // Times the IMU came back after F1/F2
+} imu_stats_t;
+
 // ============================================================================
 // Prototypes
 // ============================================================================
@@ -91,6 +109,10 @@ static TaskHandle_t s_imu_task = NULL;
 static void imu_int1_isr(void);  // IRAM_ATTR goes on the definition only
 static bool imu_init(void);
 static void imu_read(imu_sample_t *s);
+static void imu_start(imu_sample_t *s);
+static void send_heartbeat(const app_ctx_t *ctx, const imu_stats_t *st);
+static void imu_recover(const app_ctx_t *ctx, fault_code_t code, imu_stats_t *st,
+                        imu_sample_t *s);
 
 // ============================================================================
 // Implementations
@@ -165,29 +187,109 @@ static void imu_read(imu_sample_t *s) {
   s->gz = gyro.gyro.z * SENSORS_RADS_TO_DPS;
 }
 
+/**
+ * Clears what piled up before sampling (re)starts. Data-ready has been latched
+ * high since the ODR was set, so no rising edge would ever come; reading
+ * clears it. Notifications are cleared first, so an edge that arrives after
+ * the read is kept.
+ * @param s  Scratch sample, overwritten.
+ * @return None.
+ */
+static void imu_start(imu_sample_t *s) {
+  ulTaskNotifyTake(pdTRUE, 0);  // Drop stale INT1 notifications
+  imu_read(s);
+}
+
+/**
+ * Sends this task's heartbeat with its counters.
+ * @param ctx  For sys_q.
+ * @param st   Counters.
+ * @return None.
+ */
+static void send_heartbeat(const app_ctx_t *ctx, const imu_stats_t *st) {
+  sys_msg_t hb = {};
+  hb.task = TASK_IMU_ACQ;
+  hb.samples = st->n;
+  hb.drdy_timeouts = st->drdy_timeouts;
+  hb.sample_q_drops = st->sample_q_drops;
+  hb.imu_recoveries = st->recoveries;
+  sys_heartbeat(ctx->sys_q, &hb);
+}
+
+/**
+ * Reports the IMU down, then retries until it is back and configured. Keeps
+ * sending heartbeats, so the supervisor sees a lost IMU (F1/F2), not a stuck
+ * task (F3). The INT1 pull-down keeps the ISR quiet while the IMU is off.
+ * WHO_AM_I is checked first because it is one cheap register read; the full
+ * init (which allocates in the library) runs only after it reads right
+ * IMU_RECOVER_GOOD_READS times in a row. s_imu has always been through
+ * begin_SPI() once by now (it creates its SPI device before checking
+ * WHO_AM_I), so who_am_i() is safe even after F1.
+ * @param ctx   For sys_q.
+ * @param code  FAULT_IMU_INIT (boot) or FAULT_IMU_LOST (runtime).
+ * @param st    Counters: recoveries is incremented on return.
+ * @param s     Scratch sample for imu_start().
+ * @return Once the IMU is configured and sampling can resume.
+ */
+static void imu_recover(const app_ctx_t *ctx, fault_code_t code, imu_stats_t *st,
+                        imu_sample_t *s) {
+  sys_msg_t down = {};
+  down.kind = SYS_IMU_DOWN;
+  down.task = TASK_IMU_ACQ;
+  down.fault = code;
+  // Waits for space, like sys_fault_and_stop: losing this report would hide
+  // the fault. The supervisor drains sys_q every second.
+  xQueueSend(ctx->sys_q, &down, portMAX_DELAY);
+
+  uint32_t good = 0;
+  TickType_t last_wake = xTaskGetTickCount();
+  for (;;) {
+    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(IMU_RETRY_MS));
+    send_heartbeat(ctx, st);
+
+    good = (s_imu.who_am_i() == IMU_WHO_AM_I) ? good + 1 : 0;
+    if (good < IMU_RECOVER_GOOD_READS) {
+      continue;
+    }
+    if (imu_init()) {  // Soft reset, ranges, ODR, INT1 route, read-back check
+      break;
+    }
+    good = 0;  // Answered but would not take the settings: start over
+  }
+
+  imu_start(s);
+  st->recoveries++;
+
+  sys_msg_t up = {};
+  up.kind = SYS_IMU_UP;
+  up.task = TASK_IMU_ACQ;
+  xQueueSend(ctx->sys_q, &up, portMAX_DELAY);
+}
+
 void imu_acq_task(void *param) {
   const app_ctx_t *ctx = (const app_ctx_t *)param;
   s_imu_task = xTaskGetCurrentTaskHandle();
 
-  if (!imu_init()) {
-    sys_fault_and_stop(ctx->sys_q, TASK_IMU_ACQ, FAULT_IMU_INIT);  // F1
-  }
+  const bool init_ok = imu_init();
 
   // Pull-down so a broken INT1 connection reads low (no edges, then F2)
   // instead of floating and firing at random. The IMU drives the line
-  // push-pull, so the weak pull-down does not fight it.
+  // push-pull, so the weak pull-down does not fight it. Attached even if init
+  // failed, so a recovered IMU finds it ready.
   pinMode(PIN_IMU_INT1, INPUT_PULLDOWN);
   // Attached from this task, so the GPIO interrupt is allocated on core 1.
   attachInterrupt(digitalPinToInterrupt(PIN_IMU_INT1), imu_int1_isr, RISING);
 
+  imu_stats_t st = {};
+  uint32_t epoch = 0;  // Goes into every sample; +1 per recovery
   imu_sample_t s = {};
-  // Data-ready has been latched high since the ODR was set, before the ISR
-  // existed, so no rising edge would ever come. Reading clears it.
-  imu_read(&s);
+  if (init_ok) {
+    imu_start(&s);
+  } else {
+    imu_recover(ctx, FAULT_IMU_INIT, &st, &s);  // F1: wait for the IMU
+    epoch++;
+  }
 
-  uint32_t n = 0;               // Data-ready samples so far
-  uint32_t sample_q_drops = 0;
-  uint32_t drdy_timeouts = 0;
   int64_t last_good_us = esp_timer_get_time();  // Last data-ready sample
   int64_t last_check_us = last_good_us;         // Last WHO_AM_I + heartbeat
 
@@ -200,24 +302,23 @@ void imu_acq_task(void *param) {
     imu_read(&s);
 
     if (woke > 0) {
-      s.n = n++;
+      s.n = st.n++;
+      s.epoch = epoch;
       s.t_us = now_us;
       last_good_us = now_us;
       if (xQueueSend(ctx->sample_q, &s, 0) != pdTRUE) {
-        sample_q_drops++;  // dsp is behind. Drop and count, never wait
+        st.sample_q_drops++;  // dsp is behind. Drop and count, never wait
       }
     } else {
       // No edge for DRDY_TIMEOUT_MS. The read above clears a latched
       // data-ready so edges can resume. The sample is not sent: data-ready
       // did not pace it, so its timestamp would be wrong.
-      drdy_timeouts++;
+      st.drdy_timeouts++;
     }
 
-    if (now_us - last_good_us >= (int64_t)IMU_STALL_MS * 1000) {
-      sys_fault_and_stop(ctx->sys_q, TASK_IMU_ACQ, FAULT_IMU_LOST);  // F2
-    }
+    bool lost = (now_us - last_good_us >= (int64_t)IMU_STALL_MS * 1000);
 
-    if (now_us - last_check_us >= (int64_t)HEARTBEAT_PERIOD_MS * 1000) {
+    if (!lost && now_us - last_check_us >= (int64_t)HEARTBEAT_PERIOD_MS * 1000) {
       // Advance by exactly one period (not to now_us) so this cadence does
       // not drift against the supervisor's 1 s tick. Otherwise HLT samples
       // would now and then repeat one second and jump ~832 the next.
@@ -225,14 +326,19 @@ void imu_acq_task(void *param) {
       // A broken MISO or CS connection still lets samples "arrive" (INT1
       // keeps firing), but they are garbage. WHO_AM_I catches it.
       if (s_imu.who_am_i() != IMU_WHO_AM_I) {
-        sys_fault_and_stop(ctx->sys_q, TASK_IMU_ACQ, FAULT_IMU_LOST);  // F2
+        lost = true;
+      } else {
+        send_heartbeat(ctx, &st);
       }
-      sys_msg_t hb = {};
-      hb.task = TASK_IMU_ACQ;
-      hb.samples = n;
-      hb.drdy_timeouts = drdy_timeouts;
-      hb.sample_q_drops = sample_q_drops;
-      sys_heartbeat(ctx->sys_q, &hb);
+    }
+
+    if (lost) {
+      // F2: power loss, or SCK/MOSI/MISO/CS/INT1 came loose. Retry until the
+      // IMU is back, then restart the timers and tell dsp via the epoch.
+      imu_recover(ctx, FAULT_IMU_LOST, &st, &s);
+      epoch++;
+      last_good_us = esp_timer_get_time();
+      last_check_us = last_good_us;
     }
   }
 }

@@ -66,21 +66,28 @@ Any change to how the parts talk to each other goes there first.
 > The first draft lives on the [`firmware`](https://github.com/henryqla/ee475aut26team5/tree/firmware) branch and has not been merged
 > into `main` yet.
 
-Arduino sketch `road_quality_fw/` for an ESP32-S3 (DevKitC-1 on a breadboard for now, moving to
-a custom PCB) with an LSM6DSO32X 6-axis IMU on SPI. It is built as four FreeRTOS tasks connected
-by queues:
+Arduino sketch `road_quality_fw/` (v0.3.0-pcb) for the team's custom PCB: an
+ESP32-S3-WROOM-1-N16R8 with an LSM6DSO32X 6-axis IMU on SPI. It is built as six FreeRTOS tasks
+connected by queues:
 
 - **`imu_acq`** owns the SPI bus and reads one sample at 416 Hz on each data-ready interrupt.
-- **`dsp`** maps chip axes to car axes and removes gravity with a high-pass filter. It then
-  applies thresholds and a lockout window, and classifies each hit: roll-dominant is a
-  *pothole*, pitch-dominant is a *speed bump*.
-- **`serial_out`** owns the serial port and prints samples, events and health lines.
-- **`supervisor`** watches every task's heartbeat and the IMU. On any fault it puts the device
-  into a single safe state and reports a fault code.
+  If the IMU drops out, it recovers without a reset.
+- **`dsp`** maps chip axes to car axes, removes gyro bias and gravity (high-pass filter), and
+  builds 1 s roughness segments.
+- **`inference`** runs a small CNN (TensorFlow Lite Micro) every 0.5 s on the last 2 s of
+  motion and detects *potholes* and *speed bumps*.
+- **`ble_link`** sends `status`, segments and events to the phone over BLE and takes the
+  phone's time sync.
+- **`serial_out`** owns the USB serial port and streams every sample, segments, model outputs,
+  detections and health lines.
+- **`supervisor`** watches every task's heartbeat and the IMU, and reports faults on Serial and
+  to the app.
 
-Every tunable value is in `config.h` and every pin is in `board_pins.h`. Phase 1 reports over
-USB serial only. BLE output, microSD logging and time sync, as described in the data contract,
-come next.
+Every tunable value is in `config.h` and every pin is in `board_pins.h`. The same code also
+builds for a breadboarded DevKitC-1 as `firmware-bench/`, where new features are tested first.
+`firmware/cnn/` holds the GUI that records labeled training clips over Serial and `train.py`,
+which trains the CNN and writes `model_data.h`. microSD logging comes later. See
+[`firmware/FIRMWARE_SUMMARY.md`](firmware/FIRMWARE_SUMMARY.md) for details.
 
 ### `android_app/` — the phone app
 
@@ -135,7 +142,7 @@ Docker on a team laptop and is reachable from phones through a Tailscale Funnel 
 
 This is an in-progress course project. The plan runs through five milestones: foundations, first
 data flow, test-drive data collection, full integration, and a final demo on **Dec 10, 2026**.
-Thresholds, roughness color cutoffs and the vehicle normalization are placeholders until the
-team runs calibration drives. See the
+The detection model, roughness color cutoffs and the vehicle normalization are placeholders
+until the team runs calibration and test drives. See the
 [PRD](https://sites.google.com/uw.edu/ee475aut26team5/product-requirements-document) for the
 full requirements, milestones and success metrics.

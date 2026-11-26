@@ -1,34 +1,111 @@
 /*
  * File:        road_quality_fw.ino
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-03
- * Version:     0.2.0-draft
- * Change:      BLE (docs/data-contract.md sections 2-5): new ble_link task,
- *              ble_q and time_q, 1 s segments in dsp. Target is now the team
- *              PCB, with Serial over native USB.
+ * Date:        2026-11-25
+ * Version:     0.3.0-pcb
+ * Change:      0.3.0-pcb (pcb-port handoff, request I; owner, 2026-11-25):
+ *              road_quality_fw is now the PCB build of firmware-bench
+ *              0.2.0-bench (commit 88d2d1e). Its code replaces the 0.2.0-draft
+ *              threshold firmware: every .cpp/.h file except config.h and
+ *              board_pins.h is a byte-for-byte copy of firmware-bench (their
+ *              headers still say -bench on purpose), and this file's code is
+ *              firmware-bench.ino's. Only the board differs: board_pins.h
+ *              (PCB pins, the same GPIOs as the bench), FW_VERSION 0.3.0-pcb in
+ *              config.h, and the build settings below. Everything in the
+ *              bench history below (0.1.0-bench to 0.2.0-bench) is now in this
+ *              firmware too. 0.2.0-draft is in git at commit 88d2d1e.
+ *              Keeping it in step: copy every later firmware-bench change here.
+ *              `git diff --no-index --stat firmware/firmware-bench
+ *              firmware/road_quality_fw` must list only board_pins.h,
+ *              config.h, this file and WIRING.md. After each retrain, copy
+ *              firmware-bench/model_data.h here (train.py writes only the
+ *              bench copy).
+ *              0.2.0-bench (ble-event-link-handoff.md, request H): every DET
+ *              also goes to the app as a BLE evt message (no change to this
+ *              file's code).
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
+ *              live inference. setup() starts the inference task first
+ *              (inference_start(): static stack, core 1, below imu_acq and
+ *              dsp) and waits while it loads model_data.h and runs the boot
+ *              self-test, then starts the other five tasks as before. The
+ *              board now also prints PROB and DET lines. A model fault stops
+ *              inference only; streaming goes on (owner, 2026-11-24).
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A;
+ *              owner decision O2): one build that streams every sample as an
+ *              L line and decides nothing. No threshold detection, no EVT
+ *              (Serial or BLE), no S lines, no snapshots, no build flags to
+ *              pick. setup() makes out_q OUT_Q_LEN (256) long and no longer
+ *              creates snapshot buffers. The removed code is in git, tag
+ *              pre-manual-overhaul.
+ *              0.1.3-bench (drive-log-manual-record-handoff.md v0.2, request
+ *              4): log build. With LOG_MODE 1 in config.h, every sample goes
+ *              to Serial as an L line for the record GUI's drive log and
+ *              manual Record (no S lines, no snapshots); setup() then makes
+ *              out_q LOG_OUT_Q_LEN long. Every build: the Serial EVT line
+ *              gains n_trig, the trigger's sample count.
+ *              0.1.2-bench (cnn-record-train-handoff.md v0.4): re-arm rule,
+ *              so a lockout's tail cannot fire a second event (request 0).
+ *              Record mode (request 1): with RECORD_MODE 1 in config.h, each
+ *              trigger's snapshot of the model channels goes to Serial for
+ *              the CNN record GUI; setup() also creates snap_free_q and its
+ *              buffers.
+ *              0.1.1-bench: pothole / speed bump by pitch sequence (nose down
+ *              then up = pothole), never UNKNOWN; the IMU recovers from F1/F2
+ *              (power loss or a loose wire) without a reset. Now differs from
+ *              road_quality_fw in dsp, imu_acq, supervisor, ble_link, and the
+ *              BOOT / EVT / HLT line formats.
+ *              0.1.0-bench (devkit-bench-handoff.md v0.2): a copy of
+ *              road_quality_fw 0.2.0-draft (commit 4276b56) for a breadboarded
+ *              ESP32-S3-DevKitC-1 and Adafruit LSM6DSO32 breakout.
  * Description: Road quality firmware for the team's custom PCB
  *              (ESP32-S3-WROOM-1-N16R8, LSM6DSO32X IMU on SPI, pins from
- *              pin-map.md v0.1). Reads the IMU at 416 Hz, classifies potholes
- *              and speed bumps by thresholding, sends 1 s segment summaries
- *              and events to the Android app over BLE, and prints samples,
- *              segments, events, and health to Serial.
+ *              pin-map.md v0.1 in board_pins.h). Reads the IMU at 416 Hz and
+ *              prints every sample to Serial as an L line (raw chip axes plus
+ *              the CNN's model channels z_hp, roll and pitch) for the CNN
+ *              record GUI in firmware/cnn/cnn_record_gui/, along with
+ *              segments and health. Sends 1 s segment summaries to the Android
+ *              app over BLE.
  *
- *              setup() only creates the queues and the five tasks, then deletes
- *              its own task, so loop() never runs. Each task initializes the
- *              peripheral it owns. Core 1: imu_acq, dsp. Core 0: serial_out,
- *              ble_link, supervisor.
+ *              Every MODEL_HOP samples (0.5 s) the CNN in model_data.h
+ *              (generated by firmware/cnn/training/train.py) runs on the last
+ *              2 s of z_hp, roll and pitch and prints PROB, and DET when it
+ *              detects a pothole or speed bump. Each DET also goes to the app
+ *              as a BLE evt message.
  *
- *              Build: Arduino IDE 2.3.10, esp32 core 3.3.10, board "ESP32S3 Dev
- *              Module", Flash Size 16MB, PSRAM Disabled, USB CDC On Boot
- *              Enabled, USB Mode "Hardware CDC and JTAG", Upload Mode "UART0 /
- *              Hardware CDC" (same as PCB bring-up). serial_out.cpp refuses to
- *              build with other USB settings. Libraries: Adafruit LSM6DS,
- *              Adafruit BusIO, Adafruit Unified Sensor, NimBLE-Arduino 2.x.
+ *              The axis mapping (dsp.cpp, map_axes()) is still the bench's
+ *              until the car mounting is final.
  *
- *              Serial and upload use native USB (GPIO19/20). If the port does
- *              not appear, hold BOOT and press reset to enter download mode.
- *              A reset re-enumerates USB; BOOT and the headers wait in the TX
- *              buffer until a monitor opens the port.
+ *              setup() only creates the queues and the six tasks, then deletes
+ *              its own task, so loop() never runs. Each task initializes what
+ *              it owns. Core 1: imu_acq, dsp, inference (lowest). Core 0:
+ *              serial_out, ble_link, supervisor.
+ *
+ *              Build (Arduino IDE 2.3.10, esp32 core 3.3.10, Tools menu):
+ *              - Board: "ESP32S3 Dev Module"
+ *              - Flash Size: 16MB (N16 module; the only setting that differs
+ *                from the firmware-bench DevKit build, which uses 8MB)
+ *              - PSRAM: Disabled (as on the bench; this firmware does not use it)
+ *              - Partition Scheme: "Default 4MB with spiffs (1.2MB APP/1.5MB
+ *                SPIFFS)", as on the bench, so the app fits the same way
+ *              - USB CDC On Boot: Enabled
+ *              - USB Mode: "Hardware CDC and JTAG"
+ *              - Upload Mode: "UART0 / Hardware CDC"
+ *              serial_out.cpp refuses to build with other USB settings.
+ *              Libraries: Adafruit LSM6DS 4.7.4, Adafruit BusIO 1.17.4,
+ *              Adafruit Unified Sensor 1.1.15, NimBLE-Arduino 2.5.2. TFLite
+ *              Micro is the copy inside esp32 core 3.3.10 (esp-tflite-micro
+ *              1.3.5): nothing to install.
+ *
+ *              Serial and upload use native USB (GPIO19/20); the PCB has no
+ *              USB-UART bridge. If the port does not appear, hold BOOT (GPIO0)
+ *              and press RESET to enter download mode. A reset re-enumerates
+ *              USB; BOOT and the headers wait in the TX buffer until a monitor
+ *              opens the port. UART0 (GPIO43/44) is not brought out, so ROM
+ *              boot messages and configASSERT output cannot be seen on the
+ *              PCB: a boot-time assert shows only as a reboot loop.
+ *
+ *              Trips upload with fw_version 0.3.0-pcb, so they can be told
+ *              apart from bench trips (-bench versions).
  */
 
 // ============================================================================
@@ -42,6 +119,7 @@
 #include "serial_out.h"
 #include "ble_link.h"
 #include "supervisor.h"
+#include "inference.h"
 
 // ============================================================================
 // Globals
@@ -85,6 +163,7 @@ static void start_task(TaskFunction_t fn, const char *name, UBaseType_t prio,
  */
 void setup() {
   s_ctx.sample_q = xQueueCreate(SAMPLE_Q_LEN, sizeof(imu_sample_t));
+  // One item per sample (L lines), so ~0.6 s of room (L3).
   s_ctx.out_q = xQueueCreate(OUT_Q_LEN, sizeof(out_msg_t));
   s_ctx.sys_q = xQueueCreate(SYS_Q_LEN, sizeof(sys_msg_t));
   s_ctx.ble_q = xQueueCreate(BLE_Q_LEN, sizeof(ble_msg_t));
@@ -100,7 +179,13 @@ void setup() {
   configASSERT(s_ctx.ble_q != NULL);
   configASSERT(s_ctx.time_q != NULL);
 
-  // serial_out first so BOOT prints as early as possible. supervisor last,
+  // Inference first: it loads the model and runs the self-test before any
+  // other task exists (TFLite Micro's error text goes straight to the console
+  // and must not mix with Serial lines), and BOOT then carries the result.
+  // Returns when the model is ready, or failed, or INFER_READY_TIMEOUT_MS.
+  inference_start(&s_ctx);
+
+  // serial_out next so BOOT prints as early as possible. supervisor last,
   // because it needs the imu_acq and dsp handles.
   start_task(serial_out_task, "serial_out", PRIO_SERIAL_OUT, CORE_IO, NULL);
   start_task(ble_link_task, "ble_link", PRIO_BLE_LINK, CORE_IO, NULL);

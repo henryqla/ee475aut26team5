@@ -23,9 +23,10 @@
 
 /**
  * supervisor task entry (core 0, lowest of our priorities). Once per second:
- * drains sys_q, checks heartbeats, and sends HLT to out_q. Sole caller of the
- * safe state; after that it sends FLT to out_q and an IMU-down notice to
- * ble_q once per second until reset.
+ * drains sys_q, checks heartbeats, and sends HLT to out_q. While the IMU is
+ * down (F1/F2, recoverable) it sends FLT and an IMU-down notice instead, and
+ * one IMU-up notice when it returns. Sole caller of the latched safe state
+ * (F3/F4); after that it sends FLT and IMU-down once per second until reset.
  * @param param  Pointer to the app_ctx_t from setup(). Must outlive the task.
  * @return Never returns.
  */

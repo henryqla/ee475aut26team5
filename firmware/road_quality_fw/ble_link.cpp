@@ -1,20 +1,35 @@
 /*
  * File:        ble_link.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-03
- * Version:     0.2.0-draft (new file)
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): the evt message is back, restored from f3f5e43
+ *              (tag pre-manual-overhaul): send_evt, class_json and the
+ *              BLE_EVT case. Same JSON keys, same seq handling (every message
+ *              uses one seq), nothing sent while nobody is subscribed. Only
+ *              difference: conf is the model's probability (e->conf), not a
+ *              constant 1.0, and the event comes from the inference task.
+ *              0.1.4-bench (manual-recording-overhaul-handoff.md, request A,
+ *              A2): the evt message is removed (send_evt, class_json and the
+ *              BLE_EVT case), because the bench build no longer detects
+ *              events. status and seg are unchanged.
+ *              0.1.1-bench: BLE_IMU_UP: after an IMU recovery, imu_ok goes
+ *              back to true and status is sent again. 0.2.0-draft: new file.
  * Description: ble_link task (core 0). Sole owner of BLE. Implements the
  *              device side of docs/data-contract.md sections 3-5:
  *              - Advertises the service UUID, with the name in the scan
  *                response, every ~100 ms whenever no phone is connected, and
  *                again after every disconnect.
  *              - On every subscribe to DATA, sends status. Then one JSON
- *                notification per seg and evt from dsp. While nobody is
- *                subscribed, those are dropped (nothing is buffered).
+ *                notification per seg from dsp and per evt from the inference
+ *                task (one per DET). While nobody is subscribed, those are
+ *                dropped (nothing is buffered).
  *              - seq counts every message of any type, from 0 at boot (CR-6).
  *              - A TIME write goes to dsp through time_q; dsp applies it at
  *                the next segment boundary (CR-4).
- *              - In the safe state, status says imu_ok:false.
+ *              - While the IMU is down or in the safe state, status says
+ *                imu_ok:false; after an IMU recovery it says true again.
  *              The NimBLE callbacks run in NimBLE's host task (also core 0).
  *              They only copy what they got, queue it, and return.
  *
@@ -64,7 +79,7 @@
 typedef struct {
   bool     subscribed;    // The app has DATA notifications on
   bool     time_written;  // At least one valid TIME write since boot
-  bool     imu_ok;        // false once the supervisor reports the safe state
+  bool     imu_ok;        // false while the supervisor reports the IMU down
   uint32_t seq;           // Next message number, any type (contract section 4)
   uint32_t sent;          // Notifications sent
   uint32_t fails;         // Notifications that failed or were too long
@@ -308,9 +323,13 @@ static void send_seg(link_state_t *st, const seg_t *g) {
 }
 
 /**
- * Sends one evt message (contract 4.2). t is the time of the largest peak.
+ * Sends one evt message (contract 4.2), restored from f3f5e43. t is the time of
+ * the largest peak, already on the clock in use for that peak's segment
+ * (CR-4); synced says whether that is phone time (B6: before the first TIME
+ * write it is local ms since boot and synced is false). conf is the model's
+ * probability for the class (B5). Peaks are magnitudes, decimals rounded to 3.
  * @param st  Link state.
- * @param e   The event from dsp.
+ * @param e   The event from the inference task.
  * @return None.
  */
 static void send_evt(link_state_t *st, const evt_t *e) {
@@ -320,7 +339,7 @@ static void send_evt(link_state_t *st, const evt_t *e) {
       ",\"class\":\"%s\",\"peak_z\":%.3f,\"roll_peak\":%.3f,"
       "\"pitch_peak\":%.3f,\"conf\":%.3f}",
       st->seq, json_bool(e->synced), e->t_ms, class_json(e->cls),
-      e->peak_z_g, e->peak_roll_dps, e->peak_pitch_dps, EVT_CONF);
+      e->peak_z_g, e->peak_roll_dps, e->peak_pitch_dps, e->conf);
   notify_json(st, buf, len);
 }
 
@@ -350,7 +369,8 @@ static const char *json_bool(bool b) {
 
 /**
  * @param c  Event class.
- * @return The contract's class string (contract 4.2).
+ * @return The contract's class string (contract 4.2). "unknown" is in the
+ *         contract but the inference task never sends it (B4).
  */
 static const char *class_json(evt_class_t c) {
   switch (c) {
@@ -404,9 +424,19 @@ void ble_link_task(void *param) {
           }
           break;
         case BLE_IMU_DOWN:
-          // Sent every second in the safe state; only the first one matters.
+          // Sent every second while faulted; only the first of each outage
+          // matters.
           if (st.imu_ok) {
             st.imu_ok = false;
+            if (st.subscribed) {
+              send_status(&st);
+            }
+          }
+          break;
+        case BLE_IMU_UP:
+          // The IMU recovered from F1/F2: tell the app with a fresh status.
+          if (!st.imu_ok) {
+            st.imu_ok = true;
             if (st.subscribed) {
               send_status(&st);
             }
