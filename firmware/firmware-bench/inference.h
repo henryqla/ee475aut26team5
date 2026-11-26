@@ -1,16 +1,22 @@
 /*
  * File:        inference.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-24
- * Version:     0.1.5-bench
- * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): inference_add_sample() takes two more arguments,
+ *              the sample's phone time and whether it is synced, so a DET can
+ *              also send an evt whose t uses the offset of the segment that
+ *              holds the peak (CR-4).
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
  *              new file.
  * Description: Live inference: the CNN in model_data.h on a sliding window of
  *              the model channels (z_hp, roll, pitch). dsp feeds every sample
  *              in with inference_add_sample(); every MODEL_HOP samples the
  *              inference task (core 1, below imu_acq and dsp) runs the model
  *              on the last MODEL_WINDOW samples and sends PROB and DET lines to
- *              out_q. serial_out reads the model facts for BOOT and CFG.
+ *              out_q. Each DET also sends one evt (contract 4.2) to ble_q.
+ *              serial_out reads the model facts for BOOT and CFG.
  */
 
 #ifndef INFERENCE_H
@@ -67,10 +73,13 @@ void inference_start(app_ctx_t *ctx);
  * @param roll   Roll rate, dps, bias removed.
  * @param pitch  Pitch rate, dps, bias removed.
  * @param ok     Gyro bias ready (the L line's ok).
+ * @param t_ms   This sample's time on the clock in use for its segment: phone epoch
+ *               ms if synced, else local ms since boot (dsp's to_phone_ms).
+ * @param synced Whether t_ms is phone time (the offset dsp had for this sample).
  * @return None.
  */
 void inference_add_sample(uint32_t n, uint32_t epoch, float z_hp, float roll, float pitch,
-                          bool ok);
+                          bool ok, int64_t t_ms, bool synced);
 
 /**
  * @return The model facts and self-test result (read-only).

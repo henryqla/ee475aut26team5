@@ -1,9 +1,16 @@
 /*
  * File:        types.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-24
- * Version:     0.1.5-bench
- * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): every DET also becomes a contract evt message. Back
+ *              from f3f5e43 (tag pre-manual-overhaul), slimmer: evt_class_t,
+ *              evt_t (only the fields the BLE message needs: no Serial EVT line
+ *              fields, no classifier fields), BLE_EVT and evt in ble_msg_t.
+ *              The inference task now also sends to ble_q, so ble_q_drops in
+ *              sys_msg_t is filled by dsp and inference.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
  *              live inference. New: fault codes F5-F8 (model faults: they
  *              stop inference only, owner 2026-11-24), OUT_PROB / OUT_DET and
  *              their payloads, four inference counters in HLT and heartbeats,
@@ -81,6 +88,30 @@ typedef struct {
   float    pitch_rms;   // RMS of pitch rate, dps
 } seg_t;
 
+// Event class in the evt message (contract 4.2). The model picks POTHOLE or
+// SPEED_BUMP; EVT_UNKNOWN stays only because the contract defines it and is
+// never sent (B4): a model class with no contract name sends no evt.
+typedef enum : uint8_t {
+  EVT_UNKNOWN = 0,
+  EVT_POTHOLE,
+  EVT_BUMP,
+} evt_class_t;
+
+// One event (contract section 4.2), made by the inference task from the window
+// that caused a DET (B1 to B5). Peaks are magnitudes, as before the overhaul.
+// The phone time is fixed here, from the time dsp stored with the peak sample,
+// so the event keeps the offset of the segment that holds its peak (CR-4).
+typedef struct {
+  int64_t     t_ms;            // Peak sample's time: phone epoch ms if synced, else local ms
+  uint32_t    n_peak;          // Sample count (L line n) of the peak sample
+  float       conf;            // The model's probability for cls, 0 to 1
+  float       peak_z_g;        // Largest |z_hp| in the window, g
+  float       peak_roll_dps;   // Largest |roll rate| in the window, dps
+  float       peak_pitch_dps;  // Largest |pitch rate| in the window, dps
+  bool        synced;          // Offset in use when the peak was recorded (CR-4)
+  evt_class_t cls;
+} evt_t;
+
 // BLE link changes, reported by the NimBLE callbacks and printed on Serial.
 typedef enum : uint8_t {
   LINK_ADVERTISING = 0,  // Advertising started after boot (value 0)
@@ -145,7 +176,7 @@ typedef struct {
   uint32_t sample_q_drops;  // Samples imu_acq could not queue
   uint32_t out_q_drops;     // Lines dsp, ble_link and supervisor could not queue
   uint32_t drdy_timeouts;   // Times imu_acq waited DRDY_TIMEOUT_MS with no INT1
-  uint32_t ble_q_drops;     // Segments dsp could not queue for BLE
+  uint32_t ble_q_drops;     // Segments (dsp) and events (inference) ble_q had no room for
   uint32_t ble_sent;        // Notifications sent
   uint32_t ble_fails;       // Notifications that failed or were too long
   uint32_t serial_drops;    // Lines serial_out dropped: USB TX buffer full (no host reading)
@@ -182,13 +213,15 @@ typedef enum : uint8_t {
   BLE_LINK,             // From the NimBLE callbacks: link changed
   BLE_IMU_DOWN,         // From supervisor, each second while faulted
   BLE_IMU_UP,           // From supervisor, once when the IMU recovers
+  BLE_EVT,              // From inference: send as an evt message (request H)
 } ble_tag_t;
 
-// Item type of ble_q (dsp, NimBLE callbacks, supervisor -> ble_link).
+// Item type of ble_q (dsp, inference, NimBLE callbacks, supervisor -> ble_link).
 typedef struct {
   ble_tag_t tag;            // Says which union member is valid
   union {
     seg_t  seg;
+    evt_t  evt;
     link_t link;
   };
 } ble_msg_t;
@@ -230,7 +263,7 @@ typedef struct {
   uint32_t     sample_q_drops;  // imu_acq
   uint32_t     imu_recoveries;  // imu_acq
   uint32_t     out_q_drops;     // dsp, ble_link, inference
-  uint32_t     ble_q_drops;     // dsp
+  uint32_t     ble_q_drops;     // dsp (segments), inference (events)
   uint32_t     ble_sent;        // ble_link
   uint32_t     ble_fails;       // ble_link
   uint32_t     serial_drops;    // serial_out

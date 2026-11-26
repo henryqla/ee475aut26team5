@@ -1,9 +1,17 @@
 /*
  * File:        inference.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-24
- * Version:     0.1.5-bench
- * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): every DET also queues one evt for ble_link (B1 to
+ *              B5). New: two rings beside the sample ring (each sample's phone
+ *              time and synced flag, from dsp), the model-class to evt-class
+ *              map, the peak scan of the copied window, the evt send to ble_q
+ *              (zero wait, drops counted in ble_q_drops of the heartbeat).
+ *              inference_add_sample() has two more arguments. PROB, DET, the
+ *              rule for a DET and the lockout are unchanged.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
  *              new file.
  * Adapted from: the model load, schema check and op resolver of
  *              examples/hello_world/main/main_functions.cc in
@@ -46,6 +54,17 @@
  *              DET_CONF, and DET_LOCKOUT_MS has passed since the last DET
  *              (counted in samples), it also sends DET. train.py's streaming
  *              test uses the same rule.
+ *
+ *              evt (request H). On a DET, from the window just copied: the
+ *              sample with the largest |z_hp| gives n_peak and, from the ring
+ *              dsp filled, the phone time t_ms and synced flag it had in its
+ *              own segment (B1, CR-4); peak_z, roll_peak and pitch_peak are
+ *              the largest magnitude of each channel in the window (B2);
+ *              conf is the picked class's probability (B5). The evt_t goes to
+ *              ble_q at once with zero wait (B3); a full queue drops it and
+ *              counts it. No JSON here: ble_link formats it on core 0. A model
+ *              class with no contract name (not POTHOLE or SPEED_BUMP) still
+ *              prints DET but sends no evt (B4: unknown is never sent).
  *
  *              Model faults (F5 schema, F6 arena, F7 Invoke, F8 self-test)
  *              stop inference only (owner, 2026-11-24): the task stays alive,
@@ -96,6 +115,8 @@ static_assert(MODEL_TEST_N >= 1, "model_data.h has no self-test windows");
 #define LOCKOUT_SAMPLES   ((uint32_t)((uint64_t)DET_LOCKOUT_MS * IMU_ODR_HZ / 1000))  // 832
 #define CHANNELS_EXPECTED "z_hp,roll,pitch"   // The order dsp writes the ring in
 #define NONE_NAME         "NONE"
+#define POTHOLE_NAME      "POTHOLE"      // Model class names that have a contract class
+#define SPEED_BUMP_NAME   "SPEED_BUMP"   // (docs/data-contract.md 4.2)
 #define CLASSES_TEXT_MAX  64    // "POTHOLE|SPEED_BUMP|NONE" and room to spare
 
 // ============================================================================
@@ -108,7 +129,8 @@ typedef struct {
   uint32_t lat_last_us;
   uint32_t lat_max_us;
   uint32_t out_q_drops;    // PROB / DET lines out_q had no room for
-  bool     have_det;       // false until the first DET
+  uint32_t ble_q_drops;    // evt messages ble_q had no room for
+  bool     have_det;      // false until the first DET
   uint32_t last_det_n;     // n of the last DET
   int64_t  last_hb_us;
 } infer_stats_t;
@@ -123,6 +145,12 @@ alignas(16) static uint8_t s_arena[TENSOR_ARENA_BYTES];
 // Ring of the model channels. Written only by dsp (inference_add_sample);
 // read only by the inference task, in the window dsp handed over.
 static float s_ring[RING_LEN][MODEL_CHANNEL_COUNT];
+
+// Beside the sample ring, same slots, same writer and reader rules: each
+// sample's time as dsp had it when it filtered the sample (phone epoch ms if
+// synced, else local ms), and whether that is phone time. ~9 KB static.
+static int64_t s_ring_ms[RING_LEN];
+static bool    s_ring_synced[RING_LEN];
 
 // Shared between dsp (core 1, writer) and the inference task. Atomics, so
 // neither side ever waits.
@@ -157,6 +185,8 @@ static StaticSemaphore_t s_ready_buf;
 static inference_boot_t s_boot = {};
 static char s_classes_text[CLASSES_TEXT_MAX];
 static uint8_t s_none_index = 0;
+static evt_class_t s_evt_class[MODEL_CLASS_COUNT];  // Contract class per model class, set in
+                                                    // load_model(); EVT_UNKNOWN sends no evt
 static tflite::MicroMutableOpResolver<OP_COUNT> s_resolver;
 static tflite::MicroInterpreter *s_interp = NULL;
 
@@ -194,10 +224,12 @@ void inference_start(app_ctx_t *ctx) {
 }
 
 void inference_add_sample(uint32_t n, uint32_t epoch, float z_hp, float roll, float pitch,
-                          bool ok) {
+                          bool ok, int64_t t_ms, bool synced) {
   s_ring[s_wr][0] = z_hp;
   s_ring[s_wr][1] = roll;
   s_ring[s_wr][2] = pitch;
+  s_ring_ms[s_wr] = t_ms;
+  s_ring_synced[s_wr] = synced;
   s_wr = (s_wr + 1) % RING_LEN;
   s_written.store(s_written.load(std::memory_order_relaxed) + 1, std::memory_order_release);
 
@@ -287,6 +319,14 @@ static fault_code_t load_model(void) {
     if (strcmp(g_model_class_names[k], NONE_NAME) == 0) {
       s_none_index = k;
       have_none = true;
+    }
+    // Which contract class this model class is (B4); anything else sends no evt.
+    if (strcmp(g_model_class_names[k], POTHOLE_NAME) == 0) {
+      s_evt_class[k] = EVT_POTHOLE;
+    } else if (strcmp(g_model_class_names[k], SPEED_BUMP_NAME) == 0) {
+      s_evt_class[k] = EVT_BUMP;
+    } else {
+      s_evt_class[k] = EVT_UNKNOWN;
     }
   }
   if (!have_none || strcmp(MODEL_CHANNELS, CHANNELS_EXPECTED) != 0) {
@@ -382,8 +422,8 @@ static void send_out(QueueHandle_t out_q, const out_msg_t *m, uint32_t *drops) {
 }
 
 /**
- * Runs the model on the window dsp handed over, then sends PROB (and DET).
- * Clears the busy flag when done.
+ * Runs the model on the window dsp handed over, then sends PROB (and, on a
+ * detection, DET and its evt). Clears the busy flag when done.
  * @param ctx  For out_q.
  * @param st   This task's counters.
  * @return None.
@@ -399,8 +439,31 @@ static void run_window(const app_ctx_t *ctx, infer_stats_t *st) {
   const uint32_t first = (RING_LEN - start < MODEL_WINDOW) ? RING_LEN - start : MODEL_WINDOW;
   memcpy(dst, s_ring[start], first * sizeof(s_ring[0]));
   memcpy(dst + first * MODEL_CHANNEL_COUNT, s_ring[0], (MODEL_WINDOW - first) * sizeof(s_ring[0]));
+
+  // Peaks of the window (B1, B2), found on the copy and before Invoke(), which
+  // may reuse the input buffer. Magnitudes, as before the overhaul. The sample
+  // with the largest |z_hp| is the event's peak (the first one on a tie). Its
+  // time comes from the ring slot it was copied from.
+  float peak_z = 0.0f;
+  float peak_roll = 0.0f;
+  float peak_pitch = 0.0f;
+  uint32_t peak_i = 0;  // Index in the window, oldest = 0
+  for (uint32_t i = 0; i < MODEL_WINDOW; i++) {
+    const float *row = dst + i * MODEL_CHANNEL_COUNT;  // z_hp, roll, pitch
+    const float az = fabsf(row[0]);
+    if (az > peak_z) {
+      peak_z = az;
+      peak_i = i;
+    }
+    peak_roll = fmaxf(peak_roll, fabsf(row[1]));
+    peak_pitch = fmaxf(peak_pitch, fabsf(row[2]));
+  }
+  const uint32_t peak_slot = (start + peak_i) % RING_LEN;
+  const int64_t peak_t_ms = s_ring_ms[peak_slot];
+  const bool peak_synced = s_ring_synced[peak_slot];
+
   // dsp overwrites the window's oldest sample MODEL_HOP + 1 samples after its
-  // end. If that happened during the copy, drop the window.
+  // end. If that happened during the copy or the peak time read, drop the window.
   if (s_written.load(std::memory_order_acquire) - end_written > MODEL_HOP) {
     s_skips.fetch_add(1, std::memory_order_relaxed);
     s_busy.store(false, std::memory_order_release);
@@ -447,6 +510,26 @@ static void run_window(const app_ctx_t *ctx, infer_stats_t *st) {
     send_out(ctx->out_q, &d, &st->out_q_drops);
     st->have_det = true;
     st->last_det_n = n;
+
+    // The same detection goes to the app as an evt (B3): a plain struct to
+    // ble_q, never waiting. The window has no gaps (dsp only hands over runs of
+    // consecutive n), so the peak's n follows from its index. A class with no
+    // contract name sends nothing (B4).
+    if (s_evt_class[top] != EVT_UNKNOWN) {
+      ble_msg_t b = {};
+      b.tag = BLE_EVT;
+      b.evt.t_ms = peak_t_ms;
+      b.evt.n_peak = n - (MODEL_WINDOW - 1) + peak_i;
+      b.evt.conf = p[top];
+      b.evt.peak_z_g = peak_z;
+      b.evt.peak_roll_dps = peak_roll;
+      b.evt.peak_pitch_dps = peak_pitch;
+      b.evt.synced = peak_synced;
+      b.evt.cls = s_evt_class[top];
+      if (xQueueSend(ctx->ble_q, &b, 0) != pdTRUE) {
+        st->ble_q_drops++;
+      }
+    }
   }
   s_busy.store(false, std::memory_order_release);
 }
@@ -469,6 +552,7 @@ static void heartbeat_if_due(const app_ctx_t *ctx, infer_stats_t *st) {
   hb.task = TASK_INFERENCE;
   hb.fault = inference_fault();
   hb.out_q_drops = st->out_q_drops;
+  hb.ble_q_drops = st->ble_q_drops;
   hb.inferences = st->inferences;
   hb.inf_skips = s_skips.load(std::memory_order_relaxed);
   hb.lat_last_us = st->lat_last_us;

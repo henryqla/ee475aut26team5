@@ -1,9 +1,14 @@
 /*
  * File:        config.h
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-24
- * Version:     0.1.5-bench
- * Change:      0.1.5-bench (training-live-inference-handoff.md, request F;
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): every DET also goes to the app as an evt message.
+ *              FW_VERSION is 0.2.0-bench (B10). DET_LOCKOUT_MS is still 2000
+ *              (set in 0.1.5-bench; now B7); DET_CONF stays 0.60 (B8). Comments
+ *              only otherwise: BLE_Q_LEN now also carries events.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F;
  *              owner, 2026-11-24): live inference. New: DET_CONF,
  *              DET_LOCKOUT_MS (2000, owner), TENSOR_ARENA_BYTES, SELFTEST_TOL,
  *              INFER_STACK_BYTES, INFER_READY_TIMEOUT_MS, PRIO_INFERENCE and
@@ -40,7 +45,7 @@
 // Macros: firmware identity
 // ============================================================================
 
-#define FW_VERSION            "0.1.5-bench"  // Printed in BOOT and sent in status. Must not
+#define FW_VERSION            "0.2.0-bench"  // Printed in BOOT and sent in status. Must not
                                              // start with "fake". Bench trips upload as REAL
                                              // and Ben deletes them by this version, so tell
                                              // Henry before changing it
@@ -108,9 +113,11 @@
                                        // or SPEED_BUMP with at least this probability. Set by
                                        // hand from train.py's cutoff table; a new model never
                                        // changes it
-#define DET_LOCKOUT_MS        2000     // DECIDED (owner, 2026-11-24). After a DET, the next one
-                                       // only once at least this long has passed, counted in
-                                       // samples (832 at 416 Hz). train.py's streaming test uses
+#define DET_LOCKOUT_MS        2000     // DECIDED (owner, 2026-11-24; B7). After a DET, the next
+                                       // one only once at least this long has passed, counted in
+                                       // samples (832 at 416 Hz). A bump stays in the 2 s window
+                                       // for about 2 s, so this gives one DET, and one evt to
+                                       // the app, per pothole. train.py's streaming test uses
                                        // the same rule (cnn_config.DET_LOCKOUT_S)
 #define TENSOR_ARENA_BYTES    65536    // DRAFT (F2). Static, internal RAM. BOOT prints the bytes
                                        // the model actually used (arena_used)
@@ -154,7 +161,8 @@
 #define OUT_Q_LEN             256      // DRAFT (L3). ~0.6 s of L lines, ~64 bytes per item
                                        // (~16 KB). Check out_q_drops in HLT
 #define SYS_Q_LEN             16       // DRAFT. From the architecture doc
-#define BLE_Q_LEN             16       // DRAFT. ~1 item/s from dsp plus link changes
+#define BLE_Q_LEN             16       // DRAFT. ~1 item/s from dsp plus link changes, and one evt
+                                       // per DET (at most one per DET_LOCKOUT_MS)
 
 // ============================================================================
 // Macros: tasks

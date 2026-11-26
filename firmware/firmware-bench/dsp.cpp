@@ -1,9 +1,14 @@
 /*
  * File:        dsp.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-24
- * Version:     0.1.5-bench
- * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner,
+ *              2026-11-25): inference_add_sample() also gets each sample's
+ *              phone time (to_phone_ms with the offset in use for its
+ *              segment) and phone.synced, so an evt keeps the offset of the
+ *              segment that holds its peak (CR-4). Nothing else changed.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
  *              every sample's z_hp, roll and pitch (the values of its L line)
  *              also go to inference_add_sample(), which fills the inference
  *              ring buffer and wakes the inference task every MODEL_HOP
@@ -326,8 +331,12 @@ void dsp_task(void *param) {
       }
       seg_add(&seg, &s, z_hp, &car);
 
-      // Live inference gets exactly the values of the L line. It never waits.
-      inference_add_sample(s.n, s.epoch, z_hp, car.roll_dps, car.pitch_dps, bias.ready);
+      // Live inference gets exactly the values of the L line, plus this sample's
+      // phone time with the offset in use for its segment (phone was updated
+      // above, between segments, so it never mixes two offsets: CR-4). It
+      // never waits.
+      inference_add_sample(s.n, s.epoch, z_hp, car.roll_dps, car.pitch_dps, bias.ready,
+                           to_phone_ms(&phone, s.t_us), phone.synced);
 
       // Every sample goes out as an L line, without waiting. A full out_q
       // drops it and counts out_q_drops, so every lost sample shows up as a

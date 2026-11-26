@@ -1,9 +1,15 @@
 /*
  * File:        supervisor.cpp
  * Authors:     Henry (owner); first draft written with Claude
- * Date:        2026-11-24
- * Version:     0.1.5-bench
- * Change:      0.1.5-bench (training-live-inference-handoff.md, request F):
+ * Date:        2026-11-25
+ * Version:     0.2.0-bench
+ * Change:      0.2.0-bench (ble-event-link-handoff.md, request H; owner
+ *              approved this file's edit, 2026-11-25): the inference task now
+ *              also sends evt messages to ble_q and reports its drops in its
+ *              heartbeat's ble_q_drops. HLT's ble_q_drops is now dsp's plus
+ *              inference's, so a lost evt shows in HLT (B14, BLE-6). Nothing
+ *              else changed.
+ *              0.1.5-bench (training-live-inference-handoff.md, request F):
  *              the inference task is a fifth heartbeat sender. Its counters
  *              (inferences, inf_skips, last and longest Invoke time) go into
  *              HLT, and its out_q drops into out_q_drops. A model fault
@@ -90,7 +96,8 @@ void supervisor_task(void *param) {
   uint32_t drdy_timeouts = 0;
   uint32_t dsp_out_q_drops = 0;
   uint32_t ble_out_q_drops = 0;
-  uint32_t ble_q_drops = 0;
+  uint32_t dsp_ble_q_drops = 0;  // Segments dsp could not queue for BLE
+  uint32_t inf_ble_q_drops = 0;  // Events the inference task could not queue for BLE
   uint32_t ble_sent = 0;
   uint32_t ble_fails = 0;
   uint32_t serial_drops = 0;
@@ -153,7 +160,7 @@ void supervisor_task(void *param) {
         imu_recoveries = m.imu_recoveries;
       } else if (m.task == TASK_DSP) {
         dsp_out_q_drops = m.out_q_drops;
-        ble_q_drops = m.ble_q_drops;
+        dsp_ble_q_drops = m.ble_q_drops;
       } else if (m.task == TASK_BLE_LINK) {
         ble_out_q_drops = m.out_q_drops;
         ble_sent = m.ble_sent;
@@ -162,6 +169,7 @@ void supervisor_task(void *param) {
         serial_drops = m.serial_drops;
       } else if (m.task == TASK_INFERENCE) {
         inf_out_q_drops = m.out_q_drops;
+        inf_ble_q_drops = m.ble_q_drops;
         inferences = m.inferences;
         inf_skips = m.inf_skips;
         lat_last_us = m.lat_last_us;
@@ -203,7 +211,7 @@ void supervisor_task(void *param) {
       out.hlt.out_q_drops = dsp_out_q_drops + ble_out_q_drops + inf_out_q_drops +
                             own_out_q_drops;
       out.hlt.drdy_timeouts = drdy_timeouts;
-      out.hlt.ble_q_drops = ble_q_drops;
+      out.hlt.ble_q_drops = dsp_ble_q_drops + inf_ble_q_drops;
       out.hlt.ble_sent = ble_sent;
       out.hlt.ble_fails = ble_fails;
       out.hlt.serial_drops = serial_drops;
